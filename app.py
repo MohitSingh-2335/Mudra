@@ -9,6 +9,7 @@ import ta
 import plotly.graph_objects as go
 from binance.client import Client
 from src.feature_engineering import create_features
+from config import XGB_FEATURES, SVC_FEATURES
 
 st.set_page_config(page_title="BTC Predictor Suite", layout="wide")
 
@@ -84,8 +85,8 @@ if app_mode == "Live Prediction (Binance)":
         st.header("Prediction for the Current Hour")
         prediction_input = live_df.iloc[-2]
 
-        reg_features = ['volume', 'Price Change', 'Rolling_Std_Close', 'vol_1h', 'vol_mean_6h', 'vol_std_6h', 'vol_max_6h', 'vol_min_6h', 'hour', 'dayofweek', 'day', 'rsi', 'high_low_ratio', 'hour_sin', 'hour_cos', 'day_sin', 'day_cos']
-        clf_features = ['volume', 'Price Change', 'Volatility', 'Rolling_Mean_Close', 'Rolling_Std_Close', 'vol_mean_6h', 'vol_std_6h', 'vol_max_6h', 'vol_min_6h', 'return_mean_6h', 'return_std_6h', 'hour', 'dayofweek', 'day', 'rsi', 'macd', 'bb_high', 'bb_low', 'ema_10', 'ema_30', 'high_low_ratio', 'close_open_diff', 'close_lag_1', 'volume_lag_1', 'rolling_max_6h', 'rolling_min_6h', 'price_volatility_interaction', 'hour_sin', 'hour_cos', 'day_sin', 'day_cos']
+        reg_features = XGB_FEATURES
+        clf_features = SVC_FEATURES
         
         input_reg = pd.DataFrame([prediction_input[reg_features]], columns=reg_features)
         input_clf = pd.DataFrame([prediction_input[clf_features]], columns=clf_features)
@@ -138,8 +139,8 @@ elif app_mode == "Simulation from File":
 
     st.header("Prediction for the Next Hour")
     current_data = sim_df.loc[st.session_state.current_index]
-    reg_features = ['volume', 'Price Change', 'Rolling_Std_Close', 'vol_1h', 'vol_mean_6h', 'vol_std_6h', 'vol_max_6h', 'vol_min_6h', 'hour', 'dayofweek', 'day', 'rsi', 'high_low_ratio', 'hour_sin', 'hour_cos', 'day_sin', 'day_cos']
-    clf_features = ['volume', 'Price Change', 'Volatility', 'Rolling_Mean_Close', 'Rolling_Std_Close', 'vol_mean_6h', 'vol_std_6h', 'vol_max_6h', 'vol_min_6h', 'return_mean_6h', 'return_std_6h', 'hour', 'dayofweek', 'day', 'rsi', 'macd', 'bb_high', 'bb_low', 'ema_10', 'ema_30', 'high_low_ratio', 'close_open_diff', 'close_lag_1', 'volume_lag_1', 'rolling_max_6h', 'rolling_min_6h', 'price_volatility_interaction', 'hour_sin', 'hour_cos', 'day_sin', 'day_cos']
+    reg_features = XGB_FEATURES
+    clf_features = SVC_FEATURES
     
     input_reg = pd.DataFrame([current_data[reg_features]], columns=reg_features)
     input_clf = pd.DataFrame([current_data[clf_features]], columns=clf_features)
@@ -189,9 +190,9 @@ elif app_mode == "Manual Prediction":
             bb_low = bb.bollinger_lband().iloc[-1]
             ema_10 = ta.trend.EMAIndicator(close=close_series, window=10).ema_indicator().iloc[-1]
             ema_30 = ta.trend.EMAIndicator(close=close_series, window=30).ema_indicator().iloc[-1]
-            reg_features = ['volume', 'Price Change', 'Rolling_Std_Close', 'vol_1h', 'vol_mean_6h', 'vol_std_6h', 'vol_max_6h', 'vol_min_6h', 'hour', 'dayofweek', 'day', 'rsi', 'high_low_ratio', 'hour_sin', 'hour_cos', 'day_sin', 'day_cos']
+            reg_features = XGB_FEATURES
             input_reg = pd.DataFrame([[volume, price_change, 0, high_price - low_price, 0, 0, 0, 0, hour, dayofweek, day, rsi, high_low_ratio, hour_sin, hour_cos, day_sin, day_cos]], columns=reg_features)
-            clf_features = ['volume', 'Price Change', 'Volatility', 'Rolling_Mean_Close', 'Rolling_Std_Close', 'vol_mean_6h', 'vol_std_6h', 'vol_max_6h', 'vol_min_6h', 'return_mean_6h', 'return_std_6h', 'hour', 'dayofweek', 'day', 'rsi', 'macd', 'bb_high', 'bb_low', 'ema_10', 'ema_30', 'high_low_ratio', 'close_open_diff', 'close_lag_1', 'volume_lag_1', 'rolling_max_6h', 'rolling_min_6h', 'price_volatility_interaction', 'hour_sin', 'hour_cos', 'day_sin', 'day_cos']
+            clf_features = SVC_FEATURES
             input_clf = pd.DataFrame([[volume, price_change, volatility, close_price, 0, 0, 0, 0, 0, 0, 0, hour, dayofweek, day, rsi, macd, bb_high, bb_low, ema_10, ema_30, high_low_ratio, close_open_diff, close_price, volume, high_price, low_price, close_price * volatility, hour_sin, hour_cos, day_sin, day_cos]], columns=clf_features)
             
             pred_price = xgb_pipeline.predict(input_reg)[0]
