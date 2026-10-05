@@ -41,3 +41,6 @@ find_best_models.py
 #Extra 
 backtesting
 report
+
+#Real env
+.env
