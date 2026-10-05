@@ -191,10 +191,45 @@ elif app_mode == "Manual Prediction":
             ema_10 = ta.trend.EMAIndicator(close=close_series, window=10).ema_indicator().iloc[-1]
             ema_30 = ta.trend.EMAIndicator(close=close_series, window=30).ema_indicator().iloc[-1]
             reg_features = XGB_FEATURES
-            input_reg = pd.DataFrame([[volume, price_change, 0, high_price - low_price, 0, 0, 0, 0, hour, dayofweek, day, rsi, high_low_ratio, hour_sin, hour_cos, day_sin, day_cos]], columns=reg_features)
+            input_reg = pd.DataFrame([{
+                    'volume': volume,
+                    'Price Change': price_change,
+                    'Rolling_Std_Close': 0,
+                    'vol_1h': high_price - low_price,
+                    'vol_mean_6h': 0, 'vol_std_6h': 0, 'vol_max_6h': 0, 'vol_min_6h': 0,
+                    'hour': hour, 'dayofweek': dayofweek, 'day': day,
+                    'rsi': rsi, 'high_low_ratio': high_low_ratio,
+                    'hour_sin': hour_sin, 'hour_cos': hour_cos,
+                    'day_sin': day_sin, 'day_cos': day_cos,
+                    'close_lag_1': close_price,
+                    'taker_buy_ratio': 0, 'taker_buy_ratio_mean_6h': 0, 'trades_mean_6h': 0,
+                    'fng_value': 50, 'fng_mean_3d': 50,
+                    'onchain_num_tx_change': 0, 'onchain_hash_rate_change': 0,
+                    'onchain_miners_revenue_change': 0,
+                    'sentiment_score': 0, 'sentiment_mean_3d': 0
+                }])[XGB_FEATURES]
             clf_features = SVC_FEATURES
-            input_clf = pd.DataFrame([[volume, price_change, volatility, close_price, 0, 0, 0, 0, 0, 0, 0, hour, dayofweek, day, rsi, macd, bb_high, bb_low, ema_10, ema_30, high_low_ratio, close_open_diff, close_price, volume, high_price, low_price, close_price * volatility, hour_sin, hour_cos, day_sin, day_cos]], columns=clf_features)
-            
+            input_clf = pd.DataFrame([{
+                    'volume': volume, 'Price Change': price_change,
+                    'Volatility': volatility, 'Rolling_Mean_Close': close_price,
+                    'Rolling_Std_Close': 0, 'vol_mean_6h': 0, 'vol_std_6h': 0,
+                    'vol_max_6h': 0, 'vol_min_6h': 0, 'return_mean_6h': 0, 'return_std_6h': 0,
+                    'hour': hour, 'dayofweek': dayofweek, 'day': day,
+                    'rsi': rsi, 'macd': macd, 'bb_high': bb_high, 'bb_low': bb_low,
+                    'ema_10': ema_10, 'ema_30': ema_30,
+                    'high_low_ratio': high_low_ratio, 'close_open_diff': close_open_diff,
+                    'close_lag_1': close_price, 'volume_lag_1': volume,
+                    'rolling_max_6h': high_price, 'rolling_min_6h': low_price,
+                    'price_volatility_interaction': close_price * volatility,
+                    'hour_sin': hour_sin, 'hour_cos': hour_cos,
+                    'day_sin': day_sin, 'day_cos': day_cos,
+                    'taker_buy_ratio': 0, 'taker_buy_ratio_mean_6h': 0, 'trades_mean_6h': 0,
+                    'fng_value': 50, 'fng_mean_3d': 50,
+                    'onchain_num_tx_change': 0, 'onchain_hash_rate_change': 0,
+                    'onchain_miners_revenue_change': 0,
+                    'sentiment_score': 0, 'sentiment_mean_3d': 0
+                }])[SVC_FEATURES]
+
             pred_price = xgb_pipeline.predict(input_reg)[0]
             scaled_input_svc = scaler.transform(input_clf)
             pred_move_code = svc_model.predict(scaled_input_svc)[0]
