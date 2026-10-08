@@ -11,14 +11,15 @@ venv/
 env/
 stock_pred
 
-# Large data files (too big for GitHub, we fetch live data anyway)
+# Generated data files (too large and reproducible from the pipeline)
 data/*.csv
 data/*.parquet
+data/raw/*
+data/processed/*
+data/results/*
 
 # Trained model files (we retrain from scratch)
-models/*.pkl
-models/*.pt
-models/*.h5
+artifacts/models/
 
 # Secrets (API keys - NEVER on GitHub)
 .streamlit/secrets.toml
@@ -34,13 +35,11 @@ Thumbs.db
 # VS Code settings (personal, not project-related)
 .vscode/
 
-#Extra code for learning purpose
-fetch_fresh_data.py
-find_best_models.py
-
-#Extra 
-backtesting
-report
+# Local planning documents that are not part of the public source repository
+archive/planning/*.docx
+archive/planning/*.txt
+docs/reference/*.docx
+docs/reference/BOT-requirement.txt
 
 #Real env
 .env
