@@ -7,7 +7,7 @@ from src.agents.onchain_agent import merge_onchain
 from src.agents.sentiment_agent import merge_sentiment
 import os
 
-def preprocess_and_save_featured_data(input_path='data/BTCUSDT-1H.csv', output_path='data/featured_btc_data.csv'):
+def preprocess_and_save_featured_data(input_path='data/raw/BTCUSDT-1H.csv', output_path='data/processed/featured_btc_data.csv'):
     """
     Loads raw data, engineers all features, and saves the result to a new CSV file.
     """
