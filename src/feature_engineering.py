@@ -96,11 +96,11 @@ def create_features(df):
     # change is more likely to carry hourly-relevant signal. Same
     # daily-into-hourly granularity caveat as fng_value applies here too.
     if 'onchain_num_tx' in df.columns:
-        df['onchain_num_tx_change'] = df['onchain_num_tx'].pct_change()
+        df['onchain_num_tx_change'] = df['onchain_num_tx'].pct_change(fill_method=None)
     if 'onchain_hash_rate' in df.columns:
-        df['onchain_hash_rate_change'] = df['onchain_hash_rate'].pct_change()
+        df['onchain_hash_rate_change'] = df['onchain_hash_rate'].pct_change(fill_method=None)
     if 'onchain_miners_revenue_usd' in df.columns:
-        df['onchain_miners_revenue_change'] = df['onchain_miners_revenue_usd'].pct_change()
+        df['onchain_miners_revenue_change'] = df['onchain_miners_revenue_usd'].pct_change(fill_method=None)
 
     # Sentiment — daily FinBERT score broadcast from merge_sentiment().
     # Same daily-into-hourly granularity caveat as fng_value/onchain applies.

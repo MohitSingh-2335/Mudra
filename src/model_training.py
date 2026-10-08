@@ -14,10 +14,10 @@ from src.data_preprocessing import load_and_clean_data
 from src.feature_engineering import create_features
 from src.agents.fear_greed_agent import merge_fear_greed
 from src.agents.onchain_agent import merge_onchain
-from config import XGB_FEATURES, SVC_FEATURES
-from src.agents.fear_greed_agent import merge_fear_greed
+from src.agents.sentiment_agent import merge_sentiment
+from config import XGB_FEATURES, SVC_FEATURES, MODELS_DIR
 
-def train_and_save_models(data_path, models_dir="artifacts/models"):
+def train_and_save_models(data_path, models_dir=MODELS_DIR):
     """
     Loads data, engineers features, trains the best models (XGBoost and SVC),
     and saves them.
@@ -27,6 +27,7 @@ def train_and_save_models(data_path, models_dir="artifacts/models"):
     print("Data loaded and cleaned.")
     df = merge_fear_greed(df, timestamp_col='timestamp')
     df = merge_onchain(df, timestamp_col='timestamp')
+    df = merge_sentiment(df)
     df = create_features(df)
     print("Features engineered.")
 
