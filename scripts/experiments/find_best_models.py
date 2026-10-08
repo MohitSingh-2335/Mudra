@@ -17,7 +17,7 @@ from xgboost import XGBRegressor, XGBClassifier
 
 from src.data_preprocessing import load_and_clean_data
 from src.feature_engineering import create_features
-from config import XGB_FEATURES, SVC_FEATURES
+from config import XGB_FEATURES, SVC_FEATURES, BTCUSDT_1H_CSV
 
 
 def chronological_split(X, y, test_size=0.2):
@@ -138,7 +138,7 @@ def compare_classifiers(df):
 
 def main():
     print("Loading and preparing data...")
-    df = load_and_clean_data('data/raw/BTCUSDT-1H.csv')
+    df = load_and_clean_data(BTCUSDT_1H_CSV)
     df = create_features(df)
     print(f"Data ready: {len(df)} rows after feature engineering.")
 
