@@ -107,7 +107,7 @@ def compute_metrics(equity_curve_df, trade_log_df, test_df):
 
 def main(threshold=0.5):
     print("Loading data and training classifier...")
-    df = create_features(merge_onchain(merge_fear_greed(load_and_clean_data('data/BTCUSDT-1H.csv')))).reset_index(drop=True)
+    df = create_features(merge_onchain(merge_fear_greed(load_and_clean_data('data/raw/BTCUSDT-1H.csv')))).reset_index(drop=True)
     split_idx = int(len(df) * 0.8)
     test_df = df.iloc[split_idx:].reset_index(drop=True)
 
@@ -131,9 +131,9 @@ def main(threshold=0.5):
     print(f"Fee rate           : {FEE_RATE*100:.2f}% per side")
     print("\n✅ Beat Buy & Hold" if m['total_return_pct'] > m['buy_hold_return_pct'] else "\n⚠️  Did NOT beat Buy & Hold")
 
-    trade_log_df.to_csv('data/backtest_trade_log.csv', index=False)
-    equity_curve_df.to_csv('data/backtest_equity_curve.csv', index=False)
-    print("Saved: data/backtest_trade_log.csv, data/backtest_equity_curve.csv")
+    trade_log_df.to_csv('data/results/backtest_trade_log.csv', index=False)
+    equity_curve_df.to_csv('data/results/backtest_equity_curve.csv', index=False)
+    print("Saved: data/results/backtest_trade_log.csv, data/results/backtest_equity_curve.csv")
 
 
 if __name__ == '__main__':

@@ -18,11 +18,11 @@ st.set_page_config(page_title="BTC Predictor Suite", layout="wide")
 def load_models_and_data():
     """Load models and the pre-featured static data file."""
     try:
-        xgb_model = joblib.load('models/best_xgb_model.pkl')
-        svc_model = joblib.load('models/best_svc_model.pkl')
-        scaler = joblib.load('models/scaler.pkl')
+        xgb_model = joblib.load('artifacts/models/best_xgb_model.pkl')
+        svc_model = joblib.load('artifacts/models/best_svc_model.pkl')
+        scaler = joblib.load('artifacts/models/scaler.pkl')
         # Load the data for the simulation page
-        sim_data = pd.read_csv('data/featured_btc_data.csv', parse_dates=['timestamp'])
+        sim_data = pd.read_csv('data/processed/featured_btc_data.csv', parse_dates=['timestamp'])
         return xgb_model, svc_model, scaler, sim_data
     except FileNotFoundError as e:
         st.error(f"🚨 A required file is missing: {e}. Please ensure all model and data files are present.")

@@ -17,7 +17,7 @@ from src.agents.onchain_agent import merge_onchain
 from config import XGB_FEATURES, SVC_FEATURES
 from src.agents.fear_greed_agent import merge_fear_greed
 
-def train_and_save_models(data_path, models_dir="models"):
+def train_and_save_models(data_path, models_dir="artifacts/models"):
     """
     Loads data, engineers features, trains the best models (XGBoost and SVC),
     and saves them.
@@ -147,4 +147,4 @@ def train_and_save_models(data_path, models_dir="models"):
     print("    Any numbers you saw before this fix should be treated as invalid.")
 
 if __name__ == '__main__':
-    train_and_save_models(data_path='data/BTCUSDT-1H.csv')
+    train_and_save_models(data_path='data/raw/BTCUSDT-1H.csv')

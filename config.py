@@ -6,10 +6,10 @@
 
 #Path
 
-XGB_MODEL_PATH = 'models/best_xgb_model.pkl'
-LSTM_MODEL_PATH = 'models/patchtst_weights.pt'
-SVC_MODEL_PATH = 'models/best_svc_model.pkl'
-SCALER_PATH = 'models/scaler.pkl'
+XGB_MODEL_PATH = 'artifacts/models/best_xgb_model.pkl'
+LSTM_MODEL_PATH = 'artifacts/models/patchtst_weights.pt'
+SVC_MODEL_PATH = 'artifacts/models/best_svc_model.pkl'
+SCALER_PATH = 'artifacts/models/scaler.pkl'
 
 #Assets (for now we need to increase this later)
 
