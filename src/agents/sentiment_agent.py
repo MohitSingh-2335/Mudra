@@ -7,8 +7,9 @@
 
 import requests
 import pandas as pd
+import time
 
-NEWS_URL = "https://min-api.cryptocompare.com/data/v2/news/"
+NEWS_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 _pipeline = None
 
 
@@ -25,25 +26,45 @@ def _get_pipeline():
         )
     return _pipeline
 
-
-def fetch_headlines(categories="BTC", lang="EN"):
-    """CryptoCompare's free tier has no historical date-range param —
-    returns whatever is currently in the feed (typically last few days)."""
-    try:
-        resp = requests.get(
-            NEWS_URL, params={"categories": categories, "lang": lang}, timeout=10
-        )
-        resp.raise_for_status()
-        data = resp.json().get("Data", [])
-        if not data:
-            return None
-        df = pd.DataFrame(data)[["published_on", "title"]]
-        df["date"] = pd.to_datetime(df["published_on"], unit="s").dt.date
-        return df[["date", "title"]]
-    except Exception as e:
-        print(f"[sentiment_agent] fetch failed: {e}")
-        return None
-
+def fetch_headlines(query="bitcoin", maxrecords=100, max_retries=4):
+    """GDELT DOC 2.0 API — free, no auth, no signup. Returns recent
+    articles (typically last few days of coverage). GDELT rate-limits
+    requests without a User-Agent and on rapid retries."""
+    headers = {"User-Agent": "Mozilla/5.0 (research script; AI_Trading_Suite)"}
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(
+                NEWS_URL,
+                params={
+                    "query": f"{query} sourcelang:english",
+                    "mode": "ArtList",
+                    "maxrecords": maxrecords,
+                    "format": "json",
+                    "sort": "DateDesc",
+                },
+                headers=headers,
+                timeout=30,
+            )
+            if resp.status_code == 429:
+                wait = 5 * (attempt + 1)
+                print(f"[sentiment_agent] 429 rate limited, retrying in {wait}s...")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            articles = resp.json().get("articles", [])
+            if not articles:
+                raise RuntimeError("NO articles")
+            df = pd.DataFrame(articles)[["seendate", "title"]]
+            df["date"] = pd.to_datetime(df["seendate"], format="%Y%m%dT%H%M%SZ").dt.date
+            return df[["date", "title"]]
+        except requests.exceptions.Timeout:
+            wait = 5 * (attempt + 1)
+            print(f"[sentiment_agent] timed out, retrying in {wait}s...")
+            time.sleep(wait)
+            continue
+        except Exception as e:
+            raise RuntimeError(f"[sentiment_agent] fetch failed: {e}")
+    raise RuntimeError("[sentiment_agent] gave up after retries.")
 
 def score_headlines(headlines_df):
     """Per-day mean(P(positive) - P(negative)), range [-1, 1]."""
@@ -58,21 +79,15 @@ def score_headlines(headlines_df):
         out["score"] = signed
         return out.groupby("date")["score"].mean().reset_index(name="sentiment_score")
     except Exception as e:
-        print(f"[sentiment_agent] scoring failed: {e}")
-        return None
+        raise RuntimeError(f"[sentiment_agent] scoring failed: {e}")
 
 
 def merge_sentiment(df):
     """Merges daily sentiment_score into hourly OHLCV df by date.
-    Fails soft: returns df unchanged on any fetch/scoring failure."""
+    If in any process any problem came it will stop all the process and raise RuntimeError."""
     headlines = fetch_headlines()
-    if headlines is None:
-        print("[sentiment_agent] no headlines — skipping sentiment_score feature.")
-        return df
 
     daily = score_headlines(headlines)
-    if daily is None:
-        return df
 
     df = df.copy()
     df["date"] = df["timestamp"].dt.date

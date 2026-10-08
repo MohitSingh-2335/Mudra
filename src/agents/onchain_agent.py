@@ -24,40 +24,36 @@ def _fetch_single_chart(chart_name, timespan="all"):
         df["date"] = pd.to_datetime(df["x"], unit="s").dt.date
         return df[["date", "y"]].rename(columns={"y": chart_name})
     except (requests.RequestException, KeyError, ValueError) as e:
-        print(f"⚠️  onchain_agent failed fetching '{chart_name}' ({e})")
-        return None
+        raise RuntimeError(f"⚠️  onchain_agent failed fetching '{chart_name}' ({e})")
 
 
 def fetch_onchain_metrics(timespan="all", charts=None):
     """
     Fetches and merges all configured on-chain charts into one daily-indexed
-    DataFrame. Returns None only if EVERY chart fails; partial failures just
-    omit that one column (no synthetic default — unlike FNG, there's no
-    sane 'neutral' hash rate or tx count to fall back to).
+    DataFrame. If any required chart fails, the process stops and reports the 
+    failed charts.
     """
     charts = charts or CHARTS
     merged = None
+    failed_charts = []
     for chart_name, col_name in charts.items():
         chart_df = _fetch_single_chart(chart_name, timespan=timespan)
         if chart_df is None:
+            failed_charts.append(chart_name)
             continue
         chart_df = chart_df.rename(columns={chart_name: col_name})
         merged = chart_df if merged is None else merged.merge(chart_df, on="date", how="outer")
+    if failed_charts:
+        raise RuntimeError(f'On-chain data loading failed. These charts are failed to load: {failed_charts}')
     return merged
 
 
 def merge_onchain(df, timestamp_col="timestamp", timespan="all"):
     """
     Daily on-chain values broadcast across all hourly rows on that date.
-    If the fetch fails entirely, returns df unchanged — downstream
-    create_features() only adds onchain_* derived features when the raw
-    columns are present, so a failed fetch just means those features are
-    skipped for this run rather than filled with misleading defaults.
+    If the fetch fails entirely, it will stop the process and raise the error.
     """
     onchain_df = fetch_onchain_metrics(timespan=timespan)
-    if onchain_df is None:
-        print("⚠️  onchain_agent: all charts failed, skipping on-chain features entirely")
-        return df
 
     df = df.copy()
     df["_date"] = pd.to_datetime(df[timestamp_col]).dt.date
