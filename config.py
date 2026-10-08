@@ -10,6 +10,9 @@ XGB_MODEL_PATH = 'artifacts/models/best_xgb_model.pkl'
 LSTM_MODEL_PATH = 'artifacts/models/patchtst_weights.pt'
 SVC_MODEL_PATH = 'artifacts/models/best_svc_model.pkl'
 SCALER_PATH = 'artifacts/models/scaler.pkl'
+MODELS_DIR = 'artifacts/models'
+THRESHOLD_SWEEP = 'data/results/threshold_sweep.csv'
+BTCUSDT_1H_CSV = 'data/raw/BTCUSDT-1H.csv'
 
 #Assets (for now we need to increase this later)
 
