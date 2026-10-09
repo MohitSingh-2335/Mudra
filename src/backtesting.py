@@ -16,6 +16,7 @@ from src.agents.onchain_agent import merge_onchain
 from src.agents.sentiment_agent import merge_sentiment
 from config import SVC_FEATURES
 from src.agents.fear_greed_agent import merge_fear_greed
+from config import BTCUSDT_1H_CSV
 
 INITIAL_CAPITAL = 10000.0
 FEE_RATE = 0.001  # 0.1% per side (Binance taker fee) — 0.2% round trip
@@ -108,7 +109,7 @@ def compute_metrics(equity_curve_df, trade_log_df, test_df):
 
 def main(threshold=0.5):
     print("Loading data and training classifier...")
-    df = create_features(merge_sentiment(merge_onchain(merge_fear_greed(load_and_clean_data('data/raw/BTCUSDT-1H.csv'))))).reset_index(drop=True)
+    df = create_features(merge_sentiment(merge_onchain(merge_fear_greed(load_and_clean_data(BTCUSDT_1H_CSV))))).reset_index(drop=True)
     split_idx = int(len(df) * 0.8)
     test_df = df.iloc[split_idx:].reset_index(drop=True)
 
