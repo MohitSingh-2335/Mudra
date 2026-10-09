@@ -18,8 +18,8 @@ data/raw/*
 data/processed/*
 data/results/*
 
-# Trained model files (we retrain from scratch)
-artifacts/models/
+# Trained model and explainability artifacts
+artifacts/*
 
 # Secrets (API keys - NEVER on GitHub)
 .streamlit/secrets.toml
