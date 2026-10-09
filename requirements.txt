@@ -9,8 +9,11 @@ scikit-learn==1.5.0
 xgboost==2.0.3
 joblib==1.4.2
 
-# Deep Learning
-torch==2.3.1+cu121
+# Deep Learning (CUDA 12.4 for RTX 4050)
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+torchaudio==2.6.0+cu124
 
 # Technical Indicators
 ta==0.11.0
