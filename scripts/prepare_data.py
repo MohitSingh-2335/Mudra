@@ -4,10 +4,10 @@ from src.data_preprocessing import load_and_clean_data
 from src.feature_engineering import create_features
 from src.agents.fear_greed_agent import merge_fear_greed
 from src.agents.onchain_agent import merge_onchain
-from src.agents.sentiment_agent import merge_sentiment
+from config import BTCUSDT_1H_CSV, FEATURED_BTC_DATA_PATH
 import os
 
-def preprocess_and_save_featured_data(input_path='data/raw/BTCUSDT-1H.csv', output_path='data/processed/featured_btc_data.csv'):
+def preprocess_and_save_featured_data(input_path=BTCUSDT_1H_CSV, output_path=FEATURED_BTC_DATA_PATH):
     """
     Loads raw data, engineers all features, and saves the result to a new CSV file.
     """
@@ -20,8 +20,6 @@ def preprocess_and_save_featured_data(input_path='data/raw/BTCUSDT-1H.csv', outp
 
     # Merge on-chain metrics (fails soft to skipping features if API is down)
     df = merge_onchain(df, timestamp_col='timestamp')
-
-    df = merge_sentiment(df)
     
     # Engineer all features
     featured_df = create_features(df)
