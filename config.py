@@ -13,6 +13,7 @@ SCALER_PATH = 'artifacts/models/scaler.pkl'
 MODELS_DIR = 'artifacts/models'
 THRESHOLD_SWEEP = 'data/results/threshold_sweep.csv'
 BTCUSDT_1H_CSV = 'data/raw/BTCUSDT-1H.csv'
+FEATURED_BTC_DATA_PATH = 'data/processed/featured_btc_data.csv'
 
 #Assets (for now we need to increase this later)
 
@@ -44,11 +45,10 @@ XGB_FEATURES = [
     'vol_1h', 'vol_mean_6h', 'vol_std_6h', 'vol_max_6h', 'vol_min_6h',
     'hour', 'dayofweek', 'day', 'rsi',
     'high_low_ratio', 'hour_sin', 'hour_cos', 'day_sin', 'day_cos',
-    'close_lag_1',  # price-level anchor — was missing, caused RMSE worse than naive baseline
+    'close_lag_1',
     'taker_buy_ratio', 'taker_buy_ratio_mean_6h', 'trades_mean_6h',
     'fng_value', 'fng_mean_3d',
-    'onchain_num_tx_change', 'onchain_hash_rate_change', 'onchain_miners_revenue_change',
-    'sentiment_score', 'sentiment_mean_3d'
+    'onchain_num_tx_change', 'onchain_hash_rate_change', 'onchain_miners_revenue_change'
 ]
 
 #SVC features for direction prediction
@@ -67,12 +67,5 @@ SVC_FEATURES = [
     'hour_sin', 'hour_cos', 'day_sin', 'day_cos',
     'taker_buy_ratio', 'taker_buy_ratio_mean_6h', 'trades_mean_6h',
     'fng_value', 'fng_mean_3d',
-    'onchain_num_tx_change', 'onchain_hash_rate_change', 'onchain_miners_revenue_change',
-    'sentiment_score', 'sentiment_mean_3d'
+    'onchain_num_tx_change', 'onchain_hash_rate_change', 'onchain_miners_revenue_change'
 ]
-
-#App settings
-
-APP_TITLE = "AI Trading Suite 🤖"
-APP_VERSION = "1.0.0"
-APP_ICON = "🤖"
