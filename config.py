@@ -23,6 +23,12 @@ THRESHOLD_SWEEP = 'data/results/threshold_sweep.csv'
 BTCUSDT_1H_CSV = 'data/raw/BTCUSDT-1H.csv'
 FEATURED_BTC_DATA_PATH = 'data/processed/featured_btc_data.csv'
 
+# MLflow Tracking
+
+MLFLOW_TRACKING_URI = 'file:./mlruns'
+MLFLOW_EXPERIMENT_NAME = 'Mudra_BTC_Models'
+
+
 #Assets (for now we need to increase this later)
 
 ASSETS = {
