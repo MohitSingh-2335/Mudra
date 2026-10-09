@@ -4,13 +4,21 @@
 # so that every where this setting can be changes 
 # and we don't have to change every place like hardcoded codes
 
-#Path
+#Artifacts paths
 
+#Active
+REGRESSOR_MODEL_PATH = 'artifacts/models/best_regressor_model.pkl'
+CLASSIFIER_MODEL_PATH = 'artifacts/models/best_classifier_model.pkl'
+MODELS_DIR = 'artifacts/models'
+
+#Non-active
 XGB_MODEL_PATH = 'artifacts/models/best_xgb_model.pkl'
 LSTM_MODEL_PATH = 'artifacts/models/patchtst_weights.pt'
 SVC_MODEL_PATH = 'artifacts/models/best_svc_model.pkl'
 SCALER_PATH = 'artifacts/models/scaler.pkl'
-MODELS_DIR = 'artifacts/models'
+
+#Data paths
+
 THRESHOLD_SWEEP = 'data/results/threshold_sweep.csv'
 BTCUSDT_1H_CSV = 'data/raw/BTCUSDT-1H.csv'
 FEATURED_BTC_DATA_PATH = 'data/processed/featured_btc_data.csv'
@@ -38,9 +46,9 @@ FETCH_DAYS = 59
 LIVE_FETCH_LIMIT = 100
 LOOKBACK_WINDOW = 48
 
-#XGBoost features for price prediction
+#Features for price prediction
 
-XGB_FEATURES = [
+REGRESSOR_FEATURES = [
     'volume', 'Price Change', 'Rolling_Std_Close',
     'vol_1h', 'vol_mean_6h', 'vol_std_6h', 'vol_max_6h', 'vol_min_6h',
     'hour', 'dayofweek', 'day', 'rsi',
@@ -51,9 +59,9 @@ XGB_FEATURES = [
     'onchain_num_tx_change', 'onchain_hash_rate_change', 'onchain_miners_revenue_change'
 ]
 
-#SVC features for direction prediction
+#Features for direction prediction
 
-SVC_FEATURES = [
+CLASSIFIER_FEATURES = [
     'volume', 'Price Change', 'Volatility',
     'Rolling_Mean_Close', 'Rolling_Std_Close',
     'vol_mean_6h', 'vol_std_6h', 'vol_max_6h', 'vol_min_6h',
