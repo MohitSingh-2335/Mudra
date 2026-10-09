@@ -57,6 +57,9 @@ def merge_onchain(df, timestamp_col="timestamp", timespan="all"):
 
     df = df.copy()
     df["_date"] = pd.to_datetime(df[timestamp_col]).dt.date
+    existing_cols = [col for col in CHARTS.values() if col in df.columns]
+    if existing_cols:
+        df = df.drop(columns=existing_cols)
     df = df.merge(onchain_df, left_on="_date", right_on="date", how="left")
     return df.drop(columns=["_date", "date"])
 

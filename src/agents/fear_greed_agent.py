@@ -41,6 +41,9 @@ def merge_fear_greed(df, timestamp_col="timestamp"):
         df["fng_value"] = NEUTRAL_DEFAULT
         return df.drop(columns=["_date"])
 
+    if "fng_value" in df.columns:
+        df = df.drop(columns=["fng_value"])
+
     df = df.merge(fng_df[["date", "fng_value"]], left_on="_date", right_on="date", how="left")
     df["fng_value"] = df["fng_value"].fillna(NEUTRAL_DEFAULT)
     return df.drop(columns=["_date", "date"])
