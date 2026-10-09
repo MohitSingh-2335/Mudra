@@ -11,7 +11,7 @@ from binance.client import Client
 from src.feature_engineering import create_features
 from src.agents.fear_greed_agent import merge_fear_greed
 from src.agents.onchain_agent import merge_onchain
-from config import XGB_FEATURES, SVC_FEATURES, XGB_MODEL_PATH, SVC_MODEL_PATH, SCALER_PATH, FEATURED_BTC_DATA_PATH
+from config import REGRESSOR_FEATURES, CLASSIFIER_FEATURES, REGRESSOR_MODEL_PATH, CLASSIFIER_MODEL_PATH, FEATURED_BTC_DATA_PATH
 
 st.set_page_config(page_title="BTC Predictor Suite", layout="wide")
 
@@ -20,17 +20,16 @@ st.set_page_config(page_title="BTC Predictor Suite", layout="wide")
 def load_models_and_data():
     """Load models and the pre-featured static data file."""
     try:
-        xgb_model = joblib.load(XGB_MODEL_PATH)
-        svc_model = joblib.load(SVC_MODEL_PATH)
-        scaler = joblib.load(SCALER_PATH)
+        xgbr_model = joblib.load(REGRESSOR_MODEL_PATH)
+        xgbc_model = joblib.load(CLASSIFIER_MODEL_PATH)
         # Load the data for the simulation page
         sim_data = pd.read_csv(FEATURED_BTC_DATA_PATH, parse_dates=['timestamp'])
-        return xgb_model, svc_model, scaler, sim_data
+        return xgbr_model, xgbc_model, sim_data
     except FileNotFoundError as e:
         st.error(f"🚨 A required file is missing: {e}. Please ensure all model and data files are present.")
-        return None, None, None, None
+        return None, None, None
 
-xgb_pipeline, svc_model, scaler, sim_df = load_models_and_data()
+xgbr_model, xgbc_model, sim_df = load_models_and_data()
 
 # --- Initialize Session State for Simulation Page ---
 if 'current_index' not in st.session_state:
@@ -89,16 +88,15 @@ if app_mode == "Live Prediction (Binance)":
         st.header("Prediction for the Current Hour")
         prediction_input = live_df.iloc[-2]
 
-        reg_features = XGB_FEATURES
-        clf_features = SVC_FEATURES
+        reg_features = REGRESSOR_FEATURES
+        clf_features = CLASSIFIER_FEATURES
         
         input_reg = pd.DataFrame([prediction_input[reg_features]], columns=reg_features)
         input_clf = pd.DataFrame([prediction_input[clf_features]], columns=clf_features)
         
-        pred_return = xgb_pipeline.predict(input_reg)[0]
+        pred_return = xgbr_model.predict(input_reg)[0]
         pred_price = prediction_input['close'] * (1 + pred_return)
-        scaled_input_svc = scaler.transform(input_clf)
-        pred_move_code = svc_model.predict(scaled_input_svc)[0]
+        pred_move_code = xgbc_model.predict(input_clf)[0]
         pred_move_text = "Upward 📈" if pred_move_code == 1 else "Downward 📉"
 
         col1, col2 = st.columns(2)
@@ -144,15 +142,14 @@ elif app_mode == "Simulation from File":
 
     st.header("Prediction for the Next Hour")
     current_data = sim_df.loc[st.session_state.current_index]
-    reg_features = XGB_FEATURES
-    clf_features = SVC_FEATURES
+    reg_features = REGRESSOR_FEATURES
+    clf_features = CLASSIFIER_FEATURES
     
     input_reg = pd.DataFrame([current_data[reg_features]], columns=reg_features)
     input_clf = pd.DataFrame([current_data[clf_features]], columns=clf_features)
-    pred_return = xgb_pipeline.predict(input_reg)[0]
+    pred_return = xgbr_model.predict(input_reg)[0]
     pred_price = current_data['close'] * (1 + pred_return)
-    scaled_input_svc = scaler.transform(input_clf)
-    pred_move_code = svc_model.predict(scaled_input_svc)[0]
+    pred_move_code = xgbc_model.predict(input_clf)[0]
     pred_move_text = "Upward 📈" if pred_move_code == 1 else "Downward 📉"
     
     col1, col2 = st.columns(2)
@@ -196,7 +193,7 @@ elif app_mode == "Manual Prediction":
             bb_low = bb.bollinger_lband().iloc[-1]
             ema_10 = ta.trend.EMAIndicator(close=close_series, window=10).ema_indicator().iloc[-1]
             ema_30 = ta.trend.EMAIndicator(close=close_series, window=30).ema_indicator().iloc[-1]
-            reg_features = XGB_FEATURES
+            reg_features = REGRESSOR_FEATURES
             input_reg = pd.DataFrame([{
                     'volume': volume,
                     'Price Change': price_change,
@@ -211,10 +208,9 @@ elif app_mode == "Manual Prediction":
                     'taker_buy_ratio': 0, 'taker_buy_ratio_mean_6h': 0, 'trades_mean_6h': 0,
                     'fng_value': 50, 'fng_mean_3d': 50,
                     'onchain_num_tx_change': 0, 'onchain_hash_rate_change': 0,
-                    'onchain_miners_revenue_change': 0,
-                    'sentiment_score': 0, 'sentiment_mean_3d': 0
-                }])[XGB_FEATURES]
-            clf_features = SVC_FEATURES
+                    'onchain_miners_revenue_change': 0
+                }])[REGRESSOR_FEATURES]
+            clf_features = CLASSIFIER_FEATURES
             input_clf = pd.DataFrame([{
                     'volume': volume, 'Price Change': price_change,
                     'Volatility': volatility, 'Rolling_Mean_Close': close_price,
@@ -232,14 +228,12 @@ elif app_mode == "Manual Prediction":
                     'taker_buy_ratio': 0, 'taker_buy_ratio_mean_6h': 0, 'trades_mean_6h': 0,
                     'fng_value': 50, 'fng_mean_3d': 50,
                     'onchain_num_tx_change': 0, 'onchain_hash_rate_change': 0,
-                    'onchain_miners_revenue_change': 0,
-                    'sentiment_score': 0, 'sentiment_mean_3d': 0
-                }])[SVC_FEATURES]
+                    'onchain_miners_revenue_change': 0
+                }])[CLASSIFIER_FEATURES]
 
-            pred_return = xgb_pipeline.predict(input_reg)[0]
+            pred_return = xgbr_model.predict(input_reg)[0]
             pred_price = close_price * (1 + pred_return)
-            scaled_input_svc = scaler.transform(input_clf)
-            pred_move_code = svc_model.predict(scaled_input_svc)[0]
+            pred_move_code = xgbc_model.predict(input_clf)[0]
             pred_move_text = "Upward 📈" if pred_move_code == 1 else "Downward 📉"
             
             st.header("Prediction Results")
