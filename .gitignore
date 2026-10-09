@@ -43,3 +43,7 @@ docs/reference/BOT-requirement.txt
 
 #Real env
 .env
+
+# MLflow Experiment Tracking
+mlruns/
+mlflow.db
