@@ -23,10 +23,17 @@ THRESHOLD_SWEEP = 'data/results/threshold_sweep.csv'
 BTCUSDT_1H_CSV = 'data/raw/BTCUSDT-1H.csv'
 FEATURED_BTC_DATA_PATH = 'data/processed/featured_btc_data.csv'
 
+
 # MLflow Tracking
 
 MLFLOW_TRACKING_URI = 'file:./mlruns'
 MLFLOW_EXPERIMENT_NAME = 'Mudra_BTC_Models'
+
+
+# SHAP Explainability Paths
+SHAP_REGRESSOR_SUMMARY_PATH = 'artifacts/shap_regressor_summary.png'
+SHAP_CLASSIFIER_SUMMARY_PATH = 'artifacts/shap_classifier_summary.png'
+SHAP_IMPORTANCE_CSV_PATH = 'artifacts/shap_feature_importance.csv'
 
 
 #Assets (for now we need to increase this later)
