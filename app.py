@@ -9,7 +9,9 @@ import ta
 import plotly.graph_objects as go
 from binance.client import Client
 from src.feature_engineering import create_features
-from config import XGB_FEATURES, SVC_FEATURES, XGB_MODEL_PATH, SVC_MODEL_PATH, SCALER_PATH
+from src.agents.fear_greed_agent import merge_fear_greed
+from src.agents.onchain_agent import merge_onchain
+from config import XGB_FEATURES, SVC_FEATURES, XGB_MODEL_PATH, SVC_MODEL_PATH, SCALER_PATH, FEATURED_BTC_DATA_PATH
 
 st.set_page_config(page_title="BTC Predictor Suite", layout="wide")
 
@@ -22,7 +24,7 @@ def load_models_and_data():
         svc_model = joblib.load(SVC_MODEL_PATH)
         scaler = joblib.load(SCALER_PATH)
         # Load the data for the simulation page
-        sim_data = pd.read_csv('data/processed/featured_btc_data.csv', parse_dates=['timestamp'])
+        sim_data = pd.read_csv(FEATURED_BTC_DATA_PATH, parse_dates=['timestamp'])
         return xgb_model, svc_model, scaler, sim_data
     except FileNotFoundError as e:
         st.error(f"🚨 A required file is missing: {e}. Please ensure all model and data files are present.")
@@ -66,6 +68,8 @@ if app_mode == "Live Prediction (Binance)":
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         for col in ['open', 'high', 'low', 'close', 'volume']:
             df[col] = pd.to_numeric(df[col])
+        df = merge_fear_greed(df)
+        df = merge_onchain(df)
         featured_df = create_features(df.copy())
         return featured_df
 
@@ -91,7 +95,8 @@ if app_mode == "Live Prediction (Binance)":
         input_reg = pd.DataFrame([prediction_input[reg_features]], columns=reg_features)
         input_clf = pd.DataFrame([prediction_input[clf_features]], columns=clf_features)
         
-        pred_price = xgb_pipeline.predict(input_reg)[0]
+        pred_return = xgb_pipeline.predict(input_reg)[0]
+        pred_price = prediction_input['close'] * (1 + pred_return)
         scaled_input_svc = scaler.transform(input_clf)
         pred_move_code = svc_model.predict(scaled_input_svc)[0]
         pred_move_text = "Upward 📈" if pred_move_code == 1 else "Downward 📉"
@@ -144,7 +149,8 @@ elif app_mode == "Simulation from File":
     
     input_reg = pd.DataFrame([current_data[reg_features]], columns=reg_features)
     input_clf = pd.DataFrame([current_data[clf_features]], columns=clf_features)
-    pred_price = xgb_pipeline.predict(input_reg)[0]
+    pred_return = xgb_pipeline.predict(input_reg)[0]
+    pred_price = current_data['close'] * (1 + pred_return)
     scaled_input_svc = scaler.transform(input_clf)
     pred_move_code = svc_model.predict(scaled_input_svc)[0]
     pred_move_text = "Upward 📈" if pred_move_code == 1 else "Downward 📉"
@@ -230,7 +236,8 @@ elif app_mode == "Manual Prediction":
                     'sentiment_score': 0, 'sentiment_mean_3d': 0
                 }])[SVC_FEATURES]
 
-            pred_price = xgb_pipeline.predict(input_reg)[0]
+            pred_return = xgb_pipeline.predict(input_reg)[0]
+            pred_price = close_price * (1 + pred_return)
             scaled_input_svc = scaler.transform(input_clf)
             pred_move_code = svc_model.predict(scaled_input_svc)[0]
             pred_move_text = "Upward 📈" if pred_move_code == 1 else "Downward 📉"
