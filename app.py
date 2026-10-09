@@ -11,7 +11,15 @@ from binance.client import Client
 from src.feature_engineering import create_features
 from src.agents.fear_greed_agent import merge_fear_greed
 from src.agents.onchain_agent import merge_onchain
-from config import REGRESSOR_FEATURES, CLASSIFIER_FEATURES, REGRESSOR_MODEL_PATH, CLASSIFIER_MODEL_PATH, FEATURED_BTC_DATA_PATH
+from config import (
+    REGRESSOR_FEATURES,
+    CLASSIFIER_FEATURES,
+    REGRESSOR_MODEL_PATH,
+    CLASSIFIER_MODEL_PATH,
+    FEATURED_BTC_DATA_PATH
+)
+import matplotlib.pyplot as plt
+from src.explainability import get_tree_explainer, explain_single_prediction
 
 st.set_page_config(page_title="BTC Predictor Suite", layout="wide")
 
@@ -22,14 +30,16 @@ def load_models_and_data():
     try:
         xgbr_model = joblib.load(REGRESSOR_MODEL_PATH)
         xgbc_model = joblib.load(CLASSIFIER_MODEL_PATH)
-        # Load the data for the simulation page
-        sim_data = pd.read_csv(FEATURED_BTC_DATA_PATH, parse_dates=['timestamp'])
-        return xgbr_model, xgbc_model, sim_data
+        xgbr_model.set_params(device="cpu")
+        xgbc_model.set_params(device="cpu")
+        explainer_clf = get_tree_explainer(xgbc_model)
+        sim_df = pd.read_csv(FEATURED_BTC_DATA_PATH, parse_dates=['timestamp'])
+        return xgbr_model, xgbc_model, explainer_clf, sim_df
     except FileNotFoundError as e:
         st.error(f"🚨 A required file is missing: {e}. Please ensure all model and data files are present.")
-        return None, None, None
+        return None, None, None, None
 
-xgbr_model, xgbc_model, sim_df = load_models_and_data()
+xgbr_model, xgbc_model, explainer_clf, sim_df = load_models_and_data()
 
 # --- Initialize Session State for Simulation Page ---
 if 'current_index' not in st.session_state:
@@ -104,6 +114,21 @@ if app_mode == "Live Prediction (Binance)":
         col2.metric("Predicted Movement for this Hour", pred_move_text)
         st.info("This prediction is based on the data from the previous completed hour.")
 
+        with st.expander("🔍 AI Prediction Explanation (SHAP Attribution)"):
+            base_val, top_pos, top_neg, fig = explain_single_prediction(explainer_clf, input_clf, top_n=4)
+            exp_col1, exp_col2 = st.columns(2)
+            with exp_col1:
+                st.markdown("**🟢 Bullish Drivers (Pushed UP):**")
+                for item in top_pos:
+                    st.markdown(f"- **{item['feature']}**: `+{item['shap']:.4f}` (value: `{item['value']:.2f}`)")
+            with exp_col2:
+                st.markdown("**🔴 Bearish Drivers (Pushed DOWN):**")
+                for item in top_neg:
+                    st.markdown(f"- **{item['feature']}**: `{item['shap']:.4f}` (value: `{item['value']:.2f}`)")
+            st.pyplot(fig)
+            plt.close(fig)
+
+
     except Exception as e:
         st.error(f"An error occurred while fetching or processing live data: {e}")
 
@@ -139,6 +164,7 @@ elif app_mode == "Simulation from File":
             st.error("❌ Prediction was INCORRECT")
     else:
         st.info("Advancing to the next hour will show the first prediction verification.")
+        
 
     st.header("Prediction for the Next Hour")
     current_data = sim_df.loc[st.session_state.current_index]
@@ -156,6 +182,19 @@ elif app_mode == "Simulation from File":
     col1.metric("Predicted Next Price", f"${pred_price:.2f}")
     col2.metric("Predicted Next Movement", pred_move_text)
     st.session_state.previous_prediction = {'price': pred_price, 'movement': pred_move_text}
+    with st.expander("🔍 AI Prediction Explanation (SHAP Attribution)"):
+        base_val, top_pos, top_neg, fig = explain_single_prediction(explainer_clf, input_clf, top_n=4)
+        exp_col1, exp_col2 = st.columns(2)
+        with exp_col1:
+            st.markdown("**🟢 Bullish Drivers (Pushed UP):**")
+            for item in top_pos:
+                st.markdown(f"- **{item['feature']}**: `+{item['shap']:.4f}` (value: `{item['value']:.2f}`)")
+        with exp_col2:
+            st.markdown("**🔴 Bearish Drivers (Pushed DOWN):**")
+            for item in top_neg:
+                st.markdown(f"- **{item['feature']}**: `{item['shap']:.4f}` (value: `{item['value']:.2f}`)")
+        st.pyplot(fig)
+        plt.close(fig)
 
     if st.button("Advance to Next Hour ->"):
         st.session_state.current_index += 1
@@ -241,5 +280,19 @@ elif app_mode == "Manual Prediction":
             col1.metric("Predicted Close Price", f"${pred_price:,.2f}")
             col2.metric("Predicted Movement", pred_move_text)
             st.success("Prediction generated successfully!")
+            with st.expander("🔍 AI Prediction Explanation (SHAP Attribution)"):
+                base_val, top_pos, top_neg, fig = explain_single_prediction(explainer_clf, input_clf, top_n=4)
+                exp_col1, exp_col2 = st.columns(2)
+                with exp_col1:
+                    st.markdown("**🟢 Bullish Drivers (Pushed UP):**")
+                    for item in top_pos:
+                        st.markdown(f"- **{item['feature']}**: `+{item['shap']:.4f}` (value: `{item['value']:.2f}`)")
+                with exp_col2:
+                    st.markdown("**🔴 Bearish Drivers (Pushed DOWN):**")
+                    for item in top_neg:
+                        st.markdown(f"- **{item['feature']}**: `{item['shap']:.4f}` (value: `{item['value']:.2f}`)")
+                st.pyplot(fig)
+                plt.close(fig)
+
         except Exception as e:
             st.error(f"❌ An error occurred: {e}")
