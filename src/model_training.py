@@ -5,8 +5,10 @@ from sklearn.model_selection import RandomizedSearchCV
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from sklearn.metrics import mean_squared_error, accuracy_score
+# pyrefly: ignore [missing-import]
 from xgboost import XGBRegressor
 from sklearn.pipeline import make_pipeline
+# pyrefly: ignore [missing-import]
 import joblib
 import os
 import numpy as np
@@ -14,8 +16,11 @@ from src.data_preprocessing import load_and_clean_data
 from src.feature_engineering import create_features
 from src.agents.fear_greed_agent import merge_fear_greed
 from src.agents.onchain_agent import merge_onchain
-from src.agents.sentiment_agent import merge_sentiment
-from config import XGB_FEATURES, SVC_FEATURES, MODELS_DIR
+from config import XGB_FEATURES, SVC_FEATURES, MODELS_DIR, BTCUSDT_1H_CSV
+
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
+
 
 def train_and_save_models(data_path, models_dir=MODELS_DIR):
     """
@@ -27,7 +32,6 @@ def train_and_save_models(data_path, models_dir=MODELS_DIR):
     print("Data loaded and cleaned.")
     df = merge_fear_greed(df, timestamp_col='timestamp')
     df = merge_onchain(df, timestamp_col='timestamp')
-    df = merge_sentiment(df)
     df = create_features(df)
     print("Features engineered.")
 
@@ -148,4 +152,4 @@ def train_and_save_models(data_path, models_dir=MODELS_DIR):
     print("    Any numbers you saw before this fix should be treated as invalid.")
 
 if __name__ == '__main__':
-    train_and_save_models(data_path='data/raw/BTCUSDT-1H.csv')
+    train_and_save_models(data_path=BTCUSDT_1H_CSV)
