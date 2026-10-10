@@ -38,7 +38,7 @@ SHAP_IMPORTANCE_CSV_PATH = 'artifacts/shap_feature_importance.csv'
 
 # ChromaDB Vector Store
 CHROMADB_DIR = 'data/chromadb'
-CHROMA_COLLECTION_NAME = 'mudra_market_knowledge'
+CHROMA_COLLECTION_NAME = 'mudra_market_knowledge_v3'
 
 
 #Assets (for now we need to increase this later)
