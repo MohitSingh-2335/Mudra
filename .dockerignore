@@ -1,0 +1,40 @@
+# Git & Version Control
+.git/
+.gitignore
+
+# Environment variables & Secrets (CRITICAL: Never bake keys into images)
+.env
+.streamlit/secrets.toml
+
+# Python bytecode & Caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Conda / Virtual Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Development IDE files
+.vscode/
+.idea/
+
+# Large Experiment Logs & Research Notes
+mlruns/
+archive/
+reports/
+experiments/
+
+# Temporary files & Logs
+*.log
+scratch/
+test_*.py
+
+# Raw Market Dumps (Keep only processed data)
+data/raw/
