@@ -151,11 +151,20 @@ if app_mode == "Live Market Prediction":
         fig.update_layout(title="BTC/USDT - Live 1-Hour Chart", xaxis_title="Time", yaxis_title="Price (USDT)")
         st.plotly_chart(fig, use_container_width=True)
 
-        st.header("Prediction for the Current Hour")
-        prediction_input = live_df.iloc[-2]
-
         reg_features = REGRESSOR_FEATURES
         clf_features = CLASSIFIER_FEATURES
+
+        # Defensive check: ensure all required model features are present and non-null
+        live_df = live_df.bfill().ffill().fillna(0)
+        for col in reg_features:
+            if col not in live_df.columns:
+                live_df[col] = 0.0
+        for col in clf_features:
+            if col not in live_df.columns:
+                live_df[col] = 0.0
+
+        st.header("Prediction for the Current Hour")
+        prediction_input = live_df.iloc[-2]
         
         input_reg = pd.DataFrame([prediction_input[reg_features]], columns=reg_features)
         input_clf = pd.DataFrame([prediction_input[clf_features]], columns=clf_features)
