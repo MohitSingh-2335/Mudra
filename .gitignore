@@ -11,15 +11,20 @@ venv/
 env/
 stock_pred
 
-# Generated data files (too large and reproducible from the pipeline)
-data/*.csv
+# Generated data files (keep processed data for Docker & dashboard simulation)
 data/*.parquet
 data/raw/*
-data/processed/*
 data/results/*
+data/processed/*
+!data/processed/featured_btc_data.csv
 
-# Trained model and explainability artifacts
+# Trained model and explainability artifacts (keep production models & SHAP plots)
 artifacts/*
+!artifacts/models/
+!artifacts/models/best_regressor_model.pkl
+!artifacts/models/best_classifier_model.pkl
+!artifacts/shap_*.png
+!artifacts/shap_feature_importance.csv
 
 # Secrets (API keys - NEVER on GitHub)
 .streamlit/secrets.toml
