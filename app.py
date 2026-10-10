@@ -20,6 +20,8 @@ from config import (
 )
 import matplotlib.pyplot as plt
 from src.explainability import get_tree_explainer, explain_single_prediction
+from src.agents.market_analyst_agent import generate_market_commentary
+
 
 st.set_page_config(page_title="BTC Predictor Suite", layout="wide")
 
@@ -40,6 +42,33 @@ def load_models_and_data():
         return None, None, None, None
 
 xgbr_model, xgbc_model, explainer_clf, sim_df = load_models_and_data()
+
+def render_analyst_commentary(report):
+    """Renders the AI Chief Quantitative Strategist commentary card."""
+    st.markdown("---")
+    st.subheader("🤖 AI Chief Quantitative Strategist Commentary")
+
+    is_bull = "BULLISH" in report.trade_thesis
+    badge_color = "🟢" if is_bull else ("🔴" if "BEARISH" in report.trade_thesis else "⚪")
+
+    col_t1, col_t2 = st.columns([2, 1])
+    with col_t1:
+        st.markdown(f"### {badge_color} Thesis: `{report.trade_thesis}`")
+    with col_t2:
+        st.metric("Model Conviction", f"{report.conviction_score} / 10")
+
+    st.info(f"**Executive Summary:**\n\n{report.executive_summary}")
+
+    with st.expander("🔬 View In-Depth Quant & Macro Synthesis", expanded=True):
+        st.markdown("**📊 Quantitative Driver Analysis (TreeSHAP Interpretation):**")
+        st.write(report.quantitative_driver_analysis)
+
+        st.markdown("**🌐 Macro & Domain Regime Context (ChromaDB RAG):**")
+        st.write(report.macro_market_context)
+
+        st.markdown("**⚠️ Invalidation Scenarios & Key Risks:**")
+        for risk in report.key_risks:
+            st.markdown(f"- {risk}")
 
 # --- Initialize Session State for Simulation Page ---
 if 'current_index' not in st.session_state:
@@ -128,6 +157,21 @@ if app_mode == "Live Prediction (Binance)":
             st.pyplot(fig)
             plt.close(fig)
 
+        st.markdown("---")
+        if st.button("🧠 Synthesize AI Strategist Commentary", key="btn_live_agent"):
+            with st.spinner("Synthesizing quantitative ML predictions, TreeSHAP drivers, and ChromaDB knowledge..."):
+                report = generate_market_commentary(
+                    current_price=float(prediction_input['close']),
+                    pred_price=float(pred_price),
+                    pred_return=float(pred_return),
+                    pred_move_text=pred_move_text,
+                    top_pos_drivers=top_pos,
+                    top_neg_drivers=top_neg
+                )
+                st.session_state['live_analyst_report'] = report
+
+        if 'live_analyst_report' in st.session_state:
+            render_analyst_commentary(st.session_state['live_analyst_report'])
 
     except Exception as e:
         st.error(f"An error occurred while fetching or processing live data: {e}")
@@ -195,6 +239,23 @@ elif app_mode == "Simulation from File":
                 st.markdown(f"- **{item['feature']}**: `{item['shap']:.4f}` (value: `{item['value']:.2f}`)")
         st.pyplot(fig)
         plt.close(fig)
+
+    st.markdown("---")
+    sim_key = f"sim_report_{st.session_state.current_index}"
+    if st.button("🧠 Synthesize AI Strategist Commentary", key="btn_sim_agent"):
+        with st.spinner("Synthesizing quantitative ML predictions, TreeSHAP drivers, and ChromaDB knowledge..."):
+            report = generate_market_commentary(
+                current_price=float(current_data['close']),
+                pred_price=float(pred_price),
+                pred_return=float(pred_return),
+                pred_move_text=pred_move_text,
+                top_pos_drivers=top_pos,
+                top_neg_drivers=top_neg
+            )
+            st.session_state[sim_key] = report
+
+    if sim_key in st.session_state:
+        render_analyst_commentary(st.session_state[sim_key])
 
     if st.button("Advance to Next Hour ->"):
         st.session_state.current_index += 1
@@ -293,6 +354,22 @@ elif app_mode == "Manual Prediction":
                         st.markdown(f"- **{item['feature']}**: `{item['shap']:.4f}` (value: `{item['value']:.2f}`)")
                 st.pyplot(fig)
                 plt.close(fig)
+
+            st.markdown("---")
+            if st.button("🧠 Synthesize AI Strategist Commentary", key="btn_manual_agent"):
+                with st.spinner("Synthesizing quantitative ML predictions, TreeSHAP drivers, and ChromaDB knowledge..."):
+                    report = generate_market_commentary(
+                        current_price=float(close_price),
+                        pred_price=float(pred_price),
+                        pred_return=float(pred_return),
+                        pred_move_text=pred_move_text,
+                        top_pos_drivers=top_pos,
+                        top_neg_drivers=top_neg
+                    )
+                    st.session_state['manual_analyst_report'] = report
+
+            if 'manual_analyst_report' in st.session_state:
+                render_analyst_commentary(st.session_state['manual_analyst_report'])
 
         except Exception as e:
             st.error(f"❌ An error occurred: {e}")
