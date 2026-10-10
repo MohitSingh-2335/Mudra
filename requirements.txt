@@ -9,12 +9,6 @@ scikit-learn==1.5.0
 xgboost==2.0.3
 joblib==1.4.2
 
-# Deep Learning (CUDA 12.4 for RTX 4050)
---extra-index-url https://download.pytorch.org/whl/cu124
-torch==2.6.0+cu124
-torchvision==0.21.0+cu124
-torchaudio==2.6.0+cu124
-
 # Technical Indicators
 ta==0.11.0
 
@@ -25,22 +19,18 @@ requests==2.32.3
 
 # AI / LLM API
 google-generativeai==0.7.2
-transformers==4.44.2
 
 # Web App
 streamlit==1.35.0
 plotly==5.22.0
 
-# MLOps
+# MLOps & Explainability
 mlflow==2.14.3
 optuna==3.6.1
 shap==0.45.1
 
-# RAG & Agentic AI
+# RAG & Vector Store
 chromadb==0.5.3
-langchain==0.2.14
-langchain-google-genai==1.0.7
-sentence-transformers==3.0.1
 
 # API Backend
 fastapi==0.111.1
