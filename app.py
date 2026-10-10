@@ -7,6 +7,7 @@ import joblib
 from datetime import datetime
 import ta
 import plotly.graph_objects as go
+import requests
 from binance.client import Client
 from src.feature_engineering import create_features
 from src.agents.fear_greed_agent import merge_fear_greed
@@ -80,44 +81,70 @@ if 'previous_prediction' not in st.session_state:
 st.sidebar.title("BTC Predictor Suite 🤖")
 app_mode = st.sidebar.radio(
     "Choose a Prediction Mode",
-    ["Live Prediction (Binance)", "Simulation from File", "Manual Prediction"]
+    ["Simulation from File", "Live Market Prediction", "Manual Prediction"]
 )
 
 # =====================================================================================
-# --- LIVE PREDICTION (BINANCE) PAGE ---
+# --- LIVE PREDICTION PAGE ---
 # =====================================================================================
-if app_mode == "Live Prediction (Binance)":
-    st.title("🔴 Live Prediction (from Binance API)")
-
-    # --- Binance API Connection ---
-    try:
-        api_key = st.secrets["binance"]["api_key"]
-        api_secret = st.secrets["binance"]["api_secret"]
-        client = Client(api_key, api_secret)
-    except Exception as e:
-        st.error(f"Failed to connect to Binance API. Check your .streamlit/secrets.toml file. Error: {e}")
-        st.stop()
+if app_mode == "Live Market Prediction":
+    st.title("🔴 Live Market Prediction")
 
     # --- Data Fetching and Processing ---
     @st.cache_data(ttl=60)
-    def get_live_data(symbol='BTCUSDT', interval=Client.KLINE_INTERVAL_1HOUR, limit=100):
-        klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-        df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = pd.to_numeric(df[col])
-        df = merge_fear_greed(df)
-        df = merge_onchain(df)
-        featured_df = create_features(df.copy())
-        return featured_df
+    def get_live_data():
+        # Provider 1: Try Binance API first
+        try:
+            if hasattr(st, "secrets") and "binance" in st.secrets:
+                api_key = st.secrets["binance"]["api_key"]
+                api_secret = st.secrets["binance"]["api_secret"]
+                client = Client(api_key, api_secret)
+                klines = client.get_klines(symbol='BTCUSDT', interval=Client.KLINE_INTERVAL_1HOUR, limit=100)
+                df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    df[col] = pd.to_numeric(df[col])
+                df = merge_fear_greed(df)
+                df = merge_onchain(df)
+                featured_df = create_features(df.copy())
+                return featured_df, "Binance API"
+        except Exception:
+            pass
+
+        # Provider 2: US Cloud-Friendly Fallback (Coinbase Institutional Public Feed)
+        try:
+            url = "https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=3600"
+            r = requests.get(url, headers={"User-Agent": "Mudra-Quant/1.0"}, timeout=10)
+            if r.status_code == 200:
+                raw = r.json()[:100]
+                df = pd.DataFrame(raw, columns=['timestamp', 'low', 'high', 'open', 'close', 'volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+                df = df.sort_values('timestamp').reset_index(drop=True)
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    df[col] = pd.to_numeric(df[col])
+                df = merge_fear_greed(df)
+                df = merge_onchain(df)
+                featured_df = create_features(df.copy())
+                return featured_df, "Coinbase Institutional Public Feed"
+        except Exception as e:
+            return None, f"Feed Error: {e}"
+
+        return None, "All providers unavailable"
 
     if st.button("Refresh Live Data"):
         st.cache_data.clear()
 
     try:
-        live_df = get_live_data()
+        live_df, feed_source = get_live_data()
+        if live_df is None or live_df.empty:
+            st.error(f"Failed to fetch market data: {feed_source}. Please refresh in a moment.")
+            st.stop()
+
+        if "Coinbase" in feed_source:
+            st.info("ℹ️ Live BTC/USD market feed streaming via Coinbase Institutional API (US cloud provider fallback).")
+
         last_updated_time = live_df['timestamp'].iloc[-1]
-        st.markdown(f"**Last Updated:** `{last_updated_time}`")
+        st.markdown(f"**Last Updated:** `{last_updated_time}` | **Feed Provider:** `{feed_source}`")
 
         st.header("Recent Market Data")
         fig = go.Figure(data=go.Scatter(x=live_df['timestamp'], y=live_df['close'], mode='lines', name='Close Price'))
