@@ -25,6 +25,7 @@ artifacts/*
 !artifacts/models/best_classifier_model.pkl
 !artifacts/shap_*.png
 !artifacts/shap_feature_importance.csv
+!artifacts/backtest_performance.png
 
 # Secrets (API keys - NEVER on GitHub)
 .streamlit/secrets.toml
