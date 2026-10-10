@@ -77,18 +77,24 @@ def create_features(df):
     df['volume_lag_1'] = df['volume'].shift(1)
     df['price_volatility_interaction'] = df['close'] * df['Volatility']
 
-    # Order-flow features — only added if the raw data has them (i.e. it came
-    # from fetch_fresh_data.py). Older-format CSVs without these columns will
-    # simply skip this block rather than crashing.
+    # Order-flow features — default to neutral 50% ratio and 0 trades if missing
     if 'taker_buy_ratio' in df.columns:
-        # Smoothed buy-vs-sell pressure trend, not just the current hour's
-        # noisy raw ratio
         df['taker_buy_ratio_mean_6h'] = df['taker_buy_ratio'].rolling(window=6).mean()
+    else:
+        df['taker_buy_ratio'] = 0.5
+        df['taker_buy_ratio_mean_6h'] = 0.5
+
     if 'number_of_trades' in df.columns:
-        # Smoothed market-activity trend
         df['trades_mean_6h'] = df['number_of_trades'].rolling(window=6).mean()
+    else:
+        df['number_of_trades'] = 0.0
+        df['trades_mean_6h'] = 0.0
+
     if 'fng_value' in df.columns:
         df['fng_mean_3d'] = df['fng_value'].rolling(window=72).mean()
+    else:
+        df['fng_value'] = 50.0
+        df['fng_mean_3d'] = 50.0
 
     # On-chain metrics — daily values broadcast from merge_onchain(). Using
     # day-over-day % change rather than raw level: raw level is highly
