@@ -6,6 +6,9 @@ import json
 import re
 sys.stdout.reconfigure(encoding='utf-8')
 
+# Silence ChromaDB internal telemetry
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
+
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
