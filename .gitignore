@@ -47,3 +47,7 @@ docs/reference/BOT-requirement.txt
 # MLflow Experiment Tracking
 mlruns/
 mlflow.db
+
+# ChromaDB Vector Database
+data/chromadb/
+data/chromadb*/
