@@ -1,0 +1,42 @@
+# docker-compose.yml - Mudra Multi-Container Quantitative Platform
+
+services:
+  # 1. FastAPI REST Inference & Explainability Engine
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mudra-api
+    ports:
+      - "8000:8000"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # 2. Interactive Streamlit Quantitative Dashboard
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.streamlit
+    container_name: mudra-ui
+    ports:
+      - "8501:8501"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - MUDRA_API_URL=http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
