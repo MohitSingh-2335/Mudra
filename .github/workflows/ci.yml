@@ -30,8 +30,10 @@ jobs:
           pip install -r requirements.txt
 
       - name: Execute Automated Test Suite
+        env:
+          PYTHONPATH: .
         run: |
-          pytest tests/test_api.py -v
+          python -m pytest tests/test_api.py -v
 
   # Job 2: Container Image Build Verification
   build-containers:
