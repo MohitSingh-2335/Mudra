@@ -12,8 +12,6 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-import mlflow
-
 from config import (
     REGRESSOR_MODEL_PATH,
     CLASSIFIER_MODEL_PATH,
@@ -22,9 +20,7 @@ from config import (
     FEATURED_BTC_DATA_PATH,
     SHAP_REGRESSOR_SUMMARY_PATH,
     SHAP_CLASSIFIER_SUMMARY_PATH,
-    SHAP_IMPORTANCE_CSV_PATH,
-    MLFLOW_TRACKING_URI,
-    MLFLOW_EXPERIMENT_NAME
+    SHAP_IMPORTANCE_CSV_PATH
 )
 
 
