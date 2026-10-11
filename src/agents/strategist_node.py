@@ -85,6 +85,10 @@ def strategist_node(state: AgentState) -> AgentState:
     clears_hurdle = state["ml_forecast"].get("clears_hurdle", False)
     taker_ratio = state["market_data"].get("taker_buy_ratio", 0.50)
 
+    direction = state["ml_forecast"].get("direction", "SIDEWAYS")
+    direction_badge = state["ml_forecast"].get("direction_badge", "NEUTRAL ⚪")
+    prob_up = state["ml_forecast"].get("direction_probability_up", 50.0)
+
     # 5. Synthesize Thesis via Gemini API or Circuit Breaker
     api_key = _get_gemini_api_key()
 
@@ -99,6 +103,7 @@ Analyze the following telemetry and return strict JSON:
 - Symbol: {symbol}
 - Current Price: ${state['current_price']:,.2f}
 - XGBoost Return Forecast: {pred_return:+.4f}% (${pred_move:+,.2f})
+- Directional Prediction: {direction} ({direction_badge}) | Up Probability: {prob_up:.1f}%
 - Fee Hurdle Status: {'CLEARED (>=0.05%)' if clears_hurdle else 'SUB-HURDLE'}
 - Taker Buy Ratio: {taker_ratio:.4f}
 - Macro RAG Context: {state['rag_context'][:300]}
@@ -128,19 +133,19 @@ Respond ONLY with valid JSON with these keys:
     # 6. Deterministic Heuristic Engine Fallback (Circuit Breaker)
     state["circuit_breaker_active"] = True
 
-    if clears_hurdle and taker_ratio >= 0.50:
+    if clears_hurdle and (pred_return > 0 or direction == "UP") and taker_ratio >= 0.50:
         action = "BUY"
         conviction = min(9, int(5 + (pred_return * 20) + (taker_ratio - 0.5) * 10))
         summary = (
             f"Bullish quantitative setup: Expected return of {pred_return:+.4f}% clears the "
-            f"0.05% fee hurdle with favorable aggressive taker buying ({taker_ratio:.2%})."
+            f"0.05% fee hurdle ({direction_badge}, Up Prob: {prob_up:.1f}%) with favorable taker buying ({taker_ratio:.2%})."
         )
-    elif pred_return < -0.05 and taker_ratio < 0.48:
+    elif clears_hurdle and (pred_return < 0 or direction == "DOWN") and taker_ratio < 0.50:
         action = "SELL"
         conviction = min(9, int(5 + abs(pred_return * 20)))
         summary = (
-            f"Bearish momentum: Expected downward return of {pred_return:+.4f}% with "
-            f"institutional taker sell dominance ({taker_ratio:.2%})."
+            f"Bearish momentum: Expected return of {pred_return:+.4f}% clears fee hurdle "
+            f"({direction_badge}) with aggressive taker sell dominance ({taker_ratio:.2%})."
         )
     else:
         action = "HOLD"
