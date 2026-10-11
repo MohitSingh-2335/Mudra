@@ -224,9 +224,9 @@ def query_macro_sentiment_rag(query: str = "Bitcoin macroeconomic market sentime
     try:
         from src.agents.rag_agent import get_rag_agent
         rag = get_rag_agent()
-        context = rag.retrieve(query)
-        if context and len(context.strip()) > 0:
-            return context
+        docs = rag.retrieve_market_context(query, n_results=2)
+        if docs and len(docs) > 0:
+            return " | ".join(docs)
         return "Market regime: Standard institutional spot ETF liquidity with balanced macro interest rate expectations."
     except Exception as e:
         return f"Macro context unavailable (ChromaDB offline): {str(e)}"
