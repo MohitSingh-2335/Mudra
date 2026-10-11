@@ -1,0 +1,103 @@
+"""
+Database Query Service for Mudra Frontend Terminal and API Endpoints.
+Fetches historical market ticks, delayed reconciliation records,
+and paper portfolio equity curves directly from Neon PostgreSQL.
+"""
+from typing import Dict, Any, Optional
+import pandas as pd
+from sqlalchemy import select, desc
+
+from src.database.connection import get_db
+from src.database.models import MarketTick, Reconciliation, PaperPortfolio, CouncilAudit
+from src.engine.reconciliation import get_reconciliation_summary
+from src.engine.paper_portfolio import get_portfolio_summary
+
+
+def get_latest_market_ticks(limit: int = 100) -> pd.DataFrame:
+    """
+    Fetches the latest N confirmed market ticks from the cloud database,
+    ordered chronologically for plotting.
+    """
+    with get_db() as session:
+        stmt = (
+            select(MarketTick)
+            .order_by(desc(MarketTick.timestamp))
+            .limit(limit)
+        )
+        ticks = session.execute(stmt).scalars().all()
+        if not ticks:
+            return pd.DataFrame()
+        
+        data = [t.to_dict() for t in ticks]
+        df = pd.DataFrame(data)
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        return df
+
+
+def get_reconciliation_history(limit: int = 50) -> pd.DataFrame:
+    """
+    Fetches the most recent N delayed reconciliation records from Neon.
+    Used for the Live Track Record Audit table.
+    """
+    with get_db() as session:
+        stmt = (
+            select(Reconciliation)
+            .order_by(desc(Reconciliation.timestamp))
+            .limit(limit)
+        )
+        records = session.execute(stmt).scalars().all()
+        if not records:
+            return pd.DataFrame()
+        
+        data = [r.to_dict() for r in records]
+        df = pd.DataFrame(data)
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        return df
+
+
+def get_reconciliation_kpis(lookback_hours: int = 168) -> Dict[str, Any]:
+    """
+    Computes rolling accuracy KPIs (Win Rate %, MAE, MAPE, IC) across N hours.
+    """
+    with get_db() as session:
+        return get_reconciliation_summary(session, limit=lookback_hours)
+
+
+def get_portfolio_history(limit: int = 100) -> pd.DataFrame:
+    """
+    Fetches the chronological paper portfolio ledger from Neon.
+    Used for plotting Strategy Equity vs. Buy & Hold Benchmark Alpha curves.
+    """
+    with get_db() as session:
+        stmt = (
+            select(PaperPortfolio)
+            .order_by(PaperPortfolio.id.asc())
+            .limit(limit)
+        )
+        records = session.execute(stmt).scalars().all()
+        if not records:
+            return pd.DataFrame()
+        
+        data = [p.to_dict() for p in records]
+        df = pd.DataFrame(data)
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        return df
+
+
+def get_portfolio_kpis(current_price: float) -> Dict[str, Any]:
+    """
+    Returns current portfolio snapshot: Cash, BTC, Total Equity, and Alpha.
+    """
+    with get_db() as session:
+        return get_portfolio_summary(session, current_price=current_price)
+
+
+def get_latest_council_audit() -> Optional[Dict[str, Any]]:
+    """
+    Returns the most recent Multi-Agent Council deliberation record.
+    """
+    with get_db() as session:
+        stmt = select(CouncilAudit).order_by(desc(CouncilAudit.id)).limit(1)
+        audit = session.execute(stmt).scalar_one_or_none()
+        return audit.to_dict() if audit else None
