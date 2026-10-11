@@ -95,3 +95,39 @@ def test_explain_endpoint(client, sample_features_payload):
     assert isinstance(data["top_bearish_drivers"], list)
     assert len(data["top_bullish_drivers"]) <= 4
     assert len(data["top_bearish_drivers"]) <= 4
+
+
+def test_agents_trade_endpoint(client):
+    """Verify that /agents/trade runs the LangGraph 2-node pipeline and returns valid decision schema."""
+    payload = {
+        "symbol": "BTCUSDT",
+        "current_price": 65000.0,
+        "market_data": {
+            "close": 65000.0,
+            "high": 65400.0,
+            "low": 64800.0,
+            "volume": 1500.0,
+            "taker_buy_ratio": 0.55
+        },
+        "engineered_features": {
+            "volatility_range_pct": 0.92,
+            "taker_buy_ratio": 0.55
+        },
+        "ml_forecast": {
+            "expected_return_pct": 0.12,
+            "predicted_dollar_move": 78.0,
+            "clears_hurdle": True
+        }
+    }
+    response = client.post("/agents/trade", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["symbol"] == "BTCUSDT"
+    assert data["trade_action"] in ["BUY", "SELL", "HOLD"]
+    assert isinstance(data["risk_approved"], bool)
+    assert isinstance(data["recommended_position_pct"], float)
+    assert isinstance(data["conviction_score"], int)
+    assert len(data["tools_called"]) >= 0
+    assert "risk_critic_critique" in data
+
