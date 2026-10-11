@@ -22,6 +22,7 @@ from config import (
 import matplotlib.pyplot as plt
 from src.explainability import get_tree_explainer, explain_single_prediction
 from src.agents.market_analyst_agent import generate_market_commentary
+from src.agents.trading_graph import run_trading_graph
 
 
 st.set_page_config(page_title="BTC Predictor Suite", layout="wide")
@@ -71,6 +72,64 @@ def render_analyst_commentary(report):
         for risk in report.key_risks:
             st.markdown(f"- {risk}")
 
+
+def render_langgraph_council(state: dict):
+    """Renders the 2-Node LangGraph Multi-Agent Deliberation Council card."""
+    st.markdown("---")
+    st.subheader("🏛️ Autonomous Multi-Agent Trading Council (LangGraph)")
+
+    action = state.get("trade_action", "HOLD")
+    is_approved = state.get("risk_approved", False)
+    veto_reason = state.get("veto_reason")
+    conviction = state.get("conviction_score", 5)
+    pos_pct = state.get("recommended_position_pct", 0.0)
+    stop_loss = state.get("stop_loss_price")
+    take_profit = state.get("take_profit_price")
+    circuit_active = state.get("circuit_breaker_active", False)
+    tools = state.get("tools_called", [])
+
+    # Top Status Bar
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        badge = "🟢 BUY" if action == "BUY" else ("🔴 SELL" if action == "SELL" else "⚪ HOLD")
+        st.metric("Strategist Thesis", badge)
+    with col2:
+        status_text = "APPROVED ✅" if is_approved else "VETOED ❌"
+        st.metric("Risk Critic Gate", status_text)
+    with col3:
+        st.metric("Conviction Rating", f"{conviction} / 10")
+    with col4:
+        st.metric("Recommended Allocation", f"{pos_pct:.1%}")
+
+    # Risk Alert Banner
+    if not is_approved:
+        st.error(f"🛑 **ORDER VETOED BY RISK CRITIC**: `{veto_reason}`")
+    else:
+        st.success(f"✅ **ORDER AUTHORIZED FOR EXECUTION**: Position size {pos_pct:.1%} authorized.")
+
+    # Execution Targets
+    if is_approved and stop_loss and take_profit:
+        t_col1, t_col2 = st.columns(2)
+        with t_col1:
+            st.warning(f"🛡️ **Protective Stop-Loss:** `${stop_loss:,.2f}` (-1.5%)")
+        with t_col2:
+            st.info(f"🎯 **Target Take-Profit:** `${take_profit:,.2f}` (+2.5%)")
+
+    # Deliberation Details
+    with st.expander("📝 Node 1: Lead Quantitative Strategist Thesis", expanded=True):
+        st.markdown(f"**Executive Summary:** {state.get('executive_summary', 'N/A')}")
+        st.markdown(f"**Full Rationale:**\n\n{state.get('strategist_thesis', 'N/A')}")
+        if circuit_active:
+            st.caption("ℹ️ *Strategist running in Deterministic Circuit Breaker Mode (LLM fallback).*")
+
+    with st.expander("🛡️ Node 2: Reflexion Risk Critic Audit & Critique", expanded=True):
+        st.write(state.get("risk_critic_critique", "No critique logged."))
+
+    with st.expander("🛠️ Tool Invocation Telemetry & Macro Context", expanded=False):
+        st.markdown(f"**Tools Called:** `{', '.join(tools)}`")
+        st.markdown(f"**ChromaDB Vector Retrieval:**\n\n>{state.get('rag_context', 'N/A')}")
+
+
 # --- Initialize Session State for Simulation Page ---
 if 'current_index' not in st.session_state:
     st.session_state.current_index = 25
@@ -81,7 +140,7 @@ if 'previous_prediction' not in st.session_state:
 st.sidebar.title("BTC Predictor Suite 🤖")
 app_mode = st.sidebar.radio(
     "Choose a Prediction Mode",
-    ["Simulation from File", "Live Market Prediction", "Manual Prediction"]
+    ["Simulation from File", "Live Market Prediction", "Manual Prediction", "Multi-Agent Council (LangGraph)"]
 )
 
 # =====================================================================================
@@ -409,3 +468,59 @@ elif app_mode == "Manual Prediction":
 
         except Exception as e:
             st.error(f"❌ An error occurred: {e}")
+
+# =====================================================================================
+# --- MULTI-AGENT COUNCIL PAGE ---
+# =====================================================================================
+elif app_mode == "Multi-Agent Council (LangGraph)":
+    st.title("🏛️ Autonomous Multi-Agent Trading Council")
+    st.markdown(
+        "A 2-Node LangGraph multi-agent governance pipeline decoupling opportunistic trade thesis generation "
+        "(**Lead Quantitative Strategist**) from conservative downside risk management (**Reflexion Risk Critic**)."
+    )
+
+    st.markdown("### 📡 Select Market Telemetry Regime")
+    scenario_type = st.radio(
+        "Choose Telemetry Scenario:",
+        [
+            "🔴 Live Binance / Coinbase Spot Feed",
+            "🟢 Scenario: Bullish Breakout (Clears 0.05% Hurdle)",
+            "⚠️ Scenario: Extreme Volatility Spike (>3.8% Spread Veto)",
+            "⚖️ Scenario: Flat / Sub-Hurdle Chop (<0.05% Return Veto)"
+        ],
+        horizontal=False
+    )
+
+    if st.button("⚡ Convene Multi-Agent Deliberation Council", key="btn_run_council"):
+        with st.spinner("Executing LangGraph StateGraph (Tools ➔ Strategist Node ➔ Risk Critic Node)..."):
+            if "Live Binance" in scenario_type:
+                council_state = run_trading_graph(symbol="BTCUSDT")
+            elif "Bullish Breakout" in scenario_type:
+                council_state = run_trading_graph(
+                    symbol="BTCUSDT",
+                    current_price=66500.0,
+                    market_data={"close": 66500.0, "high": 66900.0, "low": 66200.0, "volume": 3200.0, "taker_buy_ratio": 0.58},
+                    engineered_features={"volatility_range_pct": 1.05, "taker_buy_ratio": 0.58},
+                    ml_forecast={"expected_return_pct": 0.14, "predicted_dollar_move": 93.1, "clears_hurdle": True}
+                )
+            elif "Volatility Spike" in scenario_type:
+                council_state = run_trading_graph(
+                    symbol="BTCUSDT",
+                    current_price=64000.0,
+                    market_data={"close": 64000.0, "high": 67500.0, "low": 62500.0, "volume": 9500.0, "taker_buy_ratio": 0.62},
+                    engineered_features={"volatility_range_pct": 7.81, "taker_buy_ratio": 0.62},
+                    ml_forecast={"expected_return_pct": 0.20, "predicted_dollar_move": 128.0, "clears_hurdle": True}
+                )
+            else:  # Flat / Sub-Hurdle Chop
+                council_state = run_trading_graph(
+                    symbol="BTCUSDT",
+                    current_price=65000.0,
+                    market_data={"close": 65000.0, "high": 65150.0, "low": 64920.0, "volume": 600.0, "taker_buy_ratio": 0.50},
+                    engineered_features={"volatility_range_pct": 0.35, "taker_buy_ratio": 0.50},
+                    ml_forecast={"expected_return_pct": 0.015, "predicted_dollar_move": 9.75, "clears_hurdle": False}
+                )
+
+            st.session_state["active_council_state"] = council_state
+
+    if "active_council_state" in st.session_state:
+        render_langgraph_council(st.session_state["active_council_state"])
