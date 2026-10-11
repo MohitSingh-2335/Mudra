@@ -12,9 +12,13 @@ import numpy as np
 from typing import Dict, Any, Optional
 from langchain_core.tools import tool
 
+from datetime import datetime, timezone
+
 from config import (
     REGRESSOR_MODEL_PATH,
+    CLASSIFIER_MODEL_PATH,
     REGRESSOR_FEATURES,
+    CLASSIFIER_FEATURES,
     FEATURED_BTC_DATA_PATH
 )
 
@@ -124,14 +128,19 @@ def calculate_technical_signals(
     high: float,
     low: float,
     volume: float,
-    taker_buy_ratio: float = 0.5
+    taker_buy_ratio: float = 0.5,
+    open_price: Optional[float] = None,
+    timestamp: Optional[Any] = None
 ) -> Dict[str, Any]:
     """
     Computes key microstructural and technical momentum indicators from price and order-flow inputs.
-    Calculates volatility range, order-flow buyer dominance, and trend bias.
+    Calculates volatility range, order-flow buyer dominance, and trend bias with aligned feature keys.
     """
     spread = high - low
     spread_pct = (spread / close) * 100.0 if close > 0 else 0.0
+    hl_ratio = (high / low) if low > 0 else 1.0
+    op = open_price if open_price and open_price > 0 else close
+    price_change = ((close - op) / op) * 100.0
 
     # Determine order-flow imbalance
     if taker_buy_ratio > 0.55:
@@ -145,11 +154,51 @@ def calculate_technical_signals(
     simulated_rsi = 50.0 + (taker_buy_ratio - 0.5) * 60.0
     simulated_rsi = max(10.0, min(90.0, simulated_rsi))
 
+    # Time-based cyclical features
+    ts = pd.to_datetime(timestamp, utc=True) if timestamp else datetime.now(timezone.utc)
+    hour = int(ts.hour)
+    dayofweek = int(ts.weekday() if hasattr(ts, "weekday") else getattr(ts, "dayofweek", 0))
+    day = int(ts.day)
+
     return {
-        "close_price": close,
+        # Raw & Model Feature Keys
+        "close": float(close),
+        "open": float(op),
+        "high": float(high),
+        "low": float(low),
+        "volume": float(volume),
+        "taker_buy_ratio": round(float(taker_buy_ratio), 4),
+        "Price Change": round(float(price_change), 4),
+        "high_low_ratio": round(float(hl_ratio), 6),
+        "close_lag_1": float(close),
+        "volume_lag_1": float(volume),
+        "rsi": round(float(simulated_rsi), 2),
+        "hour": hour,
+        "dayofweek": dayofweek,
+        "day": day,
+        "hour_sin": round(float(np.sin(2 * np.pi * hour / 24.0)), 6),
+        "hour_cos": round(float(np.cos(2 * np.pi * hour / 24.0)), 6),
+        "day_sin": round(float(np.sin(2 * np.pi * day / 31.0)), 6),
+        "day_cos": round(float(np.cos(2 * np.pi * day / 31.0)), 6),
+        "vol_1h": float(volume),
+        "vol_mean_6h": float(volume),
+        "vol_std_6h": 0.0,
+        "vol_max_6h": float(volume),
+        "vol_min_6h": float(volume),
+        "Rolling_Std_Close": round(float(spread / 2.0), 2),
+        "Rolling_Mean_Close": float(close),
+        "taker_buy_ratio_mean_6h": round(float(taker_buy_ratio), 4),
+        "trades_mean_6h": 10000.0,
+        "fng_value": 50.0,
+        "fng_mean_3d": 50.0,
+        "onchain_num_tx_change": 0.0,
+        "onchain_hash_rate_change": 0.0,
+        "onchain_miners_revenue_change": 0.0,
+
+        # Microstructural Telemetry
+        "close_price": float(close),
         "high_low_spread_usd": round(spread, 2),
         "volatility_range_pct": round(spread_pct, 3),
-        "taker_buy_ratio": round(taker_buy_ratio, 4),
         "order_flow_bias": flow_bias,
         "rsi_estimate": round(simulated_rsi, 1),
         "volume_usd": round(volume, 2)
@@ -159,60 +208,106 @@ def calculate_technical_signals(
 @tool
 def get_model_return_forecast(features: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
-    Runs inference using the Optuna-tuned XGBoost production regressor.
-    Returns the expected 1-hour percentage return (R), predicted dollar move,
-    and whether the forecast clears the 0.05% institutional fee hurdle.
+    Runs dual inference using the Optuna-tuned XGBoost Regressor and Classifier.
+    Returns expected percentage return, predicted dollar move, target close price,
+    directional prediction (UP/DOWN), probability, and symmetric fee hurdle check.
     """
     try:
-        if not os.path.exists(REGRESSOR_MODEL_PATH):
-            return {
-                "expected_return_pct": 0.0,
-                "predicted_dollar_move": 0.0,
-                "clears_hurdle": False,
-                "hurdle_threshold_pct": 0.05,
-                "status": "model_artifact_missing"
-            }
-
-        model = joblib.load(REGRESSOR_MODEL_PATH)
-        model.set_params(device="cpu")
-
-        # Construct input vector matching REGRESSOR_FEATURES
         feature_dict = features or {}
-        row_data = {}
-        for col in REGRESSOR_FEATURES:
-            val = feature_dict.get(col, 0.0)
-            # Impute sensible neutral defaults
-            if col == "taker_buy_ratio" and val == 0.0:
-                val = 0.5
-            elif col == "fng_value" and val == 0.0:
-                val = 50.0
-            row_data[col] = float(val)
+        current_close = float(feature_dict.get("close", feature_dict.get("close_price", feature_dict.get("current_price", 65000.0))))
 
-        df_input = pd.DataFrame([row_data], columns=REGRESSOR_FEATURES)
-        pred_return = float(model.predict(df_input)[0])
+        # 1. Regressor Inference (Target Return)
+        raw_pred_return = 0.0
+        if os.path.exists(REGRESSOR_MODEL_PATH):
+            model_reg = joblib.load(REGRESSOR_MODEL_PATH)
+            model_reg.set_params(device="cpu")
 
-        current_close = float(feature_dict.get("close", feature_dict.get("current_price", 65000.0)))
-        pred_dollar_move = current_close * (pred_return / 100.0)
+            row_reg = {}
+            for col in REGRESSOR_FEATURES:
+                val = feature_dict.get(col, 0.0)
+                if col == "taker_buy_ratio" and val == 0.0:
+                    val = 0.50
+                elif col == "fng_value" and val == 0.0:
+                    val = 50.0
+                elif col == "close_lag_1" and val == 0.0:
+                    val = current_close
+                row_reg[col] = float(val)
+
+            df_reg = pd.DataFrame([row_reg], columns=REGRESSOR_FEATURES)
+            # Model outputs decimal fraction: 0.0035 = +0.35% return
+            raw_pred_return = float(model_reg.predict(df_reg)[0])
+
+        # 2. Classifier Inference (Directional Movement & Probability)
+        move_code = 1 if raw_pred_return >= 0 else 0
+        prob_up = 0.50
+        prob_down = 0.50
+
+        if os.path.exists(CLASSIFIER_MODEL_PATH):
+            model_clf = joblib.load(CLASSIFIER_MODEL_PATH)
+            model_clf.set_params(device="cpu")
+
+            row_clf = {}
+            for col in CLASSIFIER_FEATURES:
+                val = feature_dict.get(col, 0.0)
+                if col == "taker_buy_ratio" and val == 0.0:
+                    val = 0.50
+                elif col == "fng_value" and val == 0.0:
+                    val = 50.0
+                elif col == "close_lag_1" and val == 0.0:
+                    val = current_close
+                row_clf[col] = float(val)
+
+            df_clf = pd.DataFrame([row_clf], columns=CLASSIFIER_FEATURES)
+            move_code = int(model_clf.predict(df_clf)[0])
+            if hasattr(model_clf, "predict_proba"):
+                probs = model_clf.predict_proba(df_clf)[0]
+                prob_down = float(probs[0])
+                prob_up = float(probs[1])
+
+        # 3. Unit Normalization & Mathematical Targets
+        expected_return_pct = raw_pred_return * 100.0  # e.g., 0.0035 -> +0.3500%
+        pred_dollar_move = current_close * raw_pred_return
         target_price = current_close + pred_dollar_move
 
-        clears_hurdle = pred_return >= 0.05
+        # 4. Symmetric Fee Hurdle (|Return| >= 0.05% = 5 basis points)
+        clears_hurdle = abs(expected_return_pct) >= 0.05
+
+        direction = "UP" if move_code == 1 else "DOWN"
+        if not clears_hurdle:
+            direction_badge = "SIDEWAYS / CHOP ⚪"
+        else:
+            direction_badge = "BULLISH 🟢" if move_code == 1 else "BEARISH 🔴"
+
+        confidence = max(prob_up, prob_down)
 
         return {
-            "expected_return_pct": round(pred_return, 4),
+            "expected_return_pct": round(expected_return_pct, 4),
             "predicted_dollar_move": round(pred_dollar_move, 2),
             "predicted_target_price": round(target_price, 2),
             "clears_hurdle": clears_hurdle,
             "hurdle_threshold_pct": 0.05,
+            "direction": direction,
+            "direction_badge": direction_badge,
+            "direction_probability_up": round(prob_up * 100.0, 2),
+            "direction_probability_down": round(prob_down * 100.0, 2),
+            "confidence": round(confidence, 4),
             "status": "success"
         }
     except Exception as e:
         return {
             "expected_return_pct": 0.0,
             "predicted_dollar_move": 0.0,
+            "predicted_target_price": round(features.get("close", 65000.0) if features else 65000.0, 2),
             "clears_hurdle": False,
             "hurdle_threshold_pct": 0.05,
+            "direction": "SIDEWAYS",
+            "direction_badge": "NEUTRAL ⚪",
+            "direction_probability_up": 50.0,
+            "direction_probability_down": 50.0,
+            "confidence": 0.50,
             "status": f"error: {str(e)}"
         }
+
 
 
 @tool
