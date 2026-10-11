@@ -12,6 +12,7 @@ except ImportError:
 
 import os
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import joblib
@@ -28,6 +29,8 @@ from config import (
 )
 from src.explainability import get_tree_explainer, explain_single_prediction
 from src.agents.trading_graph import run_trading_graph
+from src.engine.sync import sync_hourly_quant_cycle
+
 from src.database.queries import (
     get_latest_market_ticks,
     get_reconciliation_history,
@@ -197,12 +200,38 @@ def fetch_cloud_database_state(current_price: float):
 st.sidebar.title("⚡ Mudra Intelligence")
 st.sidebar.caption("Institutional Quantitative Cryptocurrency Platform")
 
+# On-Demand Hourly Quant Deliberation & Sync Trigger
+if st.sidebar.button("⚡ Sync Latest Hourly Candle Now", use_container_width=True):
+    with st.spinner("Streaming candle, calculating signals, and deliberating..."):
+        try:
+            synced, sync_msg, _ = sync_hourly_quant_cycle(force=True)
+            if synced:
+                st.sidebar.success(sync_msg)
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.sidebar.info(sync_msg)
+        except Exception as exc:
+            st.sidebar.error(f"Sync error: {exc}")
+
 if st.sidebar.button("🔄 Refresh Terminal Feeds", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
 
+auto_pulse = st.sidebar.toggle("🟢 Live Terminal Stream (Auto-pulse 30s)", value=True)
+
 st.sidebar.markdown("---")
 st.sidebar.subheader("☁️ Infrastructure Health")
+
+# Auto-sync check on page load (runs once per browser session)
+if "has_synced_on_open" not in st.session_state:
+    st.session_state.has_synced_on_open = True
+    try:
+        synced, sync_msg, _ = sync_hourly_quant_cycle(force=False)
+        if synced:
+            st.toast(f"⚡ Hourly candle synchronized: {sync_msg}", icon="✅")
+    except Exception:
+        pass
 
 # Fetch live market data
 live_market_df = fetch_live_market_candles()
@@ -230,10 +259,78 @@ st.sidebar.markdown(
 
 
 # =====================================================================================
-# TOP EXECUTIVE KPI BANNER
+# TOP EXECUTIVE KPI BANNER & 1-SECOND WEBSOCKET RIBBON
 # =====================================================================================
 st.title("⚡ Mudra Quantitative Cryptocurrency Terminal")
+
+# Client-Side 1-Second Binance WebSocket Ticker (0% Server Load)
+components.html(
+    """
+    <div style="background-color: #0E1117; border: 1px solid #1E2329; border-radius: 8px; padding: 10px 16px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #FFFFFF; display: flex; justify-content: space-between; align-items: center; box-sizing: border-box;">
+        <div style="display: flex; align-items: center; gap: 12px;">
+            <span style="font-size: 1.05rem; font-weight: 700; color: #F0B90B;">🟡 BTC/USDT</span>
+            <span id="price" style="font-size: 1.35rem; font-weight: 800; font-family: monospace; transition: color 0.15s ease;">$---.--</span>
+            <span id="change" style="font-size: 0.88rem; font-weight: 600; padding: 2px 6px; border-radius: 4px;">---%</span>
+        </div>
+        <div style="display: flex; gap: 16px; font-size: 0.82rem; color: #848E9C; align-items: center;">
+            <div>24h High: <span id="high" style="color: #EAECEF; font-weight: 600; font-family: monospace;">$---.--</span></div>
+            <div>24h Low: <span id="low" style="color: #EAECEF; font-weight: 600; font-family: monospace;">$---.--</span></div>
+            <div>24h Vol: <span id="vol" style="color: #EAECEF; font-weight: 600; font-family: monospace;">--- BTC</span></div>
+            <div style="display: flex; align-items: center; gap: 6px; margin-left: 8px;">
+                <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background-color: #0ECB81; box-shadow: 0 0 6px #0ECB81;"></span>
+                <span style="color: #0ECB81; font-weight: 600;">Binance WebSocket 1s</span>
+            </div>
+        </div>
+    </div>
+    <script>
+        const ws = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@ticker");
+        let lastPrice = 0;
+        ws.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            const price = parseFloat(data.c);
+            const change = parseFloat(data.P);
+            const high = parseFloat(data.h);
+            const low = parseFloat(data.l);
+            const vol = parseFloat(data.v);
+
+            const priceEl = document.getElementById("price");
+            const changeEl = document.getElementById("change");
+            const highEl = document.getElementById("high");
+            const lowEl = document.getElementById("low");
+            const volEl = document.getElementById("vol");
+
+            if (priceEl) {
+                priceEl.innerText = "$" + price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+                if (lastPrice !== 0) {
+                    priceEl.style.color = price >= lastPrice ? "#0ECB81" : "#F6465D";
+                }
+                lastPrice = price;
+            }
+            if (changeEl) {
+                const isPos = change >= 0;
+                changeEl.innerText = (isPos ? "+" : "") + change.toFixed(2) + "%";
+                changeEl.style.color = isPos ? "#0ECB81" : "#F6465D";
+                changeEl.style.backgroundColor = isPos ? "rgba(14, 203, 129, 0.15)" : "rgba(246, 70, 93, 0.15)";
+            }
+            if (highEl) highEl.innerText = "$" + high.toLocaleString(undefined, {minimumFractionDigits: 2});
+            if (lowEl) lowEl.innerText = "$" + low.toLocaleString(undefined, {minimumFractionDigits: 2});
+            if (volEl) volEl.innerText = vol.toLocaleString(undefined, {maximumFractionDigits: 0}) + " BTC";
+        };
+    </script>
+    """,
+    height=60,
+)
+
 st.caption(f"Real-Time BTC/USDT Multi-Agent Deliberation, Delayed Ground Truth Reconciliation & Autonomous Forward Ledger • Last Sync: {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
+
+# Background Auto-Pulse Stream (Every 30s)
+if auto_pulse:
+    @st.experimental_fragment(run_every=30)
+    def live_terminal_heartbeat():
+        st.rerun()
+
+    live_terminal_heartbeat()
+
 
 # Top Metrics Row
 kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
