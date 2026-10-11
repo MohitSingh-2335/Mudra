@@ -100,18 +100,21 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
         # 1. Compute Signals and XGBoost Return Forecast
         signals_output = calculate_technical_signals.invoke({
             "close": candle["close"],
+            "open_price": candle["open"],
             "high": candle["high"],
             "low": candle["low"],
             "volume": candle["volume"],
             "taker_buy_ratio": candle.get("taker_buy_ratio", 0.5),
+            "timestamp": candle["timestamp"],
         })
         ml_output = get_model_return_forecast.invoke({"features": signals_output})
         pred_return = float(ml_output.get("expected_return_pct", 0.0))
-        pred_price = candle["close"] * (1.0 + (pred_return / 100.0))
+        pred_price = float(ml_output.get("predicted_target_price", candle["close"]))
         confidence = float(ml_output.get("confidence", 0.50))
 
+        clears_hurdle = ml_output.get("clears_hurdle", False)
         volatility = float(signals_output.get("volatility_range_pct", 0.02))
-        regime = "HIGH_VOL_CHOP" if volatility > 3.8 else ("BULL_MOMENTUM" if pred_return > 0.05 else ("BEAR_DISTRIBUTION" if pred_return < -0.05 else "SIDEWAYS_RANGE"))
+        regime = "HIGH_VOL_CHOP" if volatility > 3.8 else ("BULL_MOMENTUM" if (clears_hurdle and pred_return > 0) else ("BEAR_DISTRIBUTION" if (clears_hurdle and pred_return < 0) else "SIDEWAYS_RANGE"))
 
         # 2. Record or Update MarketTick
         if existing:
