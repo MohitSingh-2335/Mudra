@@ -76,11 +76,17 @@ def create_db_engine(db_url: Optional[str] = None) -> Engine:
     url = db_url or get_database_url()
     
     if "sqlite" in url:
-        return create_engine(
+        eng = create_engine(
             url,
             connect_args={"check_same_thread": False},
             echo=False,
         )
+        # Ensure schema tables exist on SQLite fallback
+        try:
+            Base.metadata.create_all(bind=eng)
+        except Exception:
+            pass
+        return eng
     
     # PostgreSQL (Neon Serverless)
     return create_engine(
@@ -89,6 +95,7 @@ def create_db_engine(db_url: Optional[str] = None) -> Engine:
         pool_size=5,
         max_overflow=10,
         pool_recycle=300,    # Recycle connections every 5 min
+        connect_args={"connect_timeout": 10},
         echo=False,
     )
 
