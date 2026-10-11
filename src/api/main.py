@@ -192,6 +192,32 @@ async def run_agent_trade(req: AgentTradeRequest):
         )
 
 
+@app.get("/reconciliation/summary", tags=["Observability & Database"])
+async def get_reconciliation_metrics(lookback_hours: int = 168):
+    """Returns rolling delayed reconciliation accuracy metrics from Neon PostgreSQL."""
+    from src.database.queries import get_reconciliation_kpis
+    try:
+        return get_reconciliation_kpis(lookback_hours=lookback_hours)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database query failed: {str(e)}"
+        )
+
+
+@app.get("/portfolio/summary", tags=["Observability & Database"])
+async def get_portfolio_metrics(current_price: float = 83000.0):
+    """Returns current forward paper portfolio snapshot and excess Alpha from Neon."""
+    from src.database.queries import get_portfolio_kpis
+    try:
+        return get_portfolio_kpis(current_price=current_price)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database query failed: {str(e)}"
+        )
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("src.api.main:app", host="0.0.0.0", port=8000, reload=True)
