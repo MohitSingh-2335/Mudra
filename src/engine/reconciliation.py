@@ -105,8 +105,10 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
 
         # 7. Audit Risk Critic Veto Quality (if CouncilAudit exists for this prior tick)
         audit = session.execute(
-            select(CouncilAudit).where(CouncilAudit.tick_id == prior_tick.id)
-        ).scalar_one_or_none()
+            select(CouncilAudit)
+            .where(CouncilAudit.tick_id == prior_tick.id)
+            .order_by(CouncilAudit.id.desc())
+        ).scalars().first()
 
         if audit:
             if audit.risk_verdict == "VETOED":
