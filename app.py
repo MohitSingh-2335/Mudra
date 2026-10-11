@@ -407,40 +407,84 @@ with tab1:
 
     # Next-Hour Forecast Panel
     st.markdown("### 🔮 Next-Hour Model Forecast Breakdown")
-    f_col1, f_col2, f_col3, f_col4 = st.columns(4)
+    f_col1, f_col2, f_col3, f_col4, f_col5 = st.columns(5)
 
     if not live_market_df.empty and reg_model:
         recent_candle = live_market_df.iloc[-1]
         spread_pct = ((recent_candle["high"] - recent_candle["low"]) / recent_candle["close"]) * 100.0
         taker = recent_candle.get("taker_buy_ratio", 0.5)
+        hl_ratio = float(recent_candle["high"] / recent_candle["low"]) if recent_candle["low"] > 0 else 1.0
+
+        ts = pd.to_datetime(recent_candle["timestamp"], utc=True)
+        h = int(ts.hour)
+        d = int(ts.day)
+        w = int(ts.weekday() if hasattr(ts, "weekday") else ts.dayofweek)
 
         # Build feature vector matching REGRESSOR_FEATURES strictly
         sample_input = {col: 0.0 for col in REGRESSOR_FEATURES}
         sample_input["taker_buy_ratio"] = float(taker)
-        if "volume" in recent_candle:
-            sample_input["volume"] = float(recent_candle["volume"])
-        if "high" in recent_candle and "low" in recent_candle and recent_candle["low"] > 0:
-            sample_input["high_low_ratio"] = float(recent_candle["high"] / recent_candle["low"])
-        if "close" in recent_candle:
-            sample_input["close_lag_1"] = float(recent_candle["close"])
+        sample_input["volume"] = float(recent_candle.get("volume", 1000.0))
+        sample_input["high_low_ratio"] = hl_ratio
+        sample_input["close_lag_1"] = float(recent_candle["close"])
+        sample_input["vol_1h"] = float(recent_candle.get("volume", 1000.0))
+        sample_input["vol_mean_6h"] = float(recent_candle.get("volume", 1000.0))
+        sample_input["fng_value"] = 50.0
+        sample_input["hour"] = h
+        sample_input["day"] = d
+        sample_input["dayofweek"] = w
+        sample_input["hour_sin"] = float(np.sin(2 * np.pi * h / 24.0))
+        sample_input["hour_cos"] = float(np.cos(2 * np.pi * h / 24.0))
+        sample_input["day_sin"] = float(np.sin(2 * np.pi * d / 31.0))
+        sample_input["day_cos"] = float(np.cos(2 * np.pi * d / 31.0))
 
         input_df = pd.DataFrame([{col: sample_input[col] for col in REGRESSOR_FEATURES}], columns=REGRESSOR_FEATURES)
 
+        # 1. Regressor Output (Raw decimal fraction: 0.0035 -> +0.35%)
         try:
-            pred_ret = float(reg_model.predict(input_df)[0])
+            raw_pred_ret = float(reg_model.predict(input_df)[0])
         except Exception:
-            pred_ret = 0.0
+            raw_pred_ret = 0.0
 
-        pred_target = current_price * (1.0 + (pred_ret / 100.0))
-        cleared_hurdle = abs(pred_ret) >= 0.05
+        pred_ret_pct = raw_pred_ret * 100.0
+        pred_dollar_move = current_price * raw_pred_ret
+        pred_target = current_price + pred_dollar_move
+        cleared_hurdle = abs(pred_ret_pct) >= 0.05
+
+        # 2. Classifier Output (Direction: 1 = UP, 0 = DOWN)
+        prob_up = 50.0
+        prob_down = 50.0
+        direction_label = "UP" if pred_ret_pct >= 0 else "DOWN"
+        if clf_model:
+            sample_clf = {col: sample_input.get(col, 0.0) for col in CLASSIFIER_FEATURES}
+            sample_clf["close_lag_1"] = float(recent_candle["close"])
+            sample_clf["high_low_ratio"] = hl_ratio
+            clf_df = pd.DataFrame([sample_clf], columns=CLASSIFIER_FEATURES)
+            try:
+                move_code = int(clf_model.predict(clf_df)[0])
+                direction_label = "UP" if move_code == 1 else "DOWN"
+                if hasattr(clf_model, "predict_proba"):
+                    probs = clf_model.predict_proba(clf_df)[0]
+                    prob_down = float(probs[0]) * 100.0
+                    prob_up = float(probs[1]) * 100.0
+            except Exception:
+                pass
+
+        if not cleared_hurdle:
+            direction_badge = "⚪ SIDEWAYS (CHOP)"
+        elif direction_label == "UP":
+            direction_badge = "🟢 BULLISH (UP)"
+        else:
+            direction_badge = "🔴 BEARISH (DOWN)"
 
         with f_col1:
-            st.metric("Expected 1h Move", f"{pred_ret:+.3f}%", "Cleared 0.05% Hurdle ✅" if cleared_hurdle else "Below Fee Hurdle ⚠️")
+            st.metric("Predicted Direction", direction_badge, f"Up Prob: {prob_up:.1f}%")
         with f_col2:
-            st.metric("Target Price", f"${pred_target:,.2f}", f"${pred_target - current_price:+,.2f}")
+            st.metric("Expected 1h Move", f"{pred_ret_pct:+.3f}%", "Cleared 0.05% Hurdle ✅" if cleared_hurdle else "Below Fee Hurdle ⚠️")
         with f_col3:
-            st.metric("Taker Buy Ratio", f"{taker:.4f}", "Order Flow: " + ("Buyer Pressure 🟢" if taker > 0.52 else ("Seller Pressure 🔴" if taker < 0.48 else "Balanced ⚪")))
+            st.metric("Target Close Price", f"${pred_target:,.2f}", f"${pred_dollar_move:+,.2f}")
         with f_col4:
+            st.metric("Taker Buy Ratio", f"{taker:.4f}", "Order Flow: " + ("Buyer Pressure 🟢" if taker > 0.52 else ("Seller Pressure 🔴" if taker < 0.48 else "Balanced ⚪")))
+        with f_col5:
             st.metric("Hourly Volatility Spread", f"{spread_pct:.2f}%", "Regime: " + ("Extreme Flush 🚨" if spread_pct > 3.8 else "Controlled 🛡️"))
 
 
@@ -451,45 +495,77 @@ with tab2:
     st.subheader("🏛️ Autonomous Multi-Agent Trading Council (LangGraph)")
     st.caption("Cyclical 2-node StateGraph: Lead Quantitative Strategist synthesizes thesis, and Reflexion Risk Critic enforces volatility & Kelly limits.")
 
+    st.markdown("#### 🧪 Quantitative Stress-Testing & Simulation Scenarios")
+    st.caption("Click any scenario below to convene the AI agents live on demand:")
+
     # Deliberation Trigger & Stress Testing Scenarios
     c_btn1, c_btn2, c_btn3, c_btn4 = st.columns(4)
+    run_deliberation = False
     scenario_selected = "live"
 
     if c_btn1.button("🔴 Deliberate Live Market", use_container_width=True):
         scenario_selected = "live"
+        run_deliberation = True
     if c_btn2.button("⚡ Stress: Bullish Breakout", use_container_width=True):
         scenario_selected = "bullish"
+        run_deliberation = True
     if c_btn3.button("🛡️ Stress: Volatility Flush Veto", use_container_width=True):
         scenario_selected = "vol_spike"
+        run_deliberation = True
     if c_btn4.button("🛑 Stress: Sub-Hurdle Chop Veto", use_container_width=True):
         scenario_selected = "chop"
+        run_deliberation = True
 
-    with st.spinner("Convening Strategist and Risk Critic nodes..."):
-        # Configure state per scenario
-        if scenario_selected == "bullish":
-            m_data = {"close": current_price, "high": current_price * 1.01, "low": current_price * 0.99, "volume": 5000.0, "taker_buy_ratio": 0.65}
-            t_data = {"volatility_spread": 0.015, "order_flow_bias": "STRONG_BUYER_AGGRESSION", "rsi_estimate": 62.0}
-            f_data = {"expected_return_pct": 0.42, "predicted_dollar_move": 350.0, "clears_hurdle": True, "confidence": 0.88}
-        elif scenario_selected == "vol_spike":
-            m_data = {"close": current_price, "high": current_price * 1.05, "low": current_price * 0.95, "volume": 12000.0, "taker_buy_ratio": 0.35}
-            t_data = {"volatility_spread": 0.052, "order_flow_bias": "EXTREME_LIQUIDATION", "rsi_estimate": 28.0}
-            f_data = {"expected_return_pct": 0.20, "predicted_dollar_move": 160.0, "clears_hurdle": True, "confidence": 0.60}
-        elif scenario_selected == "chop":
-            m_data = {"close": current_price, "high": current_price * 1.002, "low": current_price * 0.998, "volume": 400.0, "taker_buy_ratio": 0.49}
-            t_data = {"volatility_spread": 0.004, "order_flow_bias": "FLAT_CHOP", "rsi_estimate": 50.0}
-            f_data = {"expected_return_pct": 0.02, "predicted_dollar_move": 15.0, "clears_hurdle": False, "confidence": 0.45}
-        else:
-            m_data = {"close": current_price, "high": current_price * 1.005, "low": current_price * 0.995, "volume": 1200.0, "taker_buy_ratio": 0.51}
-            t_data = {"volatility_spread": 0.018, "order_flow_bias": "NEUTRAL", "rsi_estimate": 51.0}
-            f_data = {"expected_return_pct": 0.08, "predicted_dollar_move": 65.0, "clears_hurdle": True, "confidence": 0.65}
+    if run_deliberation:
+        with st.spinner("Convening Strategist and Risk Critic nodes..."):
+            if scenario_selected == "bullish":
+                m_data = {"close": current_price, "high": current_price * 1.01, "low": current_price * 0.99, "volume": 5000.0, "taker_buy_ratio": 0.65}
+                t_data = {"volatility_spread": 0.015, "order_flow_bias": "STRONG_BUYER_AGGRESSION", "rsi_estimate": 62.0}
+                f_data = {"expected_return_pct": 0.42, "predicted_dollar_move": 350.0, "clears_hurdle": True, "confidence": 0.88, "direction": "UP", "direction_badge": "BULLISH 🟢"}
+            elif scenario_selected == "vol_spike":
+                m_data = {"close": current_price, "high": current_price * 1.05, "low": current_price * 0.95, "volume": 12000.0, "taker_buy_ratio": 0.35}
+                t_data = {"volatility_spread": 0.052, "order_flow_bias": "EXTREME_LIQUIDATION", "rsi_estimate": 28.0}
+                f_data = {"expected_return_pct": 0.20, "predicted_dollar_move": 160.0, "clears_hurdle": True, "confidence": 0.60, "direction": "UP", "direction_badge": "BULLISH 🟢"}
+            elif scenario_selected == "chop":
+                m_data = {"close": current_price, "high": current_price * 1.002, "low": current_price * 0.998, "volume": 400.0, "taker_buy_ratio": 0.49}
+                t_data = {"volatility_spread": 0.004, "order_flow_bias": "FLAT_CHOP", "rsi_estimate": 50.0}
+                f_data = {"expected_return_pct": 0.02, "predicted_dollar_move": 15.0, "clears_hurdle": False, "confidence": 0.45, "direction": "SIDEWAYS", "direction_badge": "SIDEWAYS ⚪"}
+            else:
+                m_data = {"close": current_price, "high": current_price * 1.005, "low": current_price * 0.995, "volume": 1200.0, "taker_buy_ratio": 0.51}
+                t_data = {"volatility_spread": 0.018, "order_flow_bias": "NEUTRAL", "rsi_estimate": 51.0}
+                f_data = {"expected_return_pct": 0.08, "predicted_dollar_move": 65.0, "clears_hurdle": True, "confidence": 0.65, "direction": "UP", "direction_badge": "BULLISH 🟢"}
 
-        council_state = run_trading_graph(
-            symbol="BTCUSDT",
-            current_price=current_price,
-            market_data=m_data,
-            engineered_features=t_data,
-            ml_forecast=f_data,
-        )
+            st.session_state["council_state"] = run_trading_graph(
+                symbol="BTCUSDT",
+                current_price=current_price,
+                market_data=m_data,
+                engineered_features=t_data,
+                ml_forecast=f_data,
+            )
+
+    # Use simulated/live state if triggered, otherwise fallback to latest audit from database
+    council_state = st.session_state.get("council_state")
+    if not council_state and db_state.get("latest_audit"):
+        audit = db_state["latest_audit"]
+        council_state = {
+            "final_decision": audit.get("final_decision", "HOLD"),
+            "risk_verdict": audit.get("risk_verdict", "APPROVED"),
+            "strategist_action": audit.get("strategist_action", "HOLD"),
+            "strategist_conviction": audit.get("strategist_conviction", 5),
+            "kelly_fraction": audit.get("kelly_fraction", 0.10),
+            "veto_reasons": audit.get("veto_reasons", []),
+            "thesis": audit.get("execution_notes", "Awaiting live deliberation or click scenario button above."),
+        }
+    elif not council_state:
+        council_state = {
+            "final_decision": "HOLD",
+            "risk_verdict": "APPROVED",
+            "strategist_action": "HOLD",
+            "strategist_conviction": 5,
+            "kelly_fraction": 0.10,
+            "veto_reasons": [],
+            "thesis": "Awaiting live deliberation. Click any scenario button above to convene the Multi-Agent Council.",
+        }
 
     # Deliberation Outcome Banner
     act = council_state.get("final_decision", "HOLD")
@@ -519,7 +595,7 @@ with tab2:
             if vetoes:
                 st.markdown("**Breached Invariants:**")
                 for v in vetoes:
-                    st.markdown(f"- ⚠️ {v}")
+                    st.markdown(f"- ⚠️ `{v}`")
 
 
 # -------------------------------------------------------------------------------------
