@@ -33,7 +33,7 @@ jobs:
         env:
           PYTHONPATH: .
         run: |
-          python -m pytest tests/test_api.py -v
+          python -m pytest tests/ -v
 
   # Job 2: Container Image Build Verification
   build-containers:
