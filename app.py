@@ -144,25 +144,51 @@ def fetch_live_market_candles(symbol: str = "BTCUSDT") -> pd.DataFrame:
 @st.cache_data(ttl=60)
 def fetch_cloud_database_state(current_price: float):
     """Pulls track record, portfolio equity, and reconciliation KPIs directly from Neon."""
-    db_ok, db_ver, db_lat = test_connection()
-    ticks_df = get_latest_market_ticks(limit=100)
-    rec_df = get_reconciliation_history(limit=50)
-    rec_kpis = get_reconciliation_kpis(lookback_hours=168)
-    port_df = get_portfolio_history(limit=100)
-    port_kpis = get_portfolio_kpis(current_price=current_price)
-    latest_audit = get_latest_council_audit()
-    
-    return {
-        "db_ok": db_ok,
-        "db_ver": db_ver,
-        "db_lat": db_lat,
-        "ticks_df": ticks_df,
-        "rec_df": rec_df,
-        "rec_kpis": rec_kpis,
-        "port_df": port_df,
-        "port_kpis": port_kpis,
-        "latest_audit": latest_audit,
+    fallback_state = {
+        "db_ok": False,
+        "db_ver": "Connecting / Offline",
+        "db_lat": 0.0,
+        "ticks_df": pd.DataFrame(),
+        "rec_df": pd.DataFrame(),
+        "rec_kpis": {
+            "total_evaluated": 0, "win_rate_pct": 0.0, "mae_usd": 0.0,
+            "mape_pct": 0.0, "information_coefficient": 0.0,
+            "black_swans_filtered": 0, "accurate_count": 0
+        },
+        "port_df": pd.DataFrame(),
+        "port_kpis": {
+            "cash_balance": 10000.0, "btc_balance": 0.0,
+            "total_equity_usd": 10000.0, "cumulative_return_pct": 0.0,
+            "benchmark_btc_equity": 10000.0, "alpha_usd": 0.0,
+            "alpha_pct": 0.0, "drawdown_pct": 0.0, "total_trades": 0
+        },
+        "latest_audit": None,
     }
+    try:
+        db_ok, db_ver, db_lat = test_connection()
+        if not db_ok:
+            return fallback_state
+
+        ticks_df = get_latest_market_ticks(limit=100)
+        rec_df = get_reconciliation_history(limit=50)
+        rec_kpis = get_reconciliation_kpis(lookback_hours=168)
+        port_df = get_portfolio_history(limit=100)
+        port_kpis = get_portfolio_kpis(current_price=current_price)
+        latest_audit = get_latest_council_audit()
+
+        return {
+            "db_ok": db_ok,
+            "db_ver": db_ver,
+            "db_lat": db_lat,
+            "ticks_df": ticks_df,
+            "rec_df": rec_df,
+            "rec_kpis": rec_kpis,
+            "port_df": port_df,
+            "port_kpis": port_kpis,
+            "latest_audit": latest_audit,
+        }
+    except Exception:
+        return fallback_state
 
 
 # =====================================================================================
