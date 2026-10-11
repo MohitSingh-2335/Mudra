@@ -365,12 +365,45 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 # TAB 1: LIVE CANDLESTICK TERMINAL
 # -------------------------------------------------------------------------------------
 with tab1:
-    st.subheader("BTC/USDT Live Candlestick & Microstructural Terminal")
-    st.caption("Interactive 1-hour candles with 20/50 EMA ribbons, volume distribution, and order-flow taker buy ratios.")
+    st.subheader("BTC/USDT Real-Time Streaming Candlestick Terminal")
+    st.caption("Official TradingView live Binance feed • Millisecond WebSocket streaming, real-time volume & interactive timeframes.")
 
-    # Render TradingView Plotly Candlestick
-    candlestick_fig = create_tradingview_candlestick(live_market_df)
-    st.plotly_chart(candlestick_fig, use_container_width=True)
+    # Live Real-Time Binance Candlestick Widget via TradingView
+    components.html(
+        """
+        <div class="tradingview-widget-container" style="height:540px;width:100%;margin:0;padding:0;">
+          <div id="tradingview_mudra" style="height:100%;width:100%;"></div>
+          <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+          <script type="text/javascript">
+          new TradingView.widget({
+            "autosize": true,
+            "symbol": "BINANCE:BTCUSDT",
+            "interval": "60",
+            "timezone": "Etc/UTC",
+            "theme": "dark",
+            "style": "1",
+            "locale": "en",
+            "toolbar_bg": "#0E1117",
+            "enable_publishing": false,
+            "hide_side_toolbar": false,
+            "allow_symbol_change": false,
+            "container_id": "tradingview_mudra",
+            "backgroundColor": "#0E1117",
+            "gridColor": "rgba(43, 49, 62, 0.4)",
+            "details": false,
+            "hotlist": false,
+            "calendar": false
+          });
+          </script>
+        </div>
+        """,
+        height=550,
+    )
+
+    with st.expander("🔬 Python Microstructural Technical Analysis (20/50 EMA Ribbon & Order Flow)"):
+        candlestick_fig = create_tradingview_candlestick(live_market_df)
+        st.plotly_chart(candlestick_fig, use_container_width=True)
+
 
     # Next-Hour Forecast Panel
     st.markdown("### 🔮 Next-Hour Model Forecast Breakdown")
