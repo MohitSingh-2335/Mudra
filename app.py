@@ -303,13 +303,23 @@ with tab1:
         spread_pct = ((recent_candle["high"] - recent_candle["low"]) / recent_candle["close"]) * 100.0
         taker = recent_candle.get("taker_buy_ratio", 0.5)
 
-        # Build feature vector
+        # Build feature vector matching REGRESSOR_FEATURES strictly
         sample_input = {col: 0.0 for col in REGRESSOR_FEATURES}
-        sample_input["taker_buy_ratio"] = taker
-        sample_input["volatility_24h"] = spread_pct / 100.0
-        input_df = pd.DataFrame([sample_input])
+        sample_input["taker_buy_ratio"] = float(taker)
+        if "volume" in recent_candle:
+            sample_input["volume"] = float(recent_candle["volume"])
+        if "high" in recent_candle and "low" in recent_candle and recent_candle["low"] > 0:
+            sample_input["high_low_ratio"] = float(recent_candle["high"] / recent_candle["low"])
+        if "close" in recent_candle:
+            sample_input["close_lag_1"] = float(recent_candle["close"])
 
-        pred_ret = float(reg_model.predict(input_df)[0])
+        input_df = pd.DataFrame([{col: sample_input[col] for col in REGRESSOR_FEATURES}], columns=REGRESSOR_FEATURES)
+
+        try:
+            pred_ret = float(reg_model.predict(input_df)[0])
+        except Exception:
+            pred_ret = 0.0
+
         pred_target = current_price * (1.0 + (pred_ret / 100.0))
         cleared_hurdle = abs(pred_ret) >= 0.05
 
@@ -537,16 +547,26 @@ with tab5:
     if not live_market_df.empty and explainer_clf:
         recent_candle = live_market_df.iloc[-1]
         sample_clf = {col: 0.0 for col in CLASSIFIER_FEATURES}
-        sample_clf["taker_buy_ratio"] = recent_candle.get("taker_buy_ratio", 0.5)
-        clf_input_df = pd.DataFrame([sample_clf])
+        sample_clf["taker_buy_ratio"] = float(recent_candle.get("taker_buy_ratio", 0.5))
+        if "volume" in recent_candle:
+            sample_clf["volume"] = float(recent_candle["volume"])
+        if "high" in recent_candle and "low" in recent_candle and recent_candle["low"] > 0:
+            sample_clf["high_low_ratio"] = float(recent_candle["high"] / recent_candle["low"])
+        if "close" in recent_candle:
+            sample_clf["close_lag_1"] = float(recent_candle["close"])
 
-        base_val, top_pos, top_neg, fig_shap = explain_single_prediction(explainer_clf, clf_input_df, top_n=4)
-        sh_col1, sh_col2 = st.columns(2)
-        with sh_col1:
-            st.markdown("**🟢 Bullish Contributors (Pushed Up):**")
-            for driver in top_pos:
-                st.markdown(f"- **`{driver['feature']}`**: SHAP value `+{driver['shap']:.4f}`")
-        with sh_col2:
-            st.markdown("**🔴 Bearish Contributors (Pushed Down):**")
-            for driver in top_neg:
-                st.markdown(f"- **`{driver['feature']}`**: SHAP value `{driver['shap']:.4f}`")
+        clf_input_df = pd.DataFrame([{col: sample_clf[col] for col in CLASSIFIER_FEATURES}], columns=CLASSIFIER_FEATURES)
+
+        try:
+            base_val, top_pos, top_neg, fig_shap = explain_single_prediction(explainer_clf, clf_input_df, top_n=4)
+            sh_col1, sh_col2 = st.columns(2)
+            with sh_col1:
+                st.markdown("**🟢 Bullish Contributors (Pushed Up):**")
+                for driver in top_pos:
+                    st.markdown(f"- **`{driver['feature']}`**: SHAP value `+{driver['shap']:.4f}`")
+            with sh_col2:
+                st.markdown("**🔴 Bearish Contributors (Pushed Down):**")
+                for driver in top_neg:
+                    st.markdown(f"- **`{driver['feature']}`**: SHAP value `{driver['shap']:.4f}`")
+        except Exception as exc:
+            st.info("ℹ️ TreeSHAP factor attributions ready on next candle close.")
