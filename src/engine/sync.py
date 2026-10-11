@@ -90,10 +90,9 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
         return False, f"Market feed error: {exc}", {}
 
     with get_db() as session:
-        # Check if tick already ingested
         existing = session.execute(
-            select(MarketTick).where(MarketTick.timestamp == candle["timestamp"])
-        ).scalar_one_or_none()
+            select(MarketTick).where(MarketTick.timestamp == candle["timestamp"]).order_by(MarketTick.id.desc())
+        ).scalars().first()
 
         if existing and not force:
             return False, f"Candle for {candle['timestamp'].strftime('%H:00 UTC')} already recorded in Neon.", {"tick_id": existing.id}
