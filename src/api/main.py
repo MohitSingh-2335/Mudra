@@ -26,7 +26,9 @@ from src.api.schemas import (
     PredictResponse,
     ExplainResponse,
     FeatureAttribution,
-    FullAnalysisResponse
+    FullAnalysisResponse,
+    AgentTradeRequest,
+    AgentTradeResponse
 )
 
 # Global model store for high-throughput serving
@@ -164,6 +166,30 @@ async def analyze(req: PredictRequest):
         explanation=exp_res,
         analyst_commentary=report
     )
+
+
+@app.post("/agents/trade", response_model=AgentTradeResponse, tags=["Multi-Agent LangGraph"])
+async def run_agent_trade(req: AgentTradeRequest):
+    """
+    Executes the 2-Node LangGraph Multi-Agent Trading System:
+    Node 1 (Strategist) synthesizes technicals, XGBoost return forecasts, and ChromaDB macro context.
+    Node 2 (Reflexion Risk Critic) audits the order against volatility limits, fee hurdles, and sizes the trade.
+    """
+    from src.agents.trading_graph import run_trading_graph
+    try:
+        state = run_trading_graph(
+            symbol=req.symbol,
+            current_price=req.current_price,
+            market_data=req.market_data,
+            engineered_features=req.engineered_features,
+            ml_forecast=req.ml_forecast
+        )
+        return AgentTradeResponse(**state)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Multi-agent deliberation pipeline failed: {str(e)}"
+        )
 
 
 if __name__ == "__main__":
