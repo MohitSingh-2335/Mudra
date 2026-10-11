@@ -12,6 +12,8 @@ from config import (
     CLASSIFIER_FEATURES
 )
 
+from unittest.mock import patch
+
 
 @pytest.fixture(scope="session")
 def client():
@@ -131,3 +133,45 @@ def test_agents_trade_endpoint(client):
     assert len(data["tools_called"]) >= 0
     assert "risk_critic_critique" in data
 
+def test_reconciliation_summary_endpoint(client):
+    """Verify that /reconciliation/summary returns accuracy KPIs with expected schema."""
+    mock_summary = {
+        "total_reconciled": 24,
+        "directional_accuracy_pct": 62.5,
+        "mae_usd": 145.20,
+        "mape_pct": 0.22,
+        "information_coefficient_ic": 0.18,
+        "black_swan_count": 0,
+        "tag_breakdown": {"ACCURATE": 15, "DIRECTION_MISMATCH": 9}
+    }
+    with patch("src.database.queries.get_reconciliation_kpis", return_value=mock_summary):
+        response = client.get("/reconciliation/summary?lookback_hours=24")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total_reconciled"] == 24
+        assert data["directional_accuracy_pct"] == 62.5
+        assert "information_coefficient_ic" in data
+        assert data["tag_breakdown"]["ACCURATE"] == 15
+def test_portfolio_summary_endpoint(client):
+    """Verify that /portfolio/summary returns paper portfolio state and Alpha metrics."""
+    mock_summary = {
+        "cash_balance": 9500.0,
+        "btc_balance": 0.006,
+        "current_btc_price": 83000.0,
+        "btc_position_value_usd": 498.0,
+        "total_equity_usd": 9998.0,
+        "benchmark_btc_equity": 10000.0,
+        "alpha_usd": -2.0,
+        "alpha_pct": -0.02,
+        "realized_pnl_usd": 0.0,
+        "total_fees_usd": 2.0,
+        "total_trades": 1
+    }
+    with patch("src.database.queries.get_portfolio_kpis", return_value=mock_summary):
+        response = client.get("/portfolio/summary?current_price=83000.0")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total_equity_usd"] == 9998.0
+        assert data["cash_balance"] == 9500.0
+        assert data["total_trades"] == 1
+        assert "alpha_usd" in data
