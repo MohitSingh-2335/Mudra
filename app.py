@@ -218,20 +218,8 @@ if st.sidebar.button("🔄 Refresh Terminal Feeds", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
 
-auto_pulse = st.sidebar.toggle("🟢 Live Terminal Stream (Auto-pulse 30s)", value=True)
-
 st.sidebar.markdown("---")
 st.sidebar.subheader("☁️ Infrastructure Health")
-
-# Auto-sync check on page load (runs once per browser session)
-if "has_synced_on_open" not in st.session_state:
-    st.session_state.has_synced_on_open = True
-    try:
-        synced, sync_msg, _ = sync_hourly_quant_cycle(force=False)
-        if synced:
-            st.toast(f"⚡ Hourly candle synchronized: {sync_msg}", icon="✅")
-    except Exception:
-        pass
 
 # Fetch live market data
 live_market_df = fetch_live_market_candles()
@@ -323,13 +311,6 @@ components.html(
 
 st.caption(f"Real-Time BTC/USDT Multi-Agent Deliberation, Delayed Ground Truth Reconciliation & Autonomous Forward Ledger • Last Sync: {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
 
-# Background Auto-Pulse Stream (Every 30s)
-if auto_pulse:
-    @st.experimental_fragment(run_every=30)
-    def live_terminal_heartbeat():
-        st.rerun()
-
-    live_terminal_heartbeat()
 
 
 # Top Metrics Row
