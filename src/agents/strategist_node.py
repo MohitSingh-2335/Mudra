@@ -59,7 +59,19 @@ def strategist_node(state: AgentState) -> AgentState:
 
     # 4. Gather RAG Macro Context via Tool if missing
     if not state.get("rag_context"):
-        rag_query = f"{symbol} market regime order flow momentum macro sentiment"
+        # PROPOSED DYNAMIC QUERY:
+        vol_spread = state.get("engineered_features", {}).get("volatility_range_pct", 1.0)
+        taker_ratio = state.get("engineered_features", {}).get("taker_buy_ratio", 0.50)
+        clears_hurdle = state.get("ml_forecast", {}).get("clears_hurdle", False)
+
+        if vol_spread > 3.8:
+            rag_query = f"{symbol} extreme volatility liquidation flush cascade risk"
+        elif clears_hurdle and taker_ratio >= 0.52:
+            rag_query = f"{symbol} bullish momentum spot ETF inflows institutional accumulation"
+        elif taker_ratio < 0.48:
+            rag_query = f"{symbol} distribution selling pressure retail fear capitulation"
+        else:
+            rag_query = f"{symbol} sideways chop mean reversion range regime"
         rag_res = query_macro_sentiment_rag.invoke({"query": rag_query})
         state["rag_context"] = rag_res
         state["tools_called"].append("query_macro_sentiment_rag")
