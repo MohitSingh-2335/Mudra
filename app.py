@@ -1,5 +1,10 @@
 # app.py
 
+# Pre-load onnxruntime before numerical engines (XGBoost/OpenMP) to prevent Windows DLL access violations
+try:
+    import onnxruntime  # noqa: F401
+except ImportError:
+    pass
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -523,4 +528,4 @@ elif app_mode == "Multi-Agent Council (LangGraph)":
             st.session_state["active_council_state"] = council_state
 
     if "active_council_state" in st.session_state:
-        render_langgraph_council(st.session_state["active_council_state"])
+        render_langgraph_council(st.session_state["active_council_state"])
