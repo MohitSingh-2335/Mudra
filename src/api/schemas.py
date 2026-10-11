@@ -53,3 +53,33 @@ class FullAnalysisResponse(BaseModel):
     prediction: PredictResponse
     explanation: ExplainResponse
     analyst_commentary: MarketAnalystReport
+
+
+class AgentTradeRequest(BaseModel):
+    """Inbound request payload for multi-agent trading graph deliberation."""
+    symbol: str = Field(default="BTCUSDT", description="Target trading asset")
+    current_price: Optional[float] = Field(default=None, description="Current spot price (auto-fetched if None)")
+    market_data: Optional[Dict[str, Any]] = Field(default=None, description="Optional raw bar data")
+    engineered_features: Optional[Dict[str, float]] = Field(default=None, description="Optional feature dict")
+    ml_forecast: Optional[Dict[str, Any]] = Field(default=None, description="Optional precomputed forecast")
+
+
+class AgentTradeResponse(BaseModel):
+    """Response payload from LangGraph 2-node Strategist -> Reflexion Risk Critic pipeline."""
+    symbol: str
+    current_price: float
+    trade_action: str
+    conviction_score: int
+    executive_summary: str
+    strategist_thesis: str
+    risk_approved: bool
+    veto_reason: Optional[str] = None
+    recommended_position_pct: float
+    stop_loss_price: Optional[float] = None
+    take_profit_price: Optional[float] = None
+    risk_critic_critique: str
+    circuit_breaker_active: bool
+    tools_called: List[str]
+    rag_context: str
+    timestamp: str
+
