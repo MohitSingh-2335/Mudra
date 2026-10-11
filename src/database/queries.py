@@ -11,10 +11,9 @@ from sqlalchemy import select, desc
 
 from src.database.connection import get_db
 from src.database.models import MarketTick, Reconciliation, PaperPortfolio, CouncilAudit
-from src.engine.reconciliation import get_reconciliation_summary
-from src.engine.paper_portfolio import get_portfolio_summary
 
 logger = logging.getLogger(__name__)
+
 
 
 def get_latest_market_ticks(limit: int = 100) -> pd.DataFrame:
@@ -74,6 +73,7 @@ def get_reconciliation_kpis(lookback_hours: int = 168) -> Dict[str, Any]:
     Returns defensive default KPIs on failure.
     """
     try:
+        from src.engine.reconciliation import get_reconciliation_summary
         with get_db() as session:
             return get_reconciliation_summary(session, limit=lookback_hours)
     except Exception as exc:
@@ -121,8 +121,10 @@ def get_portfolio_kpis(current_price: float) -> Dict[str, Any]:
     Returns defensive initial baseline on failure.
     """
     try:
+        from src.engine.paper_portfolio import get_portfolio_summary
         with get_db() as session:
             return get_portfolio_summary(session, current_price=current_price)
+
     except Exception as exc:
         logger.warning(f"Failed to fetch portfolio KPIs: {exc}")
         return {
