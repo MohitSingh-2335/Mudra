@@ -13,8 +13,6 @@ from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
-from src.agents.rag_agent import get_rag_agent
-
 # Load environment variables if present
 load_dotenv('.env')
 
