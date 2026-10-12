@@ -18,6 +18,13 @@ CHARTS: Dict[str, str] = {
     "miners-revenue": "onchain_miners_revenue_usd",
 }
 
+# Mapping: On-chain level column -> Model contract daily change feature name
+CHANGE_COLS: Dict[str, str] = {
+    "onchain_num_tx": "onchain_num_tx_change",
+    "onchain_hash_rate": "onchain_hash_rate_change",
+    "onchain_miners_revenue_usd": "onchain_miners_revenue_change",
+}
+
 
 def _fetch_single_chart(chart_name: str, timespan: str = "all") -> Optional[pd.DataFrame]:
     """
@@ -114,7 +121,7 @@ def merge_onchain(
     df["_target_date"] = (ts_utc.dt.floor("D") - pd.Timedelta(days=1)).dt.date
 
     # Define all target on-chain columns (levels and day-over-day changes)
-    target_cols = list(CHARTS.values()) + [f"{c}_change" for c in CHARTS.values()]
+    target_cols = list(CHARTS.values()) + [CHANGE_COLS.get(c, f"{c}_change") for c in CHARTS.values()]
 
     # Prevent duplicate column suffixes (_x, _y) on repeated runs
     existing_cols = [col for col in target_cols if col in df.columns]
@@ -140,11 +147,12 @@ def merge_onchain(
 
     # Compute day-over-day percentage changes on daily level prior to merge
     for col in CHARTS.values():
+        change_col = CHANGE_COLS.get(col, f"{col}_change")
         if col in onchain_df.columns:
-            onchain_df[f"{col}_change"] = onchain_df[col].pct_change(fill_method=None).fillna(0.0)
+            onchain_df[change_col] = onchain_df[col].pct_change(fill_method=None).fillna(0.0)
         else:
             onchain_df[col] = 0.0
-            onchain_df[f"{col}_change"] = 0.0
+            onchain_df[change_col] = 0.0
 
     cols_to_merge = ["date"] + target_cols
     available_merge_cols = [c for c in cols_to_merge if c in onchain_df.columns]
