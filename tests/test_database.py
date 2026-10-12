@@ -44,6 +44,66 @@ def test_table_creation_and_inspection(in_memory_db):
     assert "paper_portfolio" in tables
 
 
+def test_fresh_market_tick_creation_and_insertion(in_memory_db):
+    """
+    Regression test for Issue 1:
+    Verifies that fresh MarketTick creation and insertion succeed using only
+    supported model fields, and confirms that passing unsupported attributes
+    (such as taker_buy_ratio or number_of_trades) raises TypeError.
+    """
+    session, _ = in_memory_db
+    now = datetime.now(timezone.utc)
+
+    # 1. Verify that attempting to pass unsupported fields raises TypeError
+    with pytest.raises(TypeError, match="taker_buy_ratio"):
+        MarketTick(
+            timestamp=now,
+            open=83000.0,
+            high=83500.0,
+            low=82800.0,
+            close=83200.0,
+            volume=500.0,
+            taker_buy_ratio=0.55,
+        )
+
+    with pytest.raises(TypeError, match="number_of_trades"):
+        MarketTick(
+            timestamp=now,
+            open=83000.0,
+            high=83500.0,
+            low=82800.0,
+            close=83200.0,
+            volume=500.0,
+            number_of_trades=1200,
+        )
+
+    # 2. Verify that creating and inserting with only supported model fields succeeds
+    fresh_tick = MarketTick(
+        timestamp=now,
+        open=83000.0,
+        high=83500.0,
+        low=82800.0,
+        close=83200.0,
+        volume=500.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
+        market_regime="BULL_MOMENTUM",
+        predicted_return_1h=0.45,
+        predicted_price_1h=83574.40,
+        model_confidence=0.85,
+        features={"taker_buy_ratio": 0.55, "rsi": 62.1},
+    )
+    session.add(fresh_tick)
+    session.commit()
+
+    # 3. Verify retrieved record from database
+    persisted = session.get(MarketTick, fresh_tick.id)
+    assert persisted is not None
+    assert persisted.id == fresh_tick.id
+    assert persisted.close == 83200.0
+    assert persisted.features["taker_buy_ratio"] == 0.55
+
+
 def test_models_to_dict_serialization():
     """Verifies to_dict serialization for each ORM model."""
     now = datetime.now(timezone.utc)
