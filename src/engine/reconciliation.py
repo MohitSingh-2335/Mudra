@@ -6,6 +6,7 @@ and attributes Risk Critic veto quality.
 """
 import sys
 from pathlib import Path
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 import numpy as np
@@ -169,8 +170,11 @@ def get_reconciliation_summary(session: Session, limit: int = 168) -> Dict[str, 
             "mae_usd": 0.0,
             "mape_pct": 0.0,
             "information_coefficient": 0.0,
+            "information_coefficient_ic": 0.0,
             "black_swans_filtered": 0,
+            "black_swan_count": 0,
             "accurate_count": 0,
+            "tag_breakdown": {},
         }
 
     total = len(records)
@@ -179,6 +183,7 @@ def get_reconciliation_summary(session: Session, limit: int = 168) -> Dict[str, 
     mape = float(np.mean([r.percentage_error for r in records]))
     black_swans = sum(1 for r in records if r.is_black_swan)
     accurate = sum(1 for r in records if r.error_attribution_tag == "ACCURATE")
+    tag_counts = dict(Counter(r.error_attribution_tag for r in records if r.error_attribution_tag))
 
     # Information Coefficient (Pearson correlation between predicted return and actual return)
     pred_returns = [r.predicted_return_pct for r in records]
@@ -198,8 +203,11 @@ def get_reconciliation_summary(session: Session, limit: int = 168) -> Dict[str, 
         "mae_usd": round(mae, 2),
         "mape_pct": round(mape, 3),
         "information_coefficient": round(ic, 4),
+        "information_coefficient_ic": round(ic, 4),
         "black_swans_filtered": black_swans,
+        "black_swan_count": black_swans,
         "accurate_count": accurate,
+        "tag_breakdown": tag_counts,
     }
 
 
