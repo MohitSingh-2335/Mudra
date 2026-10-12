@@ -223,11 +223,15 @@ def get_portfolio_summary(session: Session, current_price: float) -> Dict[str, A
         return {
             "cash_balance": INITIAL_CAPITAL_USD,
             "btc_balance": 0.0,
+            "current_btc_price": round(current_price, 2),
+            "btc_position_value_usd": 0.0,
             "total_equity_usd": INITIAL_CAPITAL_USD,
             "cumulative_return_pct": 0.0,
             "benchmark_btc_equity": INITIAL_CAPITAL_USD,
             "alpha_usd": 0.0,
             "alpha_pct": 0.0,
+            "realized_pnl_usd": 0.0,
+            "total_fees_usd": 0.0,
             "drawdown_pct": 0.0,
             "total_trades": 0,
         }
@@ -235,21 +239,36 @@ def get_portfolio_summary(session: Session, current_price: float) -> Dict[str, A
     stmt_count = select(func.count(PaperPortfolio.id)).where(PaperPortfolio.action.in_(["BUY", "SELL"]))
     trade_count = int(session.execute(stmt_count).scalar() or 0)
 
+    # Cumulative realized P&L and transaction fees across all historical ledger actions
+    stmt_totals = select(
+        func.coalesce(func.sum(PaperPortfolio.realized_pnl_usd), 0.0),
+        func.coalesce(func.sum(PaperPortfolio.fee_deducted_usd), 0.0),
+    )
+    cum_realized_pnl, total_fees = session.execute(stmt_totals).one()
+
     # Mark current equity with live price
-    live_equity = float(latest.cash_balance) + (float(latest.btc_balance) * current_price)
+    cash_bal = round(float(latest.cash_balance), 2)
+    btc_bal = round(float(latest.btc_balance), 6)
+    btc_pos_val = round(float(latest.btc_balance) * current_price, 2)
+    live_equity = round(cash_bal + btc_pos_val, 2)
+
     cum_ret = ((live_equity - INITIAL_CAPITAL_USD) / INITIAL_CAPITAL_USD) * 100.0
     baseline_price = get_baseline_btc_price(session) or current_price
     bench_eq = INITIAL_CAPITAL_USD * (current_price / baseline_price) if baseline_price > 0 else INITIAL_CAPITAL_USD
     alpha_usd = live_equity - bench_eq
 
     return {
-        "cash_balance": round(float(latest.cash_balance), 2),
-        "btc_balance": round(float(latest.btc_balance), 6),
-        "total_equity_usd": round(live_equity, 2),
+        "cash_balance": cash_bal,
+        "btc_balance": btc_bal,
+        "current_btc_price": round(current_price, 2),
+        "btc_position_value_usd": btc_pos_val,
+        "total_equity_usd": live_equity,
         "cumulative_return_pct": round(cum_ret, 2),
         "benchmark_btc_equity": round(bench_eq, 2),
         "alpha_usd": round(alpha_usd, 2),
         "alpha_pct": round(((live_equity - bench_eq) / bench_eq) * 100.0, 2) if bench_eq > 0 else 0.0,
+        "realized_pnl_usd": round(float(cum_realized_pnl), 2),
+        "total_fees_usd": round(float(total_fees), 2),
         "drawdown_pct": round(float(latest.drawdown_pct), 2),
         "total_trades": trade_count,
     }
