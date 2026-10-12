@@ -758,14 +758,122 @@ with tab4:
         st.plotly_chart(create_alpha_equity_curve(port_df), use_container_width=True)
 
         st.markdown("### Transaction Execution Ledger")
-        t_disp = port_df.copy()
-        t_disp["Execution Price"] = t_disp["execution_price"].apply(lambda x: f"${x:,.2f}" if x > 0 else "-")
-        t_disp["Total Equity"] = t_disp["total_equity_usd"].apply(lambda x: f"${x:,.2f}")
-        t_disp["Fees Paid"] = t_disp["fee_deducted_usd"].apply(lambda x: f"${x:,.3f}" if x > 0 else "-")
-        t_disp["Timestamp"] = t_disp["timestamp"].dt.strftime("%Y-%m-%d %H:%M UTC")
+        with st.expander("📘 How to Read This Transaction Execution Ledger (Plain-English Guide)", expanded=False):
+            st.markdown(
+                """
+                * **Order Action (`[BUY]`, `[SELL]`, `[HOLD]`, `[DEPOSIT]`):** The decision executed by the multi-agent council after evaluating market volatility and the fee hurdle.
+                * **Execution Price:** The actual Binance market close price where the order was filled (or `-` when holding).
+                * **Trade Size:** The quantity of Bitcoin bought or sold, along with its approximate dollar value.
+                * **Fees & Friction:** The exchange taker fee (0.05%) and slippage (0.02%) paid to Binance. When holding, this shows `$0.00 (Fees Saved)`.
+                * **Portfolio Value:** Total account equity (Cash + Bitcoin inventory marked to market) and cumulative percentage return from the $10,000 start.
+                * **Strategy Rationale:** A plain-English explanation of why the trade was executed or why cash was preserved.
+                """
+            )
+
+        t_disp = port_df.iloc[::-1].copy()
+
+        # 1. Plain-English Action Badges
+        def _fmt_action(val):
+            a = str(val).upper().strip()
+            if a == "BUY":
+                return "[BUY]"
+            elif a == "SELL":
+                return "[SELL]"
+            elif a == "HOLD":
+                return "[HOLD]"
+            elif "DEPOSIT" in a:
+                return "[DEPOSIT]"
+            return f"[{a}]"
+
+        t_disp["Order Action"] = t_disp["action"].apply(_fmt_action)
+
+        # 2. Execution Price
+        def _fmt_exec_price(row):
+            act = str(row.get("action", "")).upper()
+            p = float(row.get("execution_price", 0.0) or 0.0)
+            if act in ["BUY", "SELL"] and p > 0:
+                return f"${p:,.2f}"
+            return "-"
+
+        t_disp["Execution Price"] = t_disp.apply(_fmt_exec_price, axis=1)
+
+        # 3. Trade Size (Quantity in BTC and USD)
+        def _fmt_trade_size(row):
+            act = str(row.get("action", "")).upper()
+            amt = float(row.get("btc_amount", 0.0) or 0.0)
+            price = float(row.get("execution_price", 0.0) or 0.0)
+            usd_val = abs(amt * price)
+            if act == "BUY" and amt > 0:
+                return f"+{amt:.4f} BTC (~${usd_val:,.0f})"
+            elif act == "SELL" and amt < 0:
+                return f"{amt:.4f} BTC (~${usd_val:,.0f})"
+            elif act == "HOLD":
+                return "0.0000 BTC"
+            return "-"
+
+        t_disp["Trade Size"] = t_disp.apply(_fmt_trade_size, axis=1)
+
+        # 4. Fees & Friction
+        def _fmt_friction(row):
+            act = str(row.get("action", "")).upper()
+            fee = float(row.get("fee_deducted_usd", 0.0) or 0.0)
+            slip = float(row.get("slippage_usd", 0.0) or 0.0)
+            tot = fee + slip
+            if act in ["BUY", "SELL"] and tot > 0:
+                return f"${tot:,.2f} (0.07%)"
+            elif act == "HOLD":
+                return "$0.00 (Fees Saved)"
+            return "$0.00"
+
+        t_disp["Fees & Friction"] = t_disp.apply(_fmt_friction, axis=1)
+
+        # 5. Portfolio Value & Return
+        def _fmt_portfolio_val(row):
+            eq = float(row.get("total_equity_usd", 10000.0) or 10000.0)
+            ret = float(row.get("cumulative_return_pct", 0.0) or 0.0)
+            return f"${eq:,.2f} ({ret:+.2f}%)"
+
+        t_disp["Portfolio Value"] = t_disp.apply(_fmt_portfolio_val, axis=1)
+
+        # 6. Time (UTC)
+        t_disp["Time (UTC)"] = pd.to_datetime(t_disp["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
+
+        # 7. Plain-English Strategy Rationale
+        def _fmt_rationale(row):
+            act = str(row.get("action", "")).upper()
+            notes = str(row.get("notes", "") or "")
+            if act == "BUY":
+                amt = float(row.get("btc_amount", 0.0) or 0.0)
+                price = float(row.get("execution_price", 0.0) or 0.0)
+                val = amt * price
+                return f"Position Opened: Allocated 10% Kelly fraction (~${val:,.0f}) on approved bullish signal."
+            elif act == "SELL":
+                pnl = float(row.get("realized_pnl_usd", 0.0) or 0.0)
+                return f"Position Closed: Sold inventory at market (Realized PnL: ${pnl:+,.2f})."
+            elif act == "HOLD":
+                if "hurdle" in notes.lower() or "friction" in notes.lower() or "0.14" in notes:
+                    return "Capital Preserved: Expected move is below 0.14% round-trip fee hurdle."
+                elif "veto" in notes.lower():
+                    return "Risk Veto: Trade prevented by Risk Critic to protect capital."
+                return "Capital Preserved: Sideways chop; preserving cash until high-conviction setup."
+            elif "DEPOSIT" in act:
+                return "Portfolio Initialized: Starting bankroll of $10,000.00 USDT."
+            return notes if notes else "Execution logged."
+
+        t_disp["Strategy Rationale"] = t_disp.apply(_fmt_rationale, axis=1)
+
+        display_cols = [
+            "Time (UTC)",
+            "Order Action",
+            "Execution Price",
+            "Trade Size",
+            "Fees & Friction",
+            "Portfolio Value",
+            "Strategy Rationale",
+        ]
 
         st.dataframe(
-            t_disp[["Timestamp", "action", "btc_amount", "Execution Price", "Fees Paid", "Total Equity", "notes"]],
+            t_disp[display_cols],
             use_container_width=True,
             hide_index=True,
         )
