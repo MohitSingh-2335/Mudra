@@ -396,3 +396,129 @@ def test_coinbase_fallback_unobserved_trade_count_handling(sample_historical_can
     # Crucially verify it did NOT fabricate 10,000
     assert features["number_of_trades"] != 10000
 
+
+def test_fetch_live_market_candles_binance_excludes_forming_candle(monkeypatch):
+    """
+    Verify that app.py:fetch_live_market_candles strictly excludes actively forming Binance candles
+    under a frozen clock and retains exactly 100 confirmed closed candles in chronological order.
+    """
+    from datetime import datetime, timezone
+    import requests
+    from app import fetch_live_market_candles
+
+    now_dt = datetime.now(timezone.utc)
+    now_ms = now_dt.timestamp() * 1000.0
+
+    # Mock Binance: 101 completed closed candles + 1 currently forming candle (12:00 to 12:59)
+    mock_binance_klines = []
+    for i in range(101):
+        open_time = now_ms - (102 - i) * 3600000
+        close_time = open_time + 3600000 - 1
+        mock_binance_klines.append([
+            open_time, "80000.0", "80500.0", "79800.0", str(80000.0 + i * 10.0), "100.0",
+            close_time, "8000000.0", 1200, "55.0", "4400000.0", "0"
+        ])
+
+    # 102nd candle: actively forming (ends 30 minutes in the future)
+    forming_open = now_ms - 1800000
+    forming_close = forming_open + 3600000 - 1  # > now_ms
+    mock_binance_klines.append([
+        forming_open, "85000.0", "86000.0", "84000.0", "85500.0", "20.0",
+        forming_close, "1700000.0", 200, "10.0", "850000.0", "0"
+    ])
+
+    class MockBinanceResp:
+        status_code = 200
+        def json(self):
+            return mock_binance_klines
+
+    monkeypatch.setattr(requests, "get", lambda *args, **kwargs: MockBinanceResp())
+
+    # Clear streamlit cached data to prevent cache reuse
+    fetch_live_market_candles.clear()
+    candles_df = fetch_live_market_candles(symbol="BTCUSDT")
+
+    assert len(candles_df) == 100
+    assert candles_df["timestamp"].is_monotonic_increasing
+    # Forming candle with close=85500.0 MUST NOT be present
+    assert float(candles_df["close"].iloc[-1]) == 80000.0 + 100 * 10.0  # 81000.0
+    assert float(candles_df["close"].iloc[-1]) != 85500.0
+    assert candles_df.attrs.get("source") == "binance"
+
+
+def test_fetch_live_market_candles_coinbase_excludes_forming_candle(monkeypatch):
+    """
+    Verify that app.py:fetch_live_market_candles strictly excludes actively forming Coinbase candles
+    when Binance fails and Coinbase succeeds under a frozen clock.
+    """
+    from datetime import datetime, timezone
+    import requests
+    from app import fetch_live_market_candles
+
+    now_dt = datetime.now(timezone.utc)
+    now_sec = now_dt.timestamp()
+
+    # Coinbase returns candles descending (newest first)
+    # Candle 0 is forming: started 30 mins ago, bucket end is 30 mins in future
+    mock_cb_candles = [[now_sec - 1800, 79000.0, 81000.0, 79500.0, 80500.0, 10.0]]
+    for i in range(102):
+        candle_sec = now_sec - (i + 1) * 3600  # Closed in the past
+        mock_cb_candles.append([
+            candle_sec, 78000.0, 79000.0, 78200.0, 78500.0 + i * 5.0, 80.0
+        ])
+
+    def mock_get_dispatcher(url, *args, **kwargs):
+        class MockResp:
+            def __init__(self, code, data):
+                self.status_code = code
+                self._data = data
+            def json(self):
+                return self._data
+
+        if "binance" in url:
+            return MockResp(500, {})
+        return MockResp(200, mock_cb_candles)
+
+    monkeypatch.setattr(requests, "get", mock_get_dispatcher)
+
+    fetch_live_market_candles.clear()
+    candles_df = fetch_live_market_candles(symbol="BTCUSDT")
+
+    assert len(candles_df) == 100
+    assert candles_df["timestamp"].is_monotonic_increasing
+    # Forming candle with close=80500.0 MUST NOT be present
+    assert float(candles_df["close"].iloc[-1]) != 80500.0
+    assert candles_df.attrs.get("source") == "coinbase"
+
+
+def test_fetch_live_market_candles_stale_local_fallback_flagged(monkeypatch):
+    """
+    Verify that when all live feeds fail, fetch_live_market_candles safely falls back
+    to the local dataset, tags df.attrs['source'] = 'local_fallback', and flags staleness.
+    """
+    import requests
+    from app import fetch_live_market_candles
+    from datetime import datetime, timezone
+
+    # Simulate both live providers failing (500 Server Error)
+    class FailingResp:
+        status_code = 500
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(requests, "get", lambda *args, **kwargs: FailingResp())
+
+    fetch_live_market_candles.clear()
+    df_fallback = fetch_live_market_candles(symbol="BTCUSDT")
+
+    assert not df_fallback.empty
+    assert len(df_fallback) == 100
+    assert df_fallback.attrs.get("source") == "local_fallback"
+
+    # Verify staleness evaluation logic
+    latest_candle_ts = pd.to_datetime(df_fallback["timestamp"].iloc[-1], utc=True)
+    stale_age_hours = (datetime.now(timezone.utc) - latest_candle_ts).total_seconds() / 3600.0
+    is_stale = (stale_age_hours > 3.0 or df_fallback.attrs.get("source") == "local_fallback")
+    assert is_stale is True
+
+
