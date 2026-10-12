@@ -129,6 +129,50 @@ def test_reconciliation_math_and_accurate_tagging(in_memory_db):
     assert rec.error_attribution_tag == "ACCURATE"
 
 
+def test_reconciliation_micro_move_and_sideways_drift(in_memory_db):
+    """Tests that micro-moves are binary UP/DOWN (no FLAT) and mismatches in chop tag SIDEWAYS_DRIFT."""
+    session, _ = in_memory_db
+    t0 = datetime.now(timezone.utc) - timedelta(hours=1)
+    t1 = datetime.now(timezone.utc)
+
+    # Prior tick: $84,000, model micro-move +0.01% -> $84,008.40
+    prior_tick = MarketTick(
+        timestamp=t0,
+        open=83900.0,
+        high=84100.0,
+        low=83800.0,
+        close=84000.0,
+        volume=100.0,
+        predicted_return_1h=0.01,
+        predicted_price_1h=84008.40,
+    )
+    session.add(prior_tick)
+    session.flush()
+
+    # Realized tick closes at $83,960.00 (-0.048% DOWN, $48.40 diff)
+    curr_tick = MarketTick(
+        timestamp=t1,
+        open=84000.0,
+        high=84050.0,
+        low=83920.0,
+        close=83960.0,
+        volume=90.0,
+    )
+    session.add(curr_tick)
+    session.flush()
+
+    reconciled = reconcile_pending_ticks(session, curr_tick)
+    session.commit()
+
+    assert len(reconciled) == 1
+    rec = reconciled[0]
+    assert rec.direction_predicted == "UP"
+    assert rec.direction_realized == "DOWN"
+    assert rec.direction_correct is False
+    assert rec.absolute_error_usd == pytest.approx(48.40, abs=1e-2)
+    assert rec.error_attribution_tag == "SIDEWAYS_DRIFT"
+
+
 def test_reconciliation_black_swan_outlier_isolation(in_memory_db):
     """Tests that extreme flash crashes (>3.8% return) are flagged as black swans."""
     session, _ = in_memory_db
