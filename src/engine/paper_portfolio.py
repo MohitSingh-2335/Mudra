@@ -5,11 +5,14 @@ mark-to-market valuation, peak-to-trough drawdowns,
 and excess Alpha attribution over Buy & Hold benchmark.
 """
 import sys
+import logging
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import select, desc, func
+
+logger = logging.getLogger(__name__)
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
@@ -37,12 +40,12 @@ def get_average_entry_price(session: Session, target_btc: float, include_fees: b
     Computes the volume-weighted average cost basis per BTC for open BTC inventory.
     When include_fees=True (default), allocates the entry transaction fee into the unit cost basis
     so that net realized P&L accurately accounts for both entry and exit trading friction.
-    Accumulates backwards over recent BUY orders until target inventory is covered.
+    Accumulates backwards over recent BUY orders strictly executed after the most recent SELL liquidation.
     """
     if target_btc <= 1e-8:
         return 0.0
 
-    # Scope to BUY orders strictly after the most recent SELL liquidation
+    # Scope strictly to BUY orders executed after the most recent SELL liquidation
     last_sell_id = session.execute(
         select(PaperPortfolio.id)
         .where(PaperPortfolio.action == "SELL")
@@ -55,13 +58,16 @@ def get_average_entry_price(session: Session, target_btc: float, include_fees: b
         .where(PaperPortfolio.action == "BUY")
     )
     if last_sell_id is not None:
-        scoped_stmt = stmt.where(PaperPortfolio.id > last_sell_id).order_by(PaperPortfolio.id.desc())
-        records = session.execute(scoped_stmt).all()
-        if not records:
-            # Fallback if ledger was populated without strictly sequential IDs
-            records = session.execute(stmt.order_by(PaperPortfolio.id.desc())).all()
-    else:
-        records = session.execute(stmt.order_by(PaperPortfolio.id.desc())).all()
+        stmt = stmt.where(PaperPortfolio.id > last_sell_id)
+
+    records = session.execute(stmt.order_by(PaperPortfolio.id.desc())).all()
+    if not records:
+        logger.warning(
+            f"Cannot match open inventory ({target_btc:.6f} BTC) to eligible BUY records "
+            f"after last liquidation (last_sell_id={last_sell_id}). Returning 0.0 cost basis "
+            "to preserve strict cross-trade isolation."
+        )
+        return 0.0
 
     accum_btc = 0.0
     accum_cost = 0.0
@@ -74,6 +80,12 @@ def get_average_entry_price(session: Session, target_btc: float, include_fees: b
         accum_btc += needed
         if accum_btc >= target_btc - 1e-8:
             break
+
+    if accum_btc < target_btc - 1e-8:
+        logger.warning(
+            f"Eligible BUY records covered only {accum_btc:.6f} BTC of requested {target_btc:.6f} BTC "
+            f"(deficit of {target_btc - accum_btc:.6f} BTC). Using available cost basis."
+        )
 
     return (accum_cost / accum_btc) if accum_btc > 0 else 0.0
 
