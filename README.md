@@ -1,231 +1,179 @@
-# 🪙 Mudra: Institutional Quantitative BTC/USDT ML & Autonomous Trading Terminal
+# Mudra: Bitcoin Quantitative ML & Autonomous Trading Terminal
 
-[![Live Terminal](https://img.shields.io/badge/Live%20Terminal-mudra--trading.streamlit.app-00E599?style=for-the-badge&logo=streamlit)](https://mudra-trading.streamlit.app)  
-[![CI/CD Pipeline](https://img.shields.io/badge/CI%2FCD-Passing-brightgreen?style=flat-square&logo=githubactions)](https://github.com/MohitSingh-2335/Stock_Prediction_ML/actions)
-[![Pytest Suite](https://img.shields.io/badge/pytest-20%20passed-brightgreen?style=flat-square&logo=pytest)](tests/)
-[![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![Database](https://img.shields.io/badge/PostgreSQL-Neon%20Serverless-00E599?style=flat-square&logo=postgresql&logoColor=white)](https://neon.tech)
-[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&logo=docker&logoColor=white)](docker-compose.yml)
+[![Live Terminal](https://img.shields.io/badge/Live%20Terminal-Streamlit%20Cloud-00E599?style=flat-square&logo=streamlit)](https://mudra-trading.streamlit.app)
+[![CI/CD](https://img.shields.io/badge/CI%2FCD-Passing-brightgreen?style=flat-square&logo=githubactions)](https://github.com/MohitSingh-2335/Stock_Prediction_ML/actions)
+[![Pytest](https://img.shields.io/badge/pytest-20%20passed-brightgreen?style=flat-square&logo=pytest)](tests/)
+[![Python](https://img.shields.io/badge/Python-3.11-blue?style=flat-square&logo=python)](https://www.python.org/)
+[![Database](https://img.shields.io/badge/Database-Neon%20PostgreSQL-blueviolet?style=flat-square&logo=postgresql)](https://neon.tech)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&logo=docker)](docker-compose.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
-> **Mudra** is an institutional-grade quantitative cryptocurrency intelligence platform for Bitcoin (`BTC/USDT`). It pairs Optuna-tuned dual XGBoost inference with a 2-node stateful LangGraph risk council, causality-preserving delayed ground truth reconciliation, and an autonomous 24/7 cloud paper trading ledger.
+Mudra is a machine learning trading platform for Bitcoin (`BTC/USDT`). It uses two tuned XGBoost models (one for price return, one for direction), a 2-node risk evaluation council, delayed prediction verification, and an automated paper trading ledger on PostgreSQL.
 
-👉 **[Launch Live Streamlit Terminal (Hosted on Streamlit Cloud)](https://mudra-trading.streamlit.app)**
-
----
-
-## ⚡ The 30-Second Executive Summary
-
-* **Zero Lookahead Bias:** Evaluated on a strict **80/20 chronological walk-forward split** (28,000 train hours / 7,000 out-of-sample holdout hours from Sept 2025 to July 2026), completely preserving temporal causality.
-* **Dual-Model Fee Hurdle Gating:** Combines an **XGBoost Directional Classifier** ($\hat{Y}_{t+1}$) with an **XGBoost Expected-Return Regressor** ($\hat{R}_{t+1}$) enforcing a symmetric 5 bps ($0.05\%$) fee hurdle. Eliminates **96% of low-conviction chop trades**.
-* **Defensive Out-of-Sample Alpha:** During an extended -45.2% Bitcoin bear market collapse, Mudra generated **+33.55 percentage points of excess Alpha** over Buy & Hold by selectively parking capital in USDT cash.
-* **Delayed Ground Truth Reconciliation:** Predictions made at hour $T$ are evaluated strictly against confirmed candle closes at hour $T+1$, categorized into deterministic error tags (`ACCURATE`, `DIRECTION_MISMATCH`, `MAGNITUDE_ERROR`, `BLACK_SWAN_OUTLIER`), and permanently committed to a **Neon Serverless PostgreSQL** database.
+**Live Web Application:** [mudra-trading.streamlit.app](https://mudra-trading.streamlit.app)
 
 ---
 
-## 📊 Out-of-Sample Backtest Benchmark (7,000 Hours)
+## Project Overview
 
-Evaluated under institutional friction: **$0.10\%$ taker fee per side + $0.05\%$ slippage per fill ($0.30\%$ round-trip drag)**.
+Most machine learning models for crypto fail in real markets because of two common mistakes:
+1. **Data Leakage (Lookahead Bias):** Randomly shuffling time-series data lets future price patterns leak into training. Mudra uses a strict chronological split: training on past data (2021 to mid-2025) and testing on 7,000 out-of-sample hours (mid-2025 to 2026).
+2. **Ignoring Trading Fees:** Trading on every small signal burns capital quickly through exchange fees (0.10%) and slippage (0.05%). Mudra only enters a trade when the model's expected return clears a 0.05% fee hurdle.
 
-| Performance Metric | Buy & Hold BTC | Pure Classifier (Unconstrained) | Mudra Fused Alpha ($\tau = 0.05\%$) | Mudra Capital Preservation ($\tau = 0.055\%$) |
+### Key Results
+During an out-of-sample period where Bitcoin dropped **-45.2%**, Mudra filtered out 96% of low-conviction chop trades and held USDT cash, outperforming Buy & Hold by **+33.55% excess return (Alpha)**.
+
+| Strategy | Total Return | Max Drawdown | Total Trades | Exposure Time |
 | :--- | :---: | :---: | :---: | :---: |
-| **Total Net Return (%)** | **-45.24%** | **-97.56%** | **-11.69%** | **-1.30%** |
-| **Final Portfolio Value** ($10k Base) | $\$5,476.17$ | $\$244.13$ | $\$8,831.45$ | $\$9,869.70$ |
-| **Maximum Drawdown (MDD)** | **-53.74%** | **-97.56%** | **-11.69%** | **-1.30%** |
-| **Alpha vs. Bitcoin** | *Baseline (0.00 pp)* | **-52.32 pp** | **+33.55 pp** | **+43.94 pp** |
-| **Total Closed Trades** | 1 (Passive) | 1,237 (Fee Churn) | **49 (High Conviction)** | **3 (Ultra-Selective)** |
-| **Market Exposure Time** | $100.0\%$ | $57.97\%$ | **$0.77\%$** | **$0.04\%$** |
+| **Buy & Hold Bitcoin** | -45.24% | -53.74% | 1 | 100.0% |
+| **Basic Classifier (No Fee Filter)** | -97.56% | -97.56% | 1,237 | 57.9% |
+| **Mudra (Fee Hurdle Gated)** | **-11.69%** | **-11.69%** | **49** | **0.77%** |
 
-![Out-of-Sample Performance Benchmark](artifacts/backtest_performance.png)
+![Performance Chart](artifacts/backtest_performance.png)
 
 ---
 
-## 🏛️ System Architecture
+## System Architecture
 
-Mudra decouples presentation, execution, autonomous scheduling, and persistent cloud storage:
+Mudra runs automatically every hour in a clean, decoupled pipeline:
 
 ```mermaid
-flowchart TD
-    subgraph Scheduler["24/7 Autonomous Scheduler (Zero Budget)"]
-        CRON["cron-job.org<br/>(Deterministic Hourly Trigger)"] -->|POST workflow_dispatch| GHA["GitHub Actions Runner<br/>(Ephemeral Ubuntu Container)"]
-    end
-
-    subgraph Pipeline["Data & Dual ML Engine"]
-        GHA -->|Hourly Tick| BV["Binance Vision API<br/>(1h Confirmed Candles)"]
-        BV --> FE["Feature Engineering<br/>(26 Regressor / 39 Classifier Features)"]
-        FE --> REG["XGBoost Regressor<br/>(Expected Return & Target Close)"]
-        FE --> CLF["XGBoost Classifier<br/>(Direction & Class Probabilities)"]
-    end
-
-    subgraph Council["Autonomous Trading Council (LangGraph)"]
-        REG & CLF --> STRAT["Node 1: Lead Strategist<br/>(Thesis Synthesis & Conviction)"]
-        STRAT --> CRIT["Node 2: Risk Critic<br/>(Half-Kelly Sizing & Volatility Vetoes)"]
-    end
-
-    subgraph Storage["Cloud Single Source of Truth (Neon PostgreSQL)"]
-        CRIT -->|Commit Ticks & Audits| NEON[("Neon Serverless PostgreSQL<br/>- MarketTick<br/>- CouncilAudit<br/>- Reconciliation<br/>- PaperPortfolio")]
-        GHA -->|Reconcile T vs T-1| NEON
-    end
-
-    subgraph UI["Presentation Plane"]
-        NEON -->|Cached Query TTL=60s| ST["Streamlit Cloud Terminal<br/>(mudra-trading.streamlit.app)"]
-        BV -.->|1s WebSocket Ticker| ST
-    end
+flowchart LR
+    CRON[Hourly Trigger<br/>cron-job.org] --> WORKER[Worker Runner<br/>GitHub Actions]
+    WORKER --> DATA[Binance API<br/>1h Confirmed Candle]
+    DATA --> MODELS[Dual XGBoost<br/>Return + Direction]
+    MODELS --> COUNCIL[Risk Council<br/>LangGraph]
+    COUNCIL --> DB[(Neon PostgreSQL<br/>Ticks & Ledger)]
+    DB --> UI[Streamlit Terminal<br/>Web Dashboard]
 ```
+
+### How the Pipeline Works:
+1. **Trigger:** An external cron ping wakes up the worker at minute 0 of every hour.
+2. **Data & Features:** The worker downloads the latest confirmed 1-hour candle from Binance and builds 26 technical and market features.
+3. **ML Inference:** The Regressor predicts next-hour percentage return and price target. The Classifier predicts price direction (`UP` / `DOWN`) and probability.
+4. **Risk Review:** A 2-node LangGraph council checks if the return clears the fee hurdle and ensures volatility is within safe limits.
+5. **Reconciliation:** The worker evaluates the prediction made in the previous hour ($T-1$) against the actual candle close at hour $T$, tagging accuracy and errors.
+6. **Database:** Ticks, audit decisions, paper portfolio balances, and reconciliation results are saved to Neon PostgreSQL.
 
 ---
 
-## 🚀 Quickstart (Run in 60 Seconds)
+## Core Technologies
 
-### Option 1: Docker Compose (Recommended)
+* **Machine Learning:** XGBoost (tuned with Optuna Bayesian optimization across 500 walk-forward fits).
+* **Explainability:** TreeSHAP for calculating game-theoretic feature importance on every prediction.
+* **Agentic Risk Council:** LangGraph state graph with a Strategist node and a Risk Critic node.
+* **Cloud Database:** Neon Serverless PostgreSQL storing 4 tables (`MarketTick`, `CouncilAudit`, `Reconciliation`, `PaperPortfolio`).
+* **Serving & Frontend:** FastAPI for REST endpoints, Streamlit for the dark-theme terminal interface.
+* **Containers:** Docker and Docker Compose for reproducible builds.
+
+---
+
+## Quickstart
+
+### Run with Docker (Recommended)
 ```bash
-# 1. Clone repository
 git clone https://github.com/MohitSingh-2335/Stock_Prediction_ML.git
 cd Stock_Prediction_ML
-
-# 2. Launch FastAPI backend and Streamlit terminal
 docker compose up --build
 ```
-* **Streamlit Terminal:** `http://localhost:8501`
-* **FastAPI Swagger Docs:** `http://localhost:8000/docs`
+* Dashboard: `http://localhost:8501`
+* API Docs: `http://localhost:8000/docs`
 
-### Option 2: Local Conda Environment
+### Run Locally with Python
 ```bash
-conda create -n mudra python=3.11 -y && conda activate mudra
+conda create -n mudra python=3.11 -y
+conda activate mudra
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
----
-
-## 🧪 Automated Testing Suite
-
-Mudra enforces automated testing across all components via `pytest` (**20 passed tests in 13s**):
-
+### Run Automated Tests
 ```bash
 pytest tests/ -v
 ```
-
-* **`tests/test_agents.py`**: Sub-hurdle fee vetoes, extreme volatility circuit breakers, and state preservation.
-* **`tests/test_api.py`**: Endpoints readiness, Pydantic validation contracts, TreeSHAP outputs, and portfolio summaries.
-* **`tests/test_database.py`**: Table ORM schemas, delayed reconciliation math, black swan isolation, and paper portfolio lifecycle.
+All **20 unit tests pass** across API endpoints, agent nodes, and database models.
 
 ---
 
-## 🔍 Technical Deep Dives (Click to Expand)
+## Details & Explanations
 
 <details>
-<summary><b>1. 📜 Delayed Ground Truth Reconciliation & Paper Ledger Math</b></summary>
+<summary><b>Delayed Ground Truth Reconciliation</b></summary>
 
-<br/>
+<br>
 
-### Delayed Ground Truth Evaluation
-In real financial markets, evaluating a model's prediction at the moment of inference is meaningless. Mudra enforces strict **Delayed Ground Truth Reconciliation**:
-* **At Hour $T$:** The model forecasts next-hour expected return $\hat{R}_{t+1}$ and target close $\hat{P}_{t+1}$. The council commits the decision to `MarketTick` and `CouncilAudit`.
-* **At Hour $T+1$:** When the $T+1$ candle closes, the engine queries the unsettled prediction from hour $T$ and computes:
-  $$\text{Absolute Error} = |P_{t+1} - \hat{P}_{t+1}|, \quad \text{Percentage Error} = \left|\frac{P_{t+1} - \hat{P}_{t+1}}{P_{t+1}}\right| \times 100\%$$
-* **Error Attribution Tags:**
-  * `ACCURATE`: Direction matched and error is within 1.5% tolerance.
-  * `DIRECTION_MISMATCH`: Predicted UP when market moved DOWN (or vice versa).
-  * `MAGNITUDE_ERROR`: Direction matched but volatility expanded beyond threshold.
-  * `BLACK_SWAN_OUTLIER`: Hourly price movement exceeded $3.8\%$.
-
-### Autonomous $10,000 Paper Portfolio
-Tracks mark-to-market balances (Cash, BTC Inventory, Position Value), realized exchange fees ($0.10\%$), execution slippage ($0.05\%$), and calculates continuous **Excess Alpha over Bitcoin Buy & Hold**:
-$$\text{Alpha USD}_t = \text{Total Equity}_t - \text{Benchmark Equity}_t$$
+Evaluating a price prediction at the moment it is made does not reflect reality. Mudra enforces delayed reconciliation:
+* **At Hour T:** The model predicts where the price will be at Hour T+1. This is stored as pending.
+* **At Hour T+1:** Once the new candle confirms, the actual price is compared to the saved prediction.
+* **Error Categories:**
+  * `ACCURATE`: Direction matched and price error is under 1.5%.
+  * `DIRECTION_MISMATCH`: Predicted UP but market went DOWN (or vice versa).
+  * `MAGNITUDE_ERROR`: Direction matched but price moved further than expected.
+  * `BLACK_SWAN_OUTLIER`: Price moved more than 3.8% in a single hour.
 
 </details>
 
 <details>
-<summary><b>2. 🏛️ Autonomous Multi-Agent Trading Council (LangGraph)</b></summary>
+<summary><b>TreeSHAP Feature Importance</b></summary>
 
-<br/>
+<br>
 
-Mudra implements a stateful cyclical 2-node graph using **LangGraph**:
-1. **Lead Quantitative Strategist:** Synthesizes technical indicators (RSI, moving average spreads), order flow taker buy ratios, expected return forecasts, and macro RAG embeddings to formulate a trade action (`BUY`, `SELL`, or `HOLD`).
-2. **Reflexion Risk Critic:** Audits the strategist's proposal against institutional risk invariants:
-   * **Fee Hurdle Clearance:** Vetoes trades where expected return does not clear the 5 bps fee hurdle.
-   * **Volatility Flush Protection:** Vetoes trades if 1h high-low volatility range exceeds $3.8\%$.
-   * **Half-Kelly Position Sizing:** Automatically scales position size based on win probability and return skew:
-     $$f^* = \frac{p(b+1) - 1}{b} \times 0.5$$
+Mudra uses TreeSHAP so every prediction has a clear mathematical explanation.
 
-</details>
+![SHAP Plot](artifacts/shap_classifier_summary.png)
 
-<details>
-<summary><b>3. 🧠 TreeSHAP Game-Theoretic Explainability</b></summary>
-
-<br/>
-
-Mudra refuses "black box" decisions. Every model inference provides exact local feature attributions using **TreeSHAP** (Tree Shapley Additive Explanations), computing exact Shapley values in polynomial time $O(TLD^2)$.
-
-![SHAP Feature Attribution](artifacts/shap_classifier_summary.png)
-
-* **Volume Confirmation (`volume`, `vol_mean_6h`):** The primary discriminator of genuine trend expansion vs. false liquidity traps.
-* **Microstructural Order Flow (`taker_buy_ratio`):** Measures aggressive market order taker dominance.
-* **Macro Sentiment (`fng_value`):** Dynamic Fear & Greed indexing acts as a contrarian mean-reversion filter.
+Top drivers of model decisions:
+1. **Trading Volume (`volume`, `vol_mean_6h`):** High volume confirms trend strength, while low volume warns of fake breakouts.
+2. **Taker Buy Ratio:** Measures whether aggressive buyers or sellers dominate the order flow.
+3. **Fear & Greed Index (`fng_value`):** Macro sentiment indicator used to catch oversold and overbought conditions.
 
 </details>
 
 <details>
-<summary><b>4. 🔌 FastAPI REST API Specification</b></summary>
+<summary><b>FastAPI Endpoints</b></summary>
 
-<br/>
+<br>
 
-The FastAPI backend exposes interactive OpenAPI Swagger documentation at `http://localhost:8000/docs`:
+Interactive documentation is available at `http://localhost:8000/docs` when running the API:
 
-| Endpoint | Method | Output Description |
-| :--- | :---: | :--- |
-| `/health` | `GET` | Service readiness, model artifact status, and memory probes |
-| `/predict` | `POST` | Dual XGBoost inference (Target Return, Target Close, Direction, Probability) |
-| `/explain` | `POST` | Real-time TreeSHAP feature attributions and base value deltas |
-| `/agents/trade` | `POST` | Convenes the 2-node LangGraph Multi-Agent Trading Council |
-| `/reconciliation/summary` | `GET` | Delayed ground truth accuracy, MAE, MAPE, and attribution breakdown |
-| `/portfolio/summary` | `GET` | Mark-to-market portfolio equity, cash, inventory, and excess Alpha |
+* `GET /health` — Check server and model status.
+* `POST /predict` — Run inference on price and technical features.
+* `POST /explain` — Get TreeSHAP feature contributions for a prediction.
+* `POST /agents/trade` — Run the 2-node LangGraph risk council.
+* `GET /reconciliation/summary` — Fetch current accuracy rate and error counts.
+* `GET /portfolio/summary` — Fetch paper portfolio value, cash, and Alpha.
 
 </details>
 
 <details>
-<summary><b>5. 📁 Repository Directory Structure</b></summary>
+<summary><b>Repository Structure</b></summary>
 
-<br/>
+<br>
 
 ```text
 Stock_Prediction_ML/
-├── .github/workflows/
-│   ├── ci.yml                 # Automated testing & Docker build validation
-│   └── hourly_worker.yml      # 24/7 Autonomous quant worker workflow
-├── artifacts/
-│   ├── models/                # Optuna-tuned production models (.pkl)
-│   ├── backtest_performance.png   # 7,000-hour out-of-sample backtest chart
-│   └── shap_classifier_summary.png# Global TreeSHAP feature attributions
-├── data/
-│   ├── raw/                   # Raw Binance 1h OHLCV historical data
-│   └── processed/             # Featured chronological walk-forward dataset
+├── .github/workflows/       # Automated CI/CD and hourly worker workflow
+├── artifacts/models/        # Tuned XGBoost regressor and classifier models
+├── data/                    # Raw and processed historical data
 ├── src/
-│   ├── agents/                # LangGraph Trading Council (Strategist & Critic nodes)
-│   ├── api/                   # FastAPI asynchronous REST backend
-│   ├── database/              # Neon Serverless PostgreSQL persistence engine
-│   ├── engine/                # Core quant synchronization & delayed reconciliation
-│   ├── explainability.py      # Real-time TreeSHAP explainer
-│   └── ui/                    # Plotly dark-theme visualizers
-├── tests/                     # Pytest automated test suite (20 tests)
-├── scripts/
-│   └── run_hourly_worker.py   # Headless worker script for 24/7 execution
-├── app.py                     # Streamlit institutional terminal frontend
-├── config.py                  # Single Source of Truth (SSOT) configuration
-├── docker-compose.yml         # Multi-container orchestration specification
-├── Dockerfile                 # FastAPI production container image
-├── Dockerfile.streamlit       # Streamlit UI production container image
-├── pytest.ini                 # Pytest configuration & path resolution
-└── requirements.txt           # Pinned production dependencies
+│   ├── agents/              # LangGraph Strategist and Risk Critic nodes
+│   ├── api/                 # FastAPI routes and Pydantic schemas
+│   ├── database/            # Neon PostgreSQL connection and SQLAlchemy models
+│   ├── engine/              # Reconciliation engine and hourly sync logic
+│   ├── explainability.py    # TreeSHAP explainer module
+│   └── ui/                  # Plotly chart visualizers
+├── tests/                   # 20 automated unit tests (agents, API, database)
+├── scripts/                 # run_hourly_worker.py for automated execution
+├── app.py                   # Streamlit web dashboard
+├── config.py                # Central project configuration and feature lists
+├── docker-compose.yml       # Docker Compose setup for API and UI
+└── requirements.txt         # Project dependencies
 ```
 
 </details>
 
 ---
 
-## ⚖️ Disclaimer & License
+## License
 
-This project is open-source software licensed under the [MIT License](LICENSE).
-
-**Educational & Research Notice:** This software is designed strictly for educational, academic, and quantitative machine learning research. Cryptocurrencies and financial derivatives carry substantial risk of capital loss. Past backtested performance is never indicative of future market results. Nothing in this repository constitutes financial, legal, or investment advice.
+This project is licensed under the [MIT License](LICENSE). Built for educational and research purposes.
