@@ -867,17 +867,89 @@ def test_merge_onchain_computes_daily_change_without_hourly_zero_repetition():
     # All 24 hours of 2026-10-11 look up completed day 2026-10-10, where daily change was (120k - 100k)/100k = 0.20
     assert len(merged) == 24
     for h in range(24):
-        val = merged["onchain_num_tx_change"].iloc[h]
-        assert val == pytest.approx(0.20, abs=1e-4), (
-            f"Hour {h} did not receive daily day-over-day change! Got {val}, expected 0.20"
+        val_tx = merged["onchain_num_tx_change"].iloc[h]
+        val_hash = merged["onchain_hash_rate_change"].iloc[h]
+        val_rev = merged["onchain_miners_revenue_change"].iloc[h]
+        assert val_tx == pytest.approx(0.20, abs=1e-4), (
+            f"Hour {h} did not receive daily day-over-day tx change! Got {val_tx}, expected 0.20"
+        )
+        assert val_hash == pytest.approx(0.20, abs=1e-4), (
+            f"Hour {h} did not receive daily day-over-day hash change! Got {val_hash}, expected 0.20"
+        )
+        assert val_rev == pytest.approx(0.20, abs=1e-4), (
+            f"Hour {h} did not receive daily day-over-day revenue change! Got {val_rev}, expected 0.20"
         )
 
-    # In create_features, verify this change is NOT overwritten by hourly pct_change (which would yield 0.0)
+    # In create_features, verify all three changes are NOT overwritten by hourly pct_change (which would yield 0.0)
     feat_df = create_features(merged, drop_na=False)
     for h in range(1, 24):
-        feat_val = feat_df["onchain_num_tx_change"].iloc[h]
-        assert feat_val == pytest.approx(0.20, abs=1e-4), (
-            f"create_features overwrote daily change with hourly zero at hour {h}! Got {feat_val}"
+        assert feat_df["onchain_num_tx_change"].iloc[h] == pytest.approx(0.20, abs=1e-4)
+        assert feat_df["onchain_hash_rate_change"].iloc[h] == pytest.approx(0.20, abs=1e-4)
+        assert feat_df["onchain_miners_revenue_change"].iloc[h] == pytest.approx(0.20, abs=1e-4)
+
+
+def test_merge_onchain_miner_revenue_change_name_and_contract_parity():
+    """
+    Verify that merge_onchain outputs the exact model contract feature name
+    'onchain_miners_revenue_change' (not 'onchain_miners_revenue_usd_change'),
+    that it is computed from daily source metrics, broadcast across intraday candles,
+    and preserved by create_features without producing unexpected extra columns.
+    """
+    from src.agents.onchain_agent import merge_onchain, CHARTS, CHANGE_COLS
+    from src.feature_engineering import create_features
+    import config
+
+    timestamps = [f"2026-10-11 {h:02d}:00:00" for h in range(24)]
+    candle_df = pd.DataFrame({
+        "timestamp": timestamps,
+        "open": [60000.0] * 24,
+        "high": [60500.0] * 24,
+        "low": [59500.0] * 24,
+        "close": [60000.0] * 24,
+        "volume": [100.0] * 24,
+    })
+
+    # Day D-2 revenue: $10,000,000; Day D-1 revenue: $12,500,000 (+25.0% day-over-day change)
+    mock_onchain = pd.DataFrame({
+        "date": [pd.to_datetime("2026-10-09").date(), pd.to_datetime("2026-10-10").date()],
+        "onchain_num_tx": [200000.0, 240000.0],
+        "onchain_hash_rate": [500.0, 550.0],
+        "onchain_miners_revenue_usd": [10000000.0, 12500000.0],
+    })
+
+    merged = merge_onchain(candle_df, onchain_df=mock_onchain)
+
+    # 1. Feature name contract verification: exact model schema name present
+    assert "onchain_miners_revenue_change" in merged.columns, (
+        "Model feature contract violation: 'onchain_miners_revenue_change' missing from merged columns!"
+    )
+
+    # 2. Absence of unexpected or unconsumed intermediate column
+    assert "onchain_miners_revenue_usd_change" not in merged.columns, (
+        "Schema pollution: unexpected 'onchain_miners_revenue_usd_change' present in merged columns!"
+    )
+
+    # 3. All configured on-chain change feature names match the model contract
+    contract_change_features = {"onchain_num_tx_change", "onchain_hash_rate_change", "onchain_miners_revenue_change"}
+    for feat in contract_change_features:
+        assert feat in config.CLASSIFIER_FEATURES
+        assert feat in config.REGRESSOR_FEATURES
+        assert feat in merged.columns
+
+    # 4. Daily change percentage (+25.0%) is broadcast consistently across all 24 hourly rows
+    for h in range(24):
+        val = merged["onchain_miners_revenue_change"].iloc[h]
+        assert val == pytest.approx(0.25, abs=1e-4), (
+            f"Hour {h} did not receive daily miner revenue change! Expected 0.25, got {val}"
+        )
+
+    # 5. create_features preserves upstream daily values rather than recalculating hourly zeros
+    feat_df = create_features(merged, drop_na=False)
+    assert "onchain_miners_revenue_usd_change" not in feat_df.columns
+    for h in range(1, 24):
+        val_feat = feat_df["onchain_miners_revenue_change"].iloc[h]
+        assert val_feat == pytest.approx(0.25, abs=1e-4), (
+            f"create_features recalculated hourly zeros! At hour {h}: expected 0.25, got {val_feat}"
         )
 
 
