@@ -11,7 +11,11 @@ import pandas as pd
 import ta
 
 
-def create_features(df: pd.DataFrame, drop_na: bool = True) -> pd.DataFrame:
+def create_features(
+    df: pd.DataFrame,
+    drop_na: bool = True,
+    is_training: bool = True
+) -> pd.DataFrame:
     """
     Engineers technical indicators, cyclical time embeddings, order flow microstructure,
     macro sentiment, on-chain dynamics, and target labels.
@@ -19,6 +23,7 @@ def create_features(df: pd.DataFrame, drop_na: bool = True) -> pd.DataFrame:
     Args:
         df (pd.DataFrame): Raw candlestick DataFrame with OHLCV and timestamp.
         drop_na (bool): Whether to drop initial rolling window NaNs (default: True).
+        is_training (bool): Whether to generate forward-shifted targets for training (default: True).
 
     Returns:
         pd.DataFrame: Engineered DataFrame containing all model features and targets.
@@ -27,7 +32,10 @@ def create_features(df: pd.DataFrame, drop_na: bool = True) -> pd.DataFrame:
 
     # Ensure timestamp column is datetime object
     if "timestamp" in df.columns and not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        try:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], format="%Y:%m:%d %H:%M:%S")
+        except (ValueError, TypeError):
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
 
     # Basic price and volatility features
     df["Price Change"] = df["close"] - df["open"]
@@ -41,11 +49,12 @@ def create_features(df: pd.DataFrame, drop_na: bool = True) -> pd.DataFrame:
     df["rolling_max_6h"] = df["close"].rolling(window=6).max()
     df["rolling_min_6h"] = df["close"].rolling(window=6).min()
 
-    # Target variables for model training
-    df["Target_Close"] = df["close"].shift(-1)
-    df["Target_Movement"] = (df["close"].shift(-1) > df["close"]).astype(int)
-    # Continuous fractional return target: (Close_{t+1} - Close_t) / Close_t
-    df["Target_Return"] = df["close"].shift(-1) / df["close"] - 1.0
+    # Target variables for model training (strictly disabled during live inference)
+    if is_training:
+        df["Target_Close"] = df["close"].shift(-1)
+        df["Target_Movement"] = (df["close"].shift(-1) > df["close"]).astype(int)
+        # Continuous fractional return target: (Close_{t+1} - Close_t) / Close_t
+        df["Target_Return"] = df["close"].shift(-1) / df["close"] - 1.0
 
     # Volatility and historical return features
     window = 6
@@ -128,3 +137,88 @@ def create_features(df: pd.DataFrame, drop_na: bool = True) -> pd.DataFrame:
         df = df.dropna().reset_index(drop=True)
 
     return df
+
+
+def extract_features_for_inference(df: pd.DataFrame) -> dict:
+    """
+    Extracts engineered features for the latest confirmed candlestick in df.
+    Strictly enforces training/live parity by running create_features on the historical sequence.
+
+    Args:
+        df (pd.DataFrame): Candlestick sequence with OHLCV columns.
+                           Must contain at least 35 candles to ensure rolling window convergence.
+
+    Returns:
+        dict: Comprehensive dictionary containing all 26 REGRESSOR_FEATURES,
+              all 39 CLASSIFIER_FEATURES, raw OHLCV metrics, and telemetry indicators.
+
+    Raises:
+        ValueError: If df is None, empty, contains fewer than 35 candles, or has NaN values.
+        KeyError: If required OHLCV columns are missing.
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        raise ValueError("Market candle sequence cannot be empty.")
+
+    required_cols = {"open", "high", "low", "close", "volume"}
+    missing_cols = required_cols - set(df.columns)
+    if missing_cols:
+        raise KeyError(f"Candle sequence missing required OHLCV columns: {missing_cols}")
+
+    min_lookback = 35
+    if len(df) < min_lookback:
+        raise ValueError(
+            f"Insufficient historical candles for feature extraction: received {len(df)}, "
+            f"minimum required is {min_lookback}."
+        )
+
+    # Compute features over entire history without shifting future targets or dropping rows
+    featured_df = create_features(df, drop_na=False, is_training=False)
+    latest = featured_df.iloc[-1]
+
+    # Lazy import to avoid circular dependency
+    from config import REGRESSOR_FEATURES, CLASSIFIER_FEATURES
+
+    # Validate that all required model features are non-null
+    all_required_features = sorted(list(set(REGRESSOR_FEATURES + CLASSIFIER_FEATURES)))
+    nan_features = [col for col in all_required_features if pd.isna(latest.get(col))]
+    if nan_features:
+        raise ValueError(f"Feature parity violation: NaNs encountered in computed features: {nan_features}")
+
+    # Build comprehensive output dictionary
+    out: dict = {}
+    for col in all_required_features:
+        val = latest[col]
+        out[col] = int(val) if col in {"hour", "dayofweek", "day"} else float(val)
+
+    # Raw candlestick values
+    out["close"] = float(latest["close"])
+    out["open"] = float(latest["open"])
+    out["high"] = float(latest["high"])
+    out["low"] = float(latest["low"])
+    out["volume"] = float(latest["volume"])
+    if "timestamp" in latest and pd.notna(latest["timestamp"]):
+        out["timestamp"] = latest["timestamp"]
+    if "number_of_trades" in latest and pd.notna(latest["number_of_trades"]):
+        out["number_of_trades"] = int(latest["number_of_trades"])
+
+    # Microstructural Telemetry
+    spread = float(latest["high"] - latest["low"])
+    close_price = float(latest["close"])
+    spread_pct = (spread / close_price) * 100.0 if close_price > 0 else 0.0
+    taker_ratio = float(out.get("taker_buy_ratio", 0.50))
+
+    if taker_ratio > 0.55:
+        flow_bias = "Bullish Aggressive Buying (Takers Sweeping Book)"
+    elif taker_ratio < 0.45:
+        flow_bias = "Bearish Aggressive Selling (Inventory Dumping)"
+    else:
+        flow_bias = "Neutral Balanced Liquidity"
+
+    out["close_price"] = close_price
+    out["high_low_spread_usd"] = round(spread, 2)
+    out["volatility_range_pct"] = round(spread_pct, 3)
+    out["order_flow_bias"] = flow_bias
+    out["rsi_estimate"] = round(float(out["rsi"]), 1)
+    out["volume_usd"] = round(float(latest["volume"]), 2)
+
+    return out
