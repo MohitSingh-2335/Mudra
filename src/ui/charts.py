@@ -7,13 +7,24 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+try:
+    from src.engine.paper_portfolio import INITIAL_CAPITAL_USD
+except ImportError:
+    INITIAL_CAPITAL_USD = 10000.0
+
+__all__ = [
+    "create_tradingview_candlestick",
+    "create_alpha_equity_curve",
+    "create_reconciliation_scatter",
+]
+
 
 def create_tradingview_candlestick(df: pd.DataFrame) -> go.Figure:
     """
     Renders a 2-panel TradingView-style Candlestick + Volume terminal
     with EMA-20 and EMA-50 trend ribbons.
     """
-    if df.empty or "close" not in df.columns:
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty or "close" not in df.columns:
         fig = go.Figure()
         fig.update_layout(title="No Market Data Available", template="plotly_dark")
         return fig
@@ -28,8 +39,9 @@ def create_tradingview_candlestick(df: pd.DataFrame) -> go.Figure:
     # Determine volume bar colors based on candle direction
     vol_colors = [
         "#00C087" if c >= o else "#FF3B69"
-        for c, o in zip(df_plot["close"], df_plot["open"])
+        for c, o in zip(df_plot["close"].fillna(0.0), df_plot.get("open", df_plot["close"]).fillna(0.0))
     ]
+    x_axis = df_plot["timestamp"] if "timestamp" in df_plot.columns else df_plot.index
 
     fig = make_subplots(
         rows=2,
@@ -42,10 +54,10 @@ def create_tradingview_candlestick(df: pd.DataFrame) -> go.Figure:
     # Panel 1: Candlesticks
     fig.add_trace(
         go.Candlestick(
-            x=df_plot["timestamp"],
-            open=df_plot["open"],
-            high=df_plot["high"],
-            low=df_plot["low"],
+            x=x_axis,
+            open=df_plot.get("open", df_plot["close"]),
+            high=df_plot.get("high", df_plot["close"]),
+            low=df_plot.get("low", df_plot["close"]),
             close=df_plot["close"],
             name="BTC/USDT",
             increasing_line_color="#00C087",
@@ -61,7 +73,7 @@ def create_tradingview_candlestick(df: pd.DataFrame) -> go.Figure:
     if "ema_20" in df_plot.columns:
         fig.add_trace(
             go.Scatter(
-                x=df_plot["timestamp"],
+                x=x_axis,
                 y=df_plot["ema_20"],
                 mode="lines",
                 name="EMA 20",
@@ -73,7 +85,7 @@ def create_tradingview_candlestick(df: pd.DataFrame) -> go.Figure:
     if "ema_50" in df_plot.columns:
         fig.add_trace(
             go.Scatter(
-                x=df_plot["timestamp"],
+                x=x_axis,
                 y=df_plot["ema_50"],
                 mode="lines",
                 name="EMA 50",
@@ -84,16 +96,17 @@ def create_tradingview_candlestick(df: pd.DataFrame) -> go.Figure:
         )
 
     # Panel 2: Volume Bars
-    fig.add_trace(
-        go.Bar(
-            x=df_plot["timestamp"],
-            y=df_plot["volume"],
-            name="Volume",
-            marker=dict(color=vol_colors, opacity=0.7),
-        ),
-        row=2,
-        col=1,
-    )
+    if "volume" in df_plot.columns:
+        fig.add_trace(
+            go.Bar(
+                x=x_axis,
+                y=df_plot["volume"],
+                name="Volume",
+                marker=dict(color=vol_colors, opacity=0.7),
+            ),
+            row=2,
+            col=1,
+        )
 
     # Layout Styling (Deep Dark Institutional Bloomberg/TradingView Theme)
     fig.update_layout(
@@ -126,21 +139,22 @@ def create_alpha_equity_curve(df: pd.DataFrame) -> go.Figure:
     Renders Strategy Equity vs. Bitcoin Buy & Hold Benchmark curve.
     Highlights excess Alpha in real time.
     """
-    if df.empty or "total_equity_usd" not in df.columns:
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty or "total_equity_usd" not in df.columns:
         fig = go.Figure()
         fig.update_layout(title="No Portfolio Data Available", template="plotly_dark")
         return fig
 
     df_plot = df.copy()
+    x_axis = df_plot["timestamp"] if "timestamp" in df_plot.columns else df_plot.index
 
     fig = go.Figure()
 
-    # Baseline $10,000 horizontal reference line
+    # Baseline initial capital horizontal reference line
     fig.add_hline(
-        y=10000.0,
+        y=float(INITIAL_CAPITAL_USD),
         line_dash="dot",
         line_color="#666666",
-        annotation_text="Initial Capital ($10,000.00)",
+        annotation_text=f"Initial Capital (${INITIAL_CAPITAL_USD:,.2f})",
         annotation_position="bottom right",
     )
 
@@ -148,7 +162,7 @@ def create_alpha_equity_curve(df: pd.DataFrame) -> go.Figure:
     if "benchmark_btc_equity" in df_plot.columns:
         fig.add_trace(
             go.Scatter(
-                x=df_plot["timestamp"],
+                x=x_axis,
                 y=df_plot["benchmark_btc_equity"],
                 mode="lines",
                 name="Bitcoin Buy & Hold Benchmark",
@@ -159,7 +173,7 @@ def create_alpha_equity_curve(df: pd.DataFrame) -> go.Figure:
     # Mudra Multi-Agent Strategy Curve
     fig.add_trace(
         go.Scatter(
-            x=df_plot["timestamp"],
+            x=x_axis,
             y=df_plot["total_equity_usd"],
             mode="lines+markers",
             name="Mudra Strategy Equity",
@@ -196,16 +210,19 @@ def create_reconciliation_scatter(df: pd.DataFrame) -> go.Figure:
     Renders predicted price vs. actual realized price scatter markers.
     Green markers indicate correct directional calls; red indicate missed calls.
     """
-    if df.empty or "actual_price_at_t_plus_1" not in df.columns:
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty or "actual_price_at_t_plus_1" not in df.columns:
         fig = go.Figure()
         fig.update_layout(title="No Reconciliation Data Available", template="plotly_dark")
         return fig
 
-    df_plot = df.copy().sort_values("timestamp")
+    df_plot = df.copy()
+    if "timestamp" in df_plot.columns:
+        df_plot = df_plot.sort_values("timestamp")
+    x_axis = df_plot["timestamp"] if "timestamp" in df_plot.columns else df_plot.index
 
     colors = [
         "#00C087" if c else "#FF3B69"
-        for c in df_plot["direction_correct"]
+        for c in df_plot.get("direction_correct", [True] * len(df_plot))
     ]
 
     fig = go.Figure()
@@ -213,7 +230,7 @@ def create_reconciliation_scatter(df: pd.DataFrame) -> go.Figure:
     # Actual Realized Price Line
     fig.add_trace(
         go.Scatter(
-            x=df_plot["timestamp"],
+            x=x_axis,
             y=df_plot["actual_price_at_t_plus_1"],
             mode="lines",
             name="Actual Market Close",
@@ -222,10 +239,15 @@ def create_reconciliation_scatter(df: pd.DataFrame) -> go.Figure:
     )
 
     # Predicted Price Points
+    pred_series = df_plot.get("predicted_price", pd.Series(0.0, index=df_plot.index)).fillna(0.0)
+    actual_series = df_plot["actual_price_at_t_plus_1"].fillna(0.0)
+    error_series = df_plot.get("absolute_error_usd", pd.Series(0.0, index=df_plot.index)).fillna(0.0)
+    tag_series = df_plot.get("error_attribution_tag", pd.Series("UNSETTLED", index=df_plot.index)).fillna("UNSETTLED")
+
     fig.add_trace(
         go.Scatter(
-            x=df_plot["timestamp"],
-            y=df_plot["predicted_price"],
+            x=x_axis,
+            y=pred_series,
             mode="markers",
             name="Model Predicted Price",
             marker=dict(
@@ -235,12 +257,7 @@ def create_reconciliation_scatter(df: pd.DataFrame) -> go.Figure:
             ),
             text=[
                 f"Pred: ${p:,.2f}<br>Actual: ${a:,.2f}<br>Error: ${e:,.2f}<br>Tag: {t}"
-                for p, a, e, t in zip(
-                    df_plot["predicted_price"],
-                    df_plot["actual_price_at_t_plus_1"],
-                    df_plot["absolute_error_usd"],
-                    df_plot["error_attribution_tag"],
-                )
+                for p, a, e, t in zip(pred_series, actual_series, error_series, tag_series)
             ],
             hoverinfo="text",
         )
