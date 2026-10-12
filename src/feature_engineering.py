@@ -118,21 +118,24 @@ def create_features(
         df["fng_value"] = 50.0
         df["fng_mean_3d"] = 50.0
 
-    # On-chain network dynamics (day-over-day changes, 0.0 default if unmerged)
-    if "onchain_num_tx" in df.columns:
-        df["onchain_num_tx_change"] = df["onchain_num_tx"].pct_change(fill_method=None)
-    else:
-        df["onchain_num_tx_change"] = 0.0
+    # On-chain network dynamics (day-over-day changes, preserve upstream daily changes if present)
+    if "onchain_num_tx_change" not in df.columns:
+        if "onchain_num_tx" in df.columns:
+            df["onchain_num_tx_change"] = df["onchain_num_tx"].pct_change(fill_method=None)
+        else:
+            df["onchain_num_tx_change"] = 0.0
 
-    if "onchain_hash_rate" in df.columns:
-        df["onchain_hash_rate_change"] = df["onchain_hash_rate"].pct_change(fill_method=None)
-    else:
-        df["onchain_hash_rate_change"] = 0.0
+    if "onchain_hash_rate_change" not in df.columns:
+        if "onchain_hash_rate" in df.columns:
+            df["onchain_hash_rate_change"] = df["onchain_hash_rate"].pct_change(fill_method=None)
+        else:
+            df["onchain_hash_rate_change"] = 0.0
 
-    if "onchain_miners_revenue_usd" in df.columns:
-        df["onchain_miners_revenue_change"] = df["onchain_miners_revenue_usd"].pct_change(fill_method=None)
-    else:
-        df["onchain_miners_revenue_change"] = 0.0
+    if "onchain_miners_revenue_change" not in df.columns:
+        if "onchain_miners_revenue_usd" in df.columns:
+            df["onchain_miners_revenue_change"] = df["onchain_miners_revenue_usd"].pct_change(fill_method=None)
+        else:
+            df["onchain_miners_revenue_change"] = 0.0
 
     # Clean rolling window NaNs and reset index
     if drop_na:
