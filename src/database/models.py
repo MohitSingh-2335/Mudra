@@ -17,6 +17,15 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
 
+__all__ = [
+    "Base",
+    "MarketTick",
+    "ApiTelemetry",
+    "CouncilAudit",
+    "Reconciliation",
+    "PaperPortfolio",
+]
+
 
 class Base(DeclarativeBase):
     """Base declarative class for Mudra SQLAlchemy models."""
@@ -53,10 +62,13 @@ class MarketTick(Base):
     council_audit = relationship("CouncilAudit", back_populates="tick", uselist=False)
     reconciliation = relationship("Reconciliation", back_populates="tick", uselist=False)
 
+    def __repr__(self) -> str:
+        return f"<MarketTick(id={self.id}, time='{self.timestamp}', close={self.close}, pred_return={self.predicted_return_1h})>"
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
-            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "timestamp": self.timestamp.isoformat() if hasattr(self.timestamp, "isoformat") else (str(self.timestamp) if self.timestamp else None),
             "open": self.open,
             "high": self.high,
             "low": self.low,
@@ -95,10 +107,13 @@ class ApiTelemetry(Base):
     cost_estimate_usd = Column(Float, nullable=True, default=0.0)
     error_message = Column(Text, nullable=True)
 
+    def __repr__(self) -> str:
+        return f"<ApiTelemetry(id={self.id}, service='{self.service_name}', endpoint='{self.endpoint}', latency={self.latency_ms:.1f}ms)>"
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
-            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "timestamp": self.timestamp.isoformat() if hasattr(self.timestamp, "isoformat") else (str(self.timestamp) if self.timestamp else None),
             "service_name": self.service_name,
             "endpoint": self.endpoint,
             "latency_ms": self.latency_ms,
@@ -139,10 +154,13 @@ class CouncilAudit(Base):
     # Relationships
     tick = relationship("MarketTick", back_populates="council_audit")
 
+    def __repr__(self) -> str:
+        return f"<CouncilAudit(id={self.id}, tick_id={self.tick_id}, action='{self.strategist_action}', verdict='{self.risk_verdict}', final='{self.final_decision}')>"
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
-            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "timestamp": self.timestamp.isoformat() if hasattr(self.timestamp, "isoformat") else (str(self.timestamp) if self.timestamp else None),
             "tick_id": self.tick_id,
             "deliberation_latency_ms": self.deliberation_latency_ms,
             "strategist_action": self.strategist_action,
@@ -188,10 +206,13 @@ class Reconciliation(Base):
     # Relationships
     tick = relationship("MarketTick", back_populates="reconciliation")
 
+    def __repr__(self) -> str:
+        return f"<Reconciliation(id={self.id}, tick_id={self.tick_id}, dir_correct={self.direction_correct}, tag='{self.error_attribution_tag}')>"
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
-            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "timestamp": self.timestamp.isoformat() if hasattr(self.timestamp, "isoformat") else (str(self.timestamp) if self.timestamp else None),
             "tick_id": self.tick_id,
             "predicted_price": self.predicted_price,
             "actual_price_at_t_plus_1": self.actual_price_at_t_plus_1,
@@ -244,10 +265,13 @@ class PaperPortfolio(Base):
     
     notes = Column(Text, nullable=True)
 
+    def __repr__(self) -> str:
+        return f"<PaperPortfolio(id={self.id}, action='{self.action}', equity=${self.total_equity_usd:.2f}, alpha=${self.alpha_usd:+.2f})>"
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
-            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "timestamp": self.timestamp.isoformat() if hasattr(self.timestamp, "isoformat") else (str(self.timestamp) if self.timestamp else None),
             "action": self.action,
             "btc_amount": self.btc_amount,
             "execution_price": self.execution_price,
@@ -265,3 +289,4 @@ class PaperPortfolio(Base):
             "alpha_pct": self.alpha_pct,
             "notes": self.notes,
         }
+
