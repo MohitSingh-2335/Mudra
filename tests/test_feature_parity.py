@@ -636,4 +636,128 @@ def test_fresh_feed_executes_forecast_and_shap_inference(sample_historical_candl
     assert top_pos[0]["feature"] == "return_mean_6h"
 
 
+def test_live_shap_attribution_uses_canonical_features_and_correct_lag(sample_historical_candles, monkeypatch):
+    """
+    Verify that generate_live_shap_attribution passes the genuine 39-feature contract
+    from extract_features_for_inference, does NOT zero-pad indicators, and strictly references
+    the true prior candle close (t-1) for close_lag_1.
+    """
+    from unittest.mock import MagicMock
+    import app
+    from app import generate_live_shap_attribution
+
+    captured_df = []
+
+    def spy_explain(explainer, input_df, top_n=4):
+        captured_df.append(input_df.copy())
+        return (0.50, [{"feature": "rsi", "shap": 0.05}], [], None)
+
+    monkeypatch.setattr(app, "explain_single_prediction", spy_explain)
+
+    mock_explainer = MagicMock()
+    live_df = sample_historical_candles.copy()
+
+    res = generate_live_shap_attribution(
+        live_df=live_df,
+        explainer_clf=mock_explainer,
+        is_stale=False,
+        top_n=4,
+    )
+
+    assert res is not None
+    assert len(captured_df) == 1
+    input_df = captured_df[0]
+
+    # Verify column schema and order
+    assert list(input_df.columns) == config.CLASSIFIER_FEATURES
+    assert len(input_df.columns) == 39
+
+    # Verify technical indicators are not synthetic zeros
+    assert float(input_df["rsi"].iloc[0]) > 0.0
+    assert float(input_df["Rolling_Mean_Close"].iloc[0]) > 0.0
+    assert float(input_df["vol_mean_6h"].iloc[0]) > 0.0
+
+    # Verify temporal causality for close_lag_1
+    expected_lag_1 = float(live_df["close"].iloc[-2])
+    current_close = float(live_df["close"].iloc[-1])
+    assert float(input_df["close_lag_1"].iloc[0]) == pytest.approx(expected_lag_1, rel=1e-5)
+    if current_close != expected_lag_1:
+        assert float(input_df["close_lag_1"].iloc[0]) != current_close
+
+
+def test_live_forecast_classifier_uses_correct_lag_and_full_features(sample_historical_candles):
+    """
+    Verify that generate_live_forecast passes the canonical 39-feature vector to clf_model
+    with close_lag_1 strictly referencing candle t-1.
+    """
+    from unittest.mock import MagicMock
+    from app import generate_live_forecast
+
+    captured_clf_df = []
+
+    mock_reg = MagicMock()
+    mock_reg.predict.return_value = np.array([0.001])
+
+    mock_clf = MagicMock()
+
+    def spy_clf_predict(clf_df):
+        captured_clf_df.append(clf_df.copy())
+        return np.array([1])
+
+    mock_clf.predict.side_effect = spy_clf_predict
+    mock_clf.predict_proba.return_value = np.array([[0.30, 0.70]])
+
+    live_df = sample_historical_candles.copy()
+
+    forecast = generate_live_forecast(
+        live_df=live_df,
+        reg_model=mock_reg,
+        clf_model=mock_clf,
+        is_stale=False,
+    )
+
+    assert forecast is not None
+    assert len(captured_clf_df) == 1
+    clf_df = captured_clf_df[0]
+
+    assert list(clf_df.columns) == config.CLASSIFIER_FEATURES
+    expected_lag_1 = float(live_df["close"].iloc[-2])
+    current_close = float(live_df["close"].iloc[-1])
+    assert float(clf_df["close_lag_1"].iloc[0]) == pytest.approx(expected_lag_1, rel=1e-5)
+    if current_close != expected_lag_1:
+        assert float(clf_df["close_lag_1"].iloc[0]) != current_close
+
+
+def test_insufficient_history_safely_suppresses_forecast_and_shap(sample_historical_candles):
+    """
+    Verify that when live_df contains fewer than 35 candles, both generate_live_forecast
+    and generate_live_shap_attribution safely return None without executing predictions on fake zeros.
+    """
+    from unittest.mock import MagicMock
+    from app import generate_live_forecast, generate_live_shap_attribution
+
+    short_df = sample_historical_candles.head(20).copy()  # Only 20 candles (< 35)
+
+    mock_reg = MagicMock()
+    mock_clf = MagicMock()
+    mock_explainer = MagicMock()
+
+    forecast = generate_live_forecast(
+        live_df=short_df,
+        reg_model=mock_reg,
+        clf_model=mock_clf,
+        is_stale=False,
+    )
+    assert forecast is None
+    assert mock_reg.predict.called is False
+    assert mock_clf.predict.called is False
+
+    shap_res = generate_live_shap_attribution(
+        live_df=short_df,
+        explainer_clf=mock_explainer,
+        is_stale=False,
+    )
+    assert shap_res is None
+
+
 
