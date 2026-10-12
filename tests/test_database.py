@@ -17,7 +17,12 @@ from src.database.models import (
 )
 from src.database.connection import init_db
 from src.engine.reconciliation import reconcile_pending_ticks, get_reconciliation_summary
-from src.engine.paper_portfolio import execute_paper_order, get_portfolio_summary, INITIAL_CAPITAL_USD
+from src.engine.paper_portfolio import (
+    execute_paper_order,
+    get_portfolio_summary,
+    get_average_entry_price,
+    INITIAL_CAPITAL_USD,
+)
 from src.api.schemas import ReconciliationSummaryResponse, PortfolioSummaryResponse
 
 
@@ -598,4 +603,55 @@ def test_net_realized_pnl_accounting_two_completed_trades(in_memory_db):
     assert summary2["total_equity_usd"] == round(summary2["cash_balance"] + summary2["btc_position_value_usd"], 2)
     # Total portfolio profit equals cumulative realized PnL when inventory is zero
     assert summary2["total_equity_usd"] - INITIAL_CAPITAL_USD == pytest.approx(summary2["realized_pnl_usd"], abs=1e-2)
+
+
+def test_get_average_entry_price_missing_eligible_buy_isolation(in_memory_db):
+    """
+    Verifies that get_average_entry_price strictly isolates cost basis between trades:
+    1. Returns 0.0 on an uninitialized / empty ledger.
+    2. After a completed trade (BUY then SELL), querying cost basis for unacquired inventory
+       returns 0.0 instead of falling back to the previous liquidated trade's BUY records.
+    3. An orphaned open position with no eligible BUY records safely evaluates to 0.0 cost basis
+       without crashing or borrowing earlier trade data.
+    """
+    session, _ = in_memory_db
+
+    # 1. Empty ledger returns 0.0
+    assert get_average_entry_price(session, target_btc=0.016) == 0.0
+
+    # 2. Complete Trade 1: BUY and SELL
+    execute_paper_order(session, "BUY", 60000.0, kelly_fraction=0.10)
+    execute_paper_order(session, "SELL", 63000.0)
+
+    # All BTC is now liquidated; last_sell_id exists.
+    # Querying open inventory now MUST NOT fall back to Trade 1's BUY row.
+    assert get_average_entry_price(session, target_btc=0.016) == 0.0
+
+    # 3. Orphaned open inventory without a BUY record evaluates safely to 0.0 cost basis
+    # Simulate an orphaned snapshot row with positive BTC balance but no BUY record
+    orphaned_snapshot = PaperPortfolio(
+        timestamp=datetime.now(timezone.utc),
+        action="HOLD",
+        btc_amount=0.0,
+        execution_price=64000.0,
+        fee_deducted_usd=0.0,
+        slippage_usd=0.0,
+        cash_balance=10048.53,
+        btc_balance=0.01,
+        total_equity_usd=10048.53 + (0.01 * 64000.0),
+        realized_pnl_usd=0.0,
+        unrealized_pnl_usd=0.0,
+        drawdown_pct=0.0,
+        cumulative_return_pct=0.0,
+        benchmark_btc_equity=10000.0,
+        alpha_usd=0.0,
+        alpha_pct=0.0,
+        notes="Orphaned test record without corresponding BUY row",
+    )
+    session.add(orphaned_snapshot)
+    session.commit()
+
+    # Must still return 0.0 cost basis and not borrow Trade 1's records
+    assert get_average_entry_price(session, target_btc=0.01) == 0.0
+
 
