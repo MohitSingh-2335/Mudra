@@ -760,4 +760,166 @@ def test_insufficient_history_safely_suppresses_forecast_and_shap(sample_histori
     assert shap_res is None
 
 
+def test_merge_onchain_prevents_same_day_intraday_leakage():
+    """
+    Verify that an intraday candle at date D does NOT receive date D's completed aggregate,
+    preventing lookahead leakage. It must strictly receive the fully completed day D-1 metrics.
+    """
+    from src.agents.onchain_agent import merge_onchain
+
+    # Synthetic candles spanning 2026-10-10 and 2026-10-11
+    timestamps = [
+        "2026-10-10 12:00:00",
+        "2026-10-10 23:00:00",
+        "2026-10-11 05:00:00",
+        "2026-10-11 23:00:00",
+    ]
+    candle_df = pd.DataFrame({"timestamp": timestamps, "close": [60000.0, 60100.0, 60200.0, 60300.0]})
+
+    # Onchain daily observations
+    mock_onchain = pd.DataFrame({
+        "date": [pd.to_datetime("2026-10-09").date(), pd.to_datetime("2026-10-10").date(), pd.to_datetime("2026-10-11").date()],
+        "onchain_num_tx": [100000.0, 200000.0, 300000.0],
+        "onchain_hash_rate": [100.0, 200.0, 300.0],
+        "onchain_miners_revenue_usd": [1000.0, 2000.0, 3000.0],
+    })
+
+    merged = merge_onchain(candle_df, onchain_df=mock_onchain)
+
+    # At 2026-10-10 (any hour): latest completed day is 2026-10-09 (100000.0)
+    assert merged.loc[merged["timestamp"] == "2026-10-10 12:00:00", "onchain_num_tx"].iloc[0] == 100000.0
+    assert merged.loc[merged["timestamp"] == "2026-10-10 23:00:00", "onchain_num_tx"].iloc[0] == 100000.0
+
+    # At 2026-10-11 05:00:00: latest completed day is 2026-10-10 (200000.0), NOT same-day 2026-10-11 (300000.0)
+    leakage_candle = merged.loc[merged["timestamp"] == "2026-10-11 05:00:00"]
+    assert leakage_candle["onchain_num_tx"].iloc[0] == 200000.0, (
+        f"Temporal leakage detected! Intraday candle received {leakage_candle['onchain_num_tx'].iloc[0]} "
+        f"instead of completed prior day's value 200000.0."
+    )
+    assert leakage_candle["onchain_num_tx"].iloc[0] != 300000.0
+
+
+def test_merge_onchain_prevents_backward_fill_leakage():
+    """
+    Verify that historical candles preceding the earliest onchain observation
+    receive 0.0 (unobserved) and are NEVER backward-filled with future observations.
+    """
+    from src.agents.onchain_agent import merge_onchain
+
+    timestamps = [
+        "2026-10-08 10:00:00",
+        "2026-10-09 10:00:00",
+        "2026-10-11 10:00:00",
+    ]
+    candle_df = pd.DataFrame({"timestamp": timestamps, "close": [58000.0, 59000.0, 60000.0]})
+
+    # Onchain data only starts on 2026-10-10
+    mock_onchain = pd.DataFrame({
+        "date": [pd.to_datetime("2026-10-10").date()],
+        "onchain_num_tx": [500000.0],
+        "onchain_hash_rate": [500.0],
+        "onchain_miners_revenue_usd": [5000.0],
+    })
+
+    merged = merge_onchain(candle_df, onchain_df=mock_onchain)
+
+    # 2026-10-08 and 2026-10-09 must NOT be backward-filled with 500000.0
+    val_08 = merged.loc[merged["timestamp"] == "2026-10-08 10:00:00", "onchain_num_tx"].iloc[0]
+    val_09 = merged.loc[merged["timestamp"] == "2026-10-09 10:00:00", "onchain_num_tx"].iloc[0]
+    assert val_08 == 0.0, f"Backward-fill leakage! Expected 0.0, got {val_08}"
+    assert val_09 == 0.0, f"Backward-fill leakage! Expected 0.0, got {val_09}"
+
+    # 2026-10-11 looks up completed day 2026-10-10 -> 500000.0
+    val_11 = merged.loc[merged["timestamp"] == "2026-10-11 10:00:00", "onchain_num_tx"].iloc[0]
+    assert val_11 == 500000.0
+
+
+def test_merge_onchain_computes_daily_change_without_hourly_zero_repetition():
+    """
+    Verify that day-over-day percentage changes are computed at the daily level before broadcast,
+    preventing the 96% zero-repetition artifact across hourly candles.
+    Also verify that create_features preserves this upstream calculation.
+    """
+    from src.agents.onchain_agent import merge_onchain
+    from src.feature_engineering import create_features
+
+    # 24 hourly candles on 2026-10-11
+    timestamps = [f"2026-10-11 {h:02d}:00:00" for h in range(24)]
+    candle_df = pd.DataFrame({
+        "timestamp": timestamps,
+        "open": [60000.0] * 24,
+        "high": [60500.0] * 24,
+        "low": [59500.0] * 24,
+        "close": [60000.0] * 24,
+        "volume": [100.0] * 24,
+    })
+
+    # Daily data: 2026-10-09 = 100,000; 2026-10-10 = 120,000 (+20% change)
+    mock_onchain = pd.DataFrame({
+        "date": [pd.to_datetime("2026-10-09").date(), pd.to_datetime("2026-10-10").date()],
+        "onchain_num_tx": [100000.0, 120000.0],
+        "onchain_hash_rate": [100.0, 120.0],
+        "onchain_miners_revenue_usd": [1000.0, 1200.0],
+    })
+
+    merged = merge_onchain(candle_df, onchain_df=mock_onchain)
+
+    # All 24 hours of 2026-10-11 look up completed day 2026-10-10, where daily change was (120k - 100k)/100k = 0.20
+    assert len(merged) == 24
+    for h in range(24):
+        val = merged["onchain_num_tx_change"].iloc[h]
+        assert val == pytest.approx(0.20, abs=1e-4), (
+            f"Hour {h} did not receive daily day-over-day change! Got {val}, expected 0.20"
+        )
+
+    # In create_features, verify this change is NOT overwritten by hourly pct_change (which would yield 0.0)
+    feat_df = create_features(merged, drop_na=False)
+    for h in range(1, 24):
+        feat_val = feat_df["onchain_num_tx_change"].iloc[h]
+        assert feat_val == pytest.approx(0.20, abs=1e-4), (
+            f"create_features overwrote daily change with hourly zero at hour {h}! Got {feat_val}"
+        )
+
+
+def test_merge_onchain_timestamp_and_boundary_semantics():
+    """
+    Verify timezone handling (UTC awareness, string formatting) and midnight boundary transitions.
+    At 2026-10-11 00:00:00 UTC, target date is 2026-10-10.
+    At 2026-10-10 23:00:00 UTC, target date is 2026-10-09.
+    """
+    from src.agents.onchain_agent import merge_onchain
+
+    # 1. Test timezone-aware UTC timestamps
+    tz_aware_ts = pd.date_range("2026-10-10 22:00:00", periods=4, freq="h", tz="UTC")
+    df_tz = pd.DataFrame({"timestamp": tz_aware_ts, "close": [60000.0] * 4})
+
+    mock_onchain = pd.DataFrame({
+        "date": [pd.to_datetime("2026-10-09").date(), pd.to_datetime("2026-10-10").date()],
+        "onchain_num_tx": [111.0, 222.0],
+        "onchain_hash_rate": [11.0, 22.0],
+        "onchain_miners_revenue_usd": [1.0, 2.0],
+    })
+
+    merged_tz = merge_onchain(df_tz, onchain_df=mock_onchain)
+    # Row 0: 2026-10-10 22:00 -> completed day 2026-10-09 -> 111.0
+    # Row 1: 2026-10-10 23:00 -> completed day 2026-10-09 -> 111.0
+    # Row 2: 2026-10-11 00:00 -> completed day 2026-10-10 -> 222.0
+    # Row 3: 2026-10-11 01:00 -> completed day 2026-10-10 -> 222.0
+    assert merged_tz["onchain_num_tx"].iloc[0] == 111.0
+    assert merged_tz["onchain_num_tx"].iloc[1] == 111.0
+    assert merged_tz["onchain_num_tx"].iloc[2] == 222.0
+    assert merged_tz["onchain_num_tx"].iloc[3] == 222.0
+
+    # 2. Test timezone-naive timestamps (should localize cleanly to UTC)
+    naive_ts = [
+        pd.Timestamp("2026-10-10 23:00:00"),
+        pd.Timestamp("2026-10-11 00:00:00"),
+    ]
+    df_naive = pd.DataFrame({"timestamp": naive_ts, "close": [60000.0, 60100.0]})
+    merged_naive = merge_onchain(df_naive, onchain_df=mock_onchain)
+    assert merged_naive["onchain_num_tx"].iloc[0] == 111.0
+    assert merged_naive["onchain_num_tx"].iloc[1] == 222.0
+
+
+
 
