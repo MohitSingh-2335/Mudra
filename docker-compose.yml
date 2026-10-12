@@ -10,6 +10,7 @@ services:
     ports:
       - "8000:8000"
     environment:
+      - DATABASE_URL=${DATABASE_URL:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
     restart: unless-stopped
     healthcheck:
@@ -28,6 +29,7 @@ services:
     ports:
       - "8501:8501"
     environment:
+      - DATABASE_URL=${DATABASE_URL:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - MUDRA_API_URL=http://api:8000
     depends_on:
