@@ -11,6 +11,18 @@ except ImportError:
     pass
 
 import os
+import sys
+from pathlib import Path
+
+# Ensure repository root is on sys.path
+ROOT_DIR = Path(__file__).resolve().parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+# Guard stdout reconfiguration against Windows CRT pipe corruption
+if hasattr(sys.stdout, "reconfigure") and sys.stdout.isatty():
+    sys.stdout.reconfigure(encoding="utf-8")
+
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -49,7 +61,6 @@ from src.ui.charts import (
 # --- Streamlit Page Configuration ---
 st.set_page_config(
     page_title="Mudra — Institutional Quant Terminal",
-    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -82,7 +93,7 @@ def load_models():
         explainer = get_tree_explainer(clf)
         return reg, clf, explainer
     except Exception as exc:
-        st.error(f"🚨 Failed to load ML artifacts: {exc}")
+        st.error(f"[ERROR] Failed to load ML artifacts: {exc}")
         return None, None, None
 
 
@@ -154,8 +165,10 @@ def fetch_cloud_database_state(current_price: float):
         "ticks_df": pd.DataFrame(),
         "rec_df": pd.DataFrame(),
         "rec_kpis": {
-            "total_evaluated": 0, "win_rate_pct": 0.0, "mae_usd": 0.0,
-            "mape_pct": 0.0, "information_coefficient": 0.0,
+            "total_evaluated": 0, "total_reconciled": 0,
+            "win_rate_pct": 0.0, "directional_accuracy_pct": 0.0,
+            "mae_usd": 0.0, "mape_pct": 0.0,
+            "information_coefficient": 0.0, "information_coefficient_ic": 0.0,
             "black_swans_filtered": 0, "accurate_count": 0
         },
         "port_df": pd.DataFrame(),
@@ -197,11 +210,11 @@ def fetch_cloud_database_state(current_price: float):
 # =====================================================================================
 # SIDEBAR CONTROLS & STATUS
 # =====================================================================================
-st.sidebar.title("⚡ Mudra Intelligence")
+st.sidebar.title("Mudra Intelligence")
 st.sidebar.caption("Institutional Quantitative Cryptocurrency Platform")
 
 # On-Demand Hourly Quant Deliberation & Sync Trigger
-if st.sidebar.button("⚡ Sync Latest Hourly Candle Now", use_container_width=True):
+if st.sidebar.button("Sync Latest Hourly Candle Now", use_container_width=True):
     with st.spinner("Streaming candle, calculating signals, and deliberating..."):
         try:
             synced, sync_msg, _ = sync_hourly_quant_cycle(force=True)
@@ -214,12 +227,12 @@ if st.sidebar.button("⚡ Sync Latest Hourly Candle Now", use_container_width=Tr
         except Exception as exc:
             st.sidebar.error(f"Sync error: {exc}")
 
-if st.sidebar.button("🔄 Refresh Terminal Feeds", use_container_width=True):
+if st.sidebar.button("Refresh Terminal Feeds", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("☁️ Infrastructure Health")
+st.sidebar.subheader("Infrastructure Health")
 
 # Fetch live market data
 live_market_df = fetch_live_market_candles()
@@ -233,7 +246,7 @@ if db_state["db_ok"]:
 else:
     st.sidebar.error("**Neon Cloud:** Disconnected (SQLite test fallback)")
 
-st.sidebar.info("**24/7 Engine:** GitHub Actions Hourly Cron (`0 * * * *`)")
+st.sidebar.info("**24/7 Engine:** GitHub Actions Hourly Cron (`5 * * * *`)")
 st.sidebar.markdown("---")
 st.sidebar.markdown(
     """
@@ -249,14 +262,14 @@ st.sidebar.markdown(
 # =====================================================================================
 # TOP EXECUTIVE KPI BANNER & 1-SECOND WEBSOCKET RIBBON
 # =====================================================================================
-st.title("⚡ Mudra Quantitative Cryptocurrency Terminal")
+st.title("Mudra Quantitative Cryptocurrency Terminal")
 
 # Client-Side 1-Second Binance WebSocket Ticker (0% Server Load)
 components.html(
     """
     <div style="background-color: #0E1117; border: 1px solid #1E2329; border-radius: 8px; padding: 10px 16px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #FFFFFF; display: flex; justify-content: space-between; align-items: center; box-sizing: border-box;">
         <div style="display: flex; align-items: center; gap: 12px;">
-            <span style="font-size: 1.05rem; font-weight: 700; color: #F0B90B;">🟡 BTC/USDT</span>
+            <span style="font-size: 1.05rem; font-weight: 700; color: #F0B90B;">BTC/USDT</span>
             <span id="price" style="font-size: 1.35rem; font-weight: 800; font-family: monospace; transition: color 0.15s ease;">$---.--</span>
             <span id="change" style="font-size: 0.88rem; font-weight: 600; padding: 2px 6px; border-radius: 4px;">---%</span>
         </div>
@@ -312,7 +325,6 @@ components.html(
 st.caption(f"Real-Time BTC/USDT Multi-Agent Deliberation, Delayed Ground Truth Reconciliation & Autonomous Forward Ledger • Last Sync: {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
 
 
-
 # Top Metrics Row
 kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
 
@@ -331,19 +343,19 @@ with kpi2:
 
 with kpi3:
     rec_kpis = db_state["rec_kpis"]
-    win_rate = rec_kpis.get("win_rate_pct", 0.0)
-    total_eval = rec_kpis.get("total_evaluated", 0)
+    win_rate = float(rec_kpis.get("directional_accuracy_pct") or rec_kpis.get("win_rate_pct", 0.0))
+    total_eval = int(rec_kpis.get("total_reconciled") or rec_kpis.get("total_evaluated", 0))
     st.metric("All-Time Win Rate", f"{win_rate:.1f}%", f"{total_eval} evaluated hours")
 
 with kpi4:
     port = db_state["port_kpis"]
-    equity = port.get("total_equity_usd", 10000.0)
-    ret_pct = port.get("cumulative_return_pct", 0.0)
+    equity = float(port.get("total_equity_usd", 10000.0))
+    ret_pct = float(port.get("cumulative_return_pct", 0.0))
     st.metric("Portfolio Equity", f"${equity:,.2f}", f"{ret_pct:+.2f}% vs $10k")
 
 with kpi5:
-    alpha = port.get("alpha_usd", 0.0)
-    alpha_pct = port.get("alpha_pct", 0.0)
+    alpha = float(port.get("alpha_usd", 0.0))
+    alpha_pct = float(port.get("alpha_pct", 0.0))
     st.metric("Excess Alpha", f"${alpha:+,.2f}", f"{alpha_pct:+.2f}% over B&H")
 
 st.markdown("---")
@@ -353,11 +365,11 @@ st.markdown("---")
 # 5 INSTITUTIONAL TABS
 # =====================================================================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📊 Live Candlestick Terminal",
-    "🏛️ Multi-Agent Council (LangGraph)",
-    "📜 Live Track Record (Delayed Truth)",
-    "💰 $10,000 Paper Portfolio Ledger",
-    "🔬 MLOps Governance & TreeSHAP",
+    "Live Candlestick Terminal",
+    "Multi-Agent Council (LangGraph)",
+    "Live Track Record (Delayed Truth)",
+    "$10,000 Paper Portfolio Ledger",
+    "MLOps Governance & TreeSHAP",
 ])
 
 
@@ -400,13 +412,12 @@ with tab1:
         height=550,
     )
 
-    with st.expander("🔬 Python Microstructural Technical Analysis (20/50 EMA Ribbon & Order Flow)"):
+    with st.expander("Python Microstructural Technical Analysis (20/50 EMA Ribbon & Order Flow)"):
         candlestick_fig = create_tradingview_candlestick(live_market_df)
         st.plotly_chart(candlestick_fig, use_container_width=True)
 
-
     # Next-Hour Forecast Panel
-    st.markdown("### 🔮 Next-Hour Model Forecast Breakdown")
+    st.markdown("### Next-Hour Model Forecast Breakdown")
     f_col1, f_col2, f_col3, f_col4, f_col5 = st.columns(5)
 
     if not live_market_df.empty and reg_model:
@@ -470,32 +481,32 @@ with tab1:
                 pass
 
         if not cleared_hurdle:
-            direction_badge = "⚪ SIDEWAYS (CHOP)"
+            direction_badge = "SIDEWAYS (CHOP)"
         elif direction_label == "UP":
-            direction_badge = "🟢 BULLISH (UP)"
+            direction_badge = "BULLISH (UP)"
         else:
-            direction_badge = "🔴 BEARISH (DOWN)"
+            direction_badge = "BEARISH (DOWN)"
 
         with f_col1:
             st.metric("Predicted Direction", direction_badge, f"Up Prob: {prob_up:.1f}%")
         with f_col2:
-            st.metric("Expected 1h Move", f"{pred_ret_pct:+.3f}%", "Cleared 0.05% Hurdle ✅" if cleared_hurdle else "Below Fee Hurdle ⚠️")
+            st.metric("Expected 1h Move", f"{pred_ret_pct:+.3f}%", "Cleared 0.05% Hurdle [PASS]" if cleared_hurdle else "Below Fee Hurdle [SKIP]")
         with f_col3:
             st.metric("Target Close Price", f"${pred_target:,.2f}", f"${pred_dollar_move:+,.2f}")
         with f_col4:
-            st.metric("Taker Buy Ratio", f"{taker:.4f}", "Order Flow: " + ("Buyer Pressure 🟢" if taker > 0.52 else ("Seller Pressure 🔴" if taker < 0.48 else "Balanced ⚪")))
+            st.metric("Taker Buy Ratio", f"{taker:.4f}", "Order Flow: " + ("Buyer Pressure (+)" if taker > 0.52 else ("Seller Pressure (-)" if taker < 0.48 else "Balanced (0)")))
         with f_col5:
-            st.metric("Hourly Volatility Spread", f"{spread_pct:.2f}%", "Regime: " + ("Extreme Flush 🚨" if spread_pct > 3.8 else "Controlled 🛡️"))
+            st.metric("Hourly Volatility Spread", f"{spread_pct:.2f}%", "Regime: " + ("Extreme Flush [ALERT]" if spread_pct > 3.8 else "Controlled [NORMAL]"))
 
 
 # -------------------------------------------------------------------------------------
 # TAB 2: MULTI-AGENT COUNCIL (LANGGRAPH)
 # -------------------------------------------------------------------------------------
 with tab2:
-    st.subheader("🏛️ Autonomous Multi-Agent Trading Council (LangGraph)")
+    st.subheader("Autonomous Multi-Agent Trading Council (LangGraph)")
     st.caption("Cyclical 2-node StateGraph: Lead Quantitative Strategist synthesizes thesis, and Reflexion Risk Critic enforces volatility & Kelly limits.")
 
-    st.markdown("#### 🧪 Quantitative Stress-Testing & Simulation Scenarios")
+    st.markdown("#### Quantitative Stress-Testing & Simulation Scenarios")
     st.caption("Click any scenario below to convene the AI agents live on demand:")
 
     # Deliberation Trigger & Stress Testing Scenarios
@@ -503,16 +514,16 @@ with tab2:
     run_deliberation = False
     scenario_selected = "live"
 
-    if c_btn1.button("🔴 Deliberate Live Market", use_container_width=True):
+    if c_btn1.button("Deliberate Live Market", use_container_width=True):
         scenario_selected = "live"
         run_deliberation = True
-    if c_btn2.button("⚡ Stress: Bullish Breakout", use_container_width=True):
+    if c_btn2.button("Stress: Bullish Breakout", use_container_width=True):
         scenario_selected = "bullish"
         run_deliberation = True
-    if c_btn3.button("🛡️ Stress: Volatility Flush Veto", use_container_width=True):
+    if c_btn3.button("Stress: Volatility Flush Veto", use_container_width=True):
         scenario_selected = "vol_spike"
         run_deliberation = True
-    if c_btn4.button("🛑 Stress: Sub-Hurdle Chop Veto", use_container_width=True):
+    if c_btn4.button("Stress: Sub-Hurdle Chop Veto", use_container_width=True):
         scenario_selected = "chop"
         run_deliberation = True
 
@@ -521,19 +532,19 @@ with tab2:
             if scenario_selected == "bullish":
                 m_data = {"close": current_price, "high": current_price * 1.01, "low": current_price * 0.99, "volume": 5000.0, "taker_buy_ratio": 0.65}
                 t_data = {"volatility_spread": 0.015, "order_flow_bias": "STRONG_BUYER_AGGRESSION", "rsi_estimate": 62.0}
-                f_data = {"expected_return_pct": 0.42, "predicted_dollar_move": 350.0, "clears_hurdle": True, "confidence": 0.88, "direction": "UP", "direction_badge": "BULLISH 🟢"}
+                f_data = {"expected_return_pct": 0.42, "predicted_dollar_move": 350.0, "clears_hurdle": True, "confidence": 0.88, "direction": "UP", "direction_badge": "BULLISH [UP]"}
             elif scenario_selected == "vol_spike":
                 m_data = {"close": current_price, "high": current_price * 1.05, "low": current_price * 0.95, "volume": 12000.0, "taker_buy_ratio": 0.35}
                 t_data = {"volatility_spread": 0.052, "order_flow_bias": "EXTREME_LIQUIDATION", "rsi_estimate": 28.0}
-                f_data = {"expected_return_pct": 0.20, "predicted_dollar_move": 160.0, "clears_hurdle": True, "confidence": 0.60, "direction": "UP", "direction_badge": "BULLISH 🟢"}
+                f_data = {"expected_return_pct": 0.20, "predicted_dollar_move": 160.0, "clears_hurdle": True, "confidence": 0.60, "direction": "UP", "direction_badge": "BULLISH [UP]"}
             elif scenario_selected == "chop":
                 m_data = {"close": current_price, "high": current_price * 1.002, "low": current_price * 0.998, "volume": 400.0, "taker_buy_ratio": 0.49}
                 t_data = {"volatility_spread": 0.004, "order_flow_bias": "FLAT_CHOP", "rsi_estimate": 50.0}
-                f_data = {"expected_return_pct": 0.02, "predicted_dollar_move": 15.0, "clears_hurdle": False, "confidence": 0.45, "direction": "SIDEWAYS", "direction_badge": "SIDEWAYS ⚪"}
+                f_data = {"expected_return_pct": 0.02, "predicted_dollar_move": 15.0, "clears_hurdle": False, "confidence": 0.45, "direction": "SIDEWAYS", "direction_badge": "SIDEWAYS [CHOP]"}
             else:
                 m_data = {"close": current_price, "high": current_price * 1.005, "low": current_price * 0.995, "volume": 1200.0, "taker_buy_ratio": 0.51}
                 t_data = {"volatility_spread": 0.018, "order_flow_bias": "NEUTRAL", "rsi_estimate": 51.0}
-                f_data = {"expected_return_pct": 0.08, "predicted_dollar_move": 65.0, "clears_hurdle": True, "confidence": 0.65, "direction": "UP", "direction_badge": "BULLISH 🟢"}
+                f_data = {"expected_return_pct": 0.08, "predicted_dollar_move": 65.0, "clears_hurdle": True, "confidence": 0.65, "direction": "UP", "direction_badge": "BULLISH [UP]"}
 
             st.session_state["council_state"] = run_trading_graph(
                 symbol="BTCUSDT",
@@ -571,23 +582,23 @@ with tab2:
     act = council_state.get("final_decision", "HOLD")
     vrd = council_state.get("risk_verdict", "APPROVED")
     conv = council_state.get("strategist_conviction", 5)
-    kelly_pct = council_state.get("kelly_fraction", 0.0) * 100.0
+    kelly_pct = float(council_state.get("kelly_fraction", 0.0)) * 100.0
     vetoes = council_state.get("veto_reasons", [])
 
     if vrd == "APPROVED":
-        st.success(f"✅ **COUNCIL VERDICT: {act} AUTHORIZED** | Recommended Kelly Capital Allocation: **{kelly_pct:.1f}%**")
+        st.success(f"[APPROVED] COUNCIL VERDICT: {act} AUTHORIZED | Recommended Kelly Capital Allocation: {kelly_pct:.1f}%")
     else:
-        st.error(f"🛑 **ORDER VETOED BY RISK CRITIC**: `{', '.join(vetoes) if vetoes else 'Risk thresholds breached'}`")
+        st.error(f"[VETOED] ORDER VETOED BY RISK CRITIC: {', '.join(vetoes) if vetoes else 'Risk thresholds breached'}")
 
     col_s1, col_s2 = st.columns(2)
     with col_s1:
-        with st.expander("📝 Node 1: Lead Quantitative Strategist Thesis", expanded=True):
+        with st.expander("Node 1: Lead Quantitative Strategist Thesis", expanded=True):
             st.markdown(f"**Proposed Action:** `{council_state.get('strategist_action', 'HOLD')}` (Conviction: {conv}/10)")
             st.markdown(f"**Executive Thesis:**\n\n{council_state.get('thesis', 'Thesis unavailable')}")
             if council_state.get("circuit_breaker_active"):
-                st.caption("ℹ️ *Running in Deterministic Circuit Breaker Mode.*")
+                st.caption("*Running in Deterministic Circuit Breaker Mode.*")
     with col_s2:
-        with st.expander("🛡️ Node 2: Reflexion Risk Critic Veto Audit", expanded=True):
+        with st.expander("Node 2: Reflexion Risk Critic Veto Audit", expanded=True):
             st.markdown(f"**Critic Verdict:** `{vrd}`")
             st.markdown(f"**Allocated Sizing Fraction:** `{kelly_pct:.1f}%` of available cash")
             st.markdown(f"**Stop-Loss:** `${current_price * 0.985:,.2f}` (-1.5%)")
@@ -595,14 +606,14 @@ with tab2:
             if vetoes:
                 st.markdown("**Breached Invariants:**")
                 for v in vetoes:
-                    st.markdown(f"- ⚠️ `{v}`")
+                    st.markdown(f"- [VETO] `{v}`")
 
 
 # -------------------------------------------------------------------------------------
 # TAB 3: LIVE TRACK RECORD & DELAYED RECONCILIATION (NEON DB SSOT)
 # -------------------------------------------------------------------------------------
 with tab3:
-    st.subheader("📜 Live Prediction Track Record & Delayed Ground Truth Ledger")
+    st.subheader("Live Prediction Track Record & Delayed Ground Truth Ledger")
     st.caption("Delayed ground truth reconciliation evaluates prediction at T against confirmed candle close at T+1. All records stored permanently in Neon PostgreSQL.")
 
     rec_df = db_state["rec_df"]
@@ -611,25 +622,25 @@ with tab3:
     # Rolling Metrics Ribbon
     m_col1, m_col2, m_col3, m_col4, m_col5 = st.columns(5)
     with m_col1:
-        st.metric("Total Evaluated Hours", f"{rec_kpis.get('total_evaluated', 0)}")
+        st.metric("Total Evaluated Hours", f"{rec_kpis.get('total_reconciled') or rec_kpis.get('total_evaluated', 0)}")
     with m_col2:
-        st.metric("Directional Win Rate", f"{rec_kpis.get('win_rate_pct', 0.0):.1f}%")
+        st.metric("Directional Win Rate", f"{float(rec_kpis.get('directional_accuracy_pct') or rec_kpis.get('win_rate_pct', 0.0)):.1f}%")
     with m_col3:
-        st.metric("Mean Absolute Error (MAE)", f"${rec_kpis.get('mae_usd', 0.0):,.2f}")
+        st.metric("Mean Absolute Error (MAE)", f"${float(rec_kpis.get('mae_usd', 0.0)):,.2f}")
     with m_col4:
-        st.metric("Mean Error (MAPE)", f"{rec_kpis.get('mape_pct', 0.0):.2f}%")
+        st.metric("Mean Error (MAPE)", f"{float(rec_kpis.get('mape_pct', 0.0)):.2f}%")
     with m_col5:
-        st.metric("Information Coeff (IC)", f"{rec_kpis.get('information_coefficient', 0.0):.3f}")
+        st.metric("Information Coeff (IC)", f"{float(rec_kpis.get('information_coefficient_ic') or rec_kpis.get('information_coefficient', 0.0)):.3f}")
 
     # Hit / Miss Scatter Chart
     if not rec_df.empty:
-        st.markdown("### 🎯 Realized Price vs. Predicted Price Accuracy Chart")
+        st.markdown("### Realized Price vs. Predicted Price Accuracy Chart")
         st.plotly_chart(create_reconciliation_scatter(rec_df), use_container_width=True)
 
-        st.markdown("### 📋 Historical Delayed Reconciliation Audit Table")
+        st.markdown("### Historical Delayed Reconciliation Audit Table")
         # Format table for display
         disp_df = rec_df.copy()
-        disp_df["Direction"] = disp_df["direction_correct"].apply(lambda x: "✅ WIN" if x else "❌ LOSS")
+        disp_df["Direction"] = disp_df["direction_correct"].apply(lambda x: "[WIN]" if x else "[LOSS]")
         disp_df["Pred Price"] = disp_df["predicted_price"].apply(lambda x: f"${x:,.2f}")
         disp_df["Actual Price"] = disp_df["actual_price_at_t_plus_1"].apply(lambda x: f"${x:,.2f}")
         disp_df["Dollar Error"] = disp_df["absolute_error_usd"].apply(lambda x: f"${x:,.2f}")
@@ -642,14 +653,14 @@ with tab3:
             hide_index=True,
         )
     else:
-        st.info("ℹ️ Delayed reconciliation runs automatically every hour as candles close. First evaluated predictions will appear on the next hourly candle close.")
+        st.info("[INFO] Delayed reconciliation runs automatically every hour as candles close. First evaluated predictions will appear on the next hourly candle close.")
 
 
 # -------------------------------------------------------------------------------------
 # TAB 4: $10,000 PAPER TRADING PORTFOLIO LEDGER (NEON DB SSOT)
 # -------------------------------------------------------------------------------------
 with tab4:
-    st.subheader("💰 Forward $10,000 Paper Trading Portfolio & Alpha Attribution")
+    st.subheader("Forward $10,000 Paper Trading Portfolio & Alpha Attribution")
     st.caption("Live forward execution accounting for 0.05% Binance taker fee and 0.02% slippage. Proves excess Alpha over Bitcoin Buy & Hold benchmark.")
 
     port_df = db_state["port_df"]
@@ -657,22 +668,22 @@ with tab4:
 
     p_col1, p_col2, p_col3, p_col4, p_col5 = st.columns(5)
     with p_col1:
-        st.metric("Total Portfolio Equity", f"${port_kpis.get('total_equity_usd', 10000.0):,.2f}", f"{port_kpis.get('cumulative_return_pct', 0.0):+.2f}%")
+        st.metric("Total Portfolio Equity", f"${float(port_kpis.get('total_equity_usd', 10000.0)):,.2f}", f"{float(port_kpis.get('cumulative_return_pct', 0.0)):+.2f}%")
     with p_col2:
-        st.metric("Cash Balance", f"${port_kpis.get('cash_balance', 10000.0):,.2f}")
+        st.metric("Cash Balance", f"${float(port_kpis.get('cash_balance', 10000.0)):,.2f}")
     with p_col3:
-        st.metric("BTC Inventory", f"{port_kpis.get('btc_balance', 0.0):.6f} BTC")
+        st.metric("BTC Inventory", f"{float(port_kpis.get('btc_balance', 0.0)):.6f} BTC")
     with p_col4:
-        st.metric("Buy & Hold Benchmark", f"${port_kpis.get('benchmark_btc_equity', 10000.0):,.2f}")
+        st.metric("Buy & Hold Benchmark", f"${float(port_kpis.get('benchmark_btc_equity', 10000.0)):,.2f}")
     with p_col5:
-        st.metric("Strategy Alpha", f"${port_kpis.get('alpha_usd', 0.0):+,.2f}", f"{port_kpis.get('alpha_pct', 0.0):+.2f}% vs B&H")
+        st.metric("Strategy Alpha", f"${float(port_kpis.get('alpha_usd', 0.0)):+,.2f}", f"{float(port_kpis.get('alpha_pct', 0.0)):+.2f}% vs B&H")
 
     # Strategy Equity Curve vs Buy & Hold Benchmark
     if not port_df.empty:
-        st.markdown("### 📈 Live Forward Equity Curve (Strategy vs. Buy & Hold Benchmark)")
+        st.markdown("### Live Forward Equity Curve (Strategy vs. Buy & Hold Benchmark)")
         st.plotly_chart(create_alpha_equity_curve(port_df), use_container_width=True)
 
-        st.markdown("### 📑 Transaction Execution Ledger")
+        st.markdown("### Transaction Execution Ledger")
         t_disp = port_df.copy()
         t_disp["Execution Price"] = t_disp["execution_price"].apply(lambda x: f"${x:,.2f}" if x > 0 else "-")
         t_disp["Total Equity"] = t_disp["total_equity_usd"].apply(lambda x: f"${x:,.2f}")
@@ -685,19 +696,19 @@ with tab4:
             hide_index=True,
         )
     else:
-        st.info("ℹ️ Portfolio initialized with $10,000.00 USDT virtual bankroll. Transactions log each hour as trades execute.")
+        st.info("[INFO] Portfolio initialized with $10,000.00 USDT virtual bankroll. Transactions log each hour as trades execute.")
 
 
 # -------------------------------------------------------------------------------------
 # TAB 5: MLOPS MODEL GOVERNANCE & TREESHAP ATTRIBUTION
 # -------------------------------------------------------------------------------------
 with tab5:
-    st.subheader("🔬 Production MLOps Model Governance & TreeSHAP Factor Attribution")
+    st.subheader("Production MLOps Model Governance & TreeSHAP Factor Attribution")
     st.caption("Evidence boundary auditing, feature attributions, and Optuna Bayesian optimization lineage.")
 
     g_col1, g_col2 = st.columns(2)
     with g_col1:
-        st.markdown("#### 🏆 Active Production Model Pedigree")
+        st.markdown("#### Active Production Model Pedigree")
         st.markdown(
             """
             | Parameter | Active Value | Rationale |
@@ -712,7 +723,7 @@ with tab5:
         )
 
     with g_col2:
-        st.markdown("#### 🛡️ Anti-Leakage Chronological Split Boundary")
+        st.markdown("#### Anti-Leakage Chronological Split Boundary")
         st.markdown(
             """
             ```
@@ -728,7 +739,7 @@ with tab5:
         )
 
     st.markdown("---")
-    st.markdown("#### 🌲 Live TreeSHAP Shapley Factor Attribution")
+    st.markdown("#### Live TreeSHAP Shapley Factor Attribution")
     st.caption("Exact mathematical feature contributions pushing the probability UP (Bullish) or DOWN (Bearish).")
 
     if not live_market_df.empty and explainer_clf:
@@ -748,12 +759,12 @@ with tab5:
             base_val, top_pos, top_neg, fig_shap = explain_single_prediction(explainer_clf, clf_input_df, top_n=4)
             sh_col1, sh_col2 = st.columns(2)
             with sh_col1:
-                st.markdown("**🟢 Bullish Contributors (Pushed Up):**")
+                st.markdown("**Bullish Contributors (Pushed Up):**")
                 for driver in top_pos:
                     st.markdown(f"- **`{driver['feature']}`**: SHAP value `+{driver['shap']:.4f}`")
             with sh_col2:
-                st.markdown("**🔴 Bearish Contributors (Pushed Down):**")
+                st.markdown("**Bearish Contributors (Pushed Down):**")
                 for driver in top_neg:
                     st.markdown(f"- **`{driver['feature']}`**: SHAP value `{driver['shap']:.4f}`")
         except Exception as exc:
-            st.info("ℹ️ TreeSHAP factor attributions ready on next candle close.")
+            st.info("[INFO] TreeSHAP factor attributions ready on next candle close.")
