@@ -96,15 +96,17 @@ def create_features(
     df["volume_lag_1"] = df["volume"].shift(1)
     df["price_volatility_interaction"] = df["close"] * df["Volatility"]
 
-    # Order-flow microstructure features (neutral defaults if feed lacks taker data)
-    if "taker_buy_ratio" in df.columns:
-        df["taker_buy_ratio_mean_6h"] = df["taker_buy_ratio"].rolling(window=6).mean()
+    # Order-flow microstructure features (neutral defaults if feed lacks taker/trades data)
+    if "taker_buy_ratio" in df.columns and df["taker_buy_ratio"].notna().any():
+        df["taker_buy_ratio"] = pd.to_numeric(df["taker_buy_ratio"], errors="coerce").fillna(0.5)
+        df["taker_buy_ratio_mean_6h"] = df["taker_buy_ratio"].rolling(window=6).mean().fillna(0.5)
     else:
         df["taker_buy_ratio"] = 0.5
         df["taker_buy_ratio_mean_6h"] = 0.5
 
-    if "number_of_trades" in df.columns:
-        df["trades_mean_6h"] = df["number_of_trades"].rolling(window=6).mean()
+    if "number_of_trades" in df.columns and df["number_of_trades"].notna().any():
+        df["number_of_trades"] = pd.to_numeric(df["number_of_trades"], errors="coerce").fillna(0.0)
+        df["trades_mean_6h"] = df["number_of_trades"].rolling(window=6).mean().fillna(0.0)
     else:
         df["number_of_trades"] = 0.0
         df["trades_mean_6h"] = 0.0
@@ -198,8 +200,10 @@ def extract_features_for_inference(df: pd.DataFrame) -> dict:
     out["volume"] = float(latest["volume"])
     if "timestamp" in latest and pd.notna(latest["timestamp"]):
         out["timestamp"] = latest["timestamp"]
-    if "number_of_trades" in latest and pd.notna(latest["number_of_trades"]):
+    if "number_of_trades" in latest and pd.notna(latest["number_of_trades"]) and latest["number_of_trades"] > 0:
         out["number_of_trades"] = int(latest["number_of_trades"])
+    else:
+        out["number_of_trades"] = None
 
     # Microstructural Telemetry
     spread = float(latest["high"] - latest["low"])
