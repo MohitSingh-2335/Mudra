@@ -186,3 +186,97 @@ def test_rejection_of_missing_features_in_forecast():
 
     with pytest.raises(ValueError, match="Feature parity violation"):
         get_model_return_forecast.invoke({"features": incomplete_features})
+
+
+def test_taker_buy_ratio_preserved_when_supplied_in_candles(sample_historical_candles):
+    """
+    Verify that calculate_technical_signals preserves the observed taker_buy_ratio
+    in supplied candles, and only overwrites when an explicit ratio is provided.
+    """
+    df = sample_historical_candles.copy()
+    # Set known non-default taker_buy_ratio on the latest candle
+    target_ratio = 0.6854
+    df.at[df.index[-1], "taker_buy_ratio"] = target_ratio
+
+    # 1. Invoke without passing taker_buy_ratio override -> MUST PRESERVE 0.6854
+    res = calculate_technical_signals.invoke({"candles": df})
+    assert res["taker_buy_ratio"] == pytest.approx(target_ratio, abs=1e-4), (
+        f"Actual taker_buy_ratio was overwritten! Expected {target_ratio}, got {res['taker_buy_ratio']}"
+    )
+
+    # 2. Invoke WITH explicit override -> MUST APPLY explicit override
+    explicit_override = 0.7421
+    res_override = calculate_technical_signals.invoke({
+        "candles": df,
+        "taker_buy_ratio": explicit_override
+    })
+    assert res_override["taker_buy_ratio"] == pytest.approx(explicit_override, abs=1e-4)
+
+
+def test_candle_closure_timestamp_verification(monkeypatch):
+    """
+    Verify that fetch_historical_candles excludes actively forming candles
+    by checking close_time against current timestamp, maintaining chronological order.
+    """
+    from datetime import datetime, timezone
+    import requests
+
+    now_ms = 1700000000000  # Base epoch in ms
+
+    # Build 36 completed closed candles + 1 currently forming candle (close_time in the future)
+    mock_klines = []
+    for i in range(36):
+        open_time = now_ms - (37 - i) * 3600000
+        close_time = open_time + 3600000 - 1  # In the past
+        mock_klines.append([
+            open_time, "60000.0", "60500.0", "59800.0", "60200.0", "100.0",
+            close_time, "6020000.0", 1500, "55.0", "3311000.0", "0"
+        ])
+
+    # 37th candle is actively forming: close_time is in the future
+    forming_open = now_ms - 1800000  # Started 30 min ago
+    forming_close = forming_open + 3600000 - 1  # 30 min into the future
+    mock_klines.append([
+        forming_open, "60200.0", "60800.0", "60100.0", "60600.0", "45.0",
+        forming_close, "2727000.0", 800, "20.0", "1212000.0", "0"
+    ])
+
+    class MockResponse:
+        status_code = 200
+        def json(self):
+            return mock_klines
+
+    monkeypatch.setattr(requests, "get", lambda *args, **kwargs: MockResponse())
+
+    # Fetch historical candles
+    candles_df = fetch_historical_candles(symbol="BTCUSDT", limit=35)
+
+    # Verify that the unclosed forming candle was EXCLUDED
+    latest_bar_close = candles_df["close"].iloc[-1]
+    assert latest_bar_close == 60200.0, (
+        f"Active unclosed candle was not excluded! Got {latest_bar_close}, expected closed bar 60200.0"
+    )
+    assert len(candles_df) >= 35
+    # Verify strict ascending chronological ordering
+    assert candles_df["timestamp"].is_monotonic_increasing
+
+
+def test_coinbase_fallback_unobserved_trade_count_handling(sample_historical_candles):
+    """
+    Verify that when trade count is unobserved (None/NaN, as in Coinbase public feed),
+    create_features cleanly evaluates trades_mean_6h = 0.0 with zero NaNs,
+    and extract_features_for_inference returns number_of_trades as None without fabricating 10,000.
+    """
+    df = sample_historical_candles.copy()
+
+    # Simulate Coinbase feed: number_of_trades is None for all bars
+    df["number_of_trades"] = None
+
+    # Should succeed without raising "Feature parity violation: NaNs encountered in trades_mean_6h"
+    features = extract_features_for_inference(df)
+
+    assert features["trades_mean_6h"] == 0.0
+    assert features["number_of_trades"] is None
+    # Crucially verify it did NOT fabricate 10,000
+    assert features["number_of_trades"] != 10000
+
