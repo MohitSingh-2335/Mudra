@@ -3,11 +3,14 @@
 import os
 import sys
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # Add project root to sys.path so config can be imported from any working directory
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
-# Ensure stdout handles UTF-8 emojis cleanly on Windows PowerShell
+# Ensure stdout handles UTF-8 cleanly on Windows PowerShell
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 
@@ -17,6 +20,10 @@ import pandas as pd
 import matplotlib
 matplotlib.use('Agg')  # Headless raster backend for cross-platform stability
 import matplotlib.pyplot as plt
+
+# Re-exports for backwards compatibility across empirical research experiments
+from src.data_preprocessing import load_and_clean_data
+from src.feature_engineering import create_features
 
 from config import (
     REGRESSOR_MODEL_PATH,
@@ -32,12 +39,18 @@ TAKER_FEE_RATE = 0.001     # 0.10% Binance taker fee per side (0.20% round trip)
 SLIPPAGE_RATE = 0.0005     # 0.05% estimated execution slippage per fill
 
 
-def load_backtest_data(data_path: str = FEATURED_BTC_DATA_PATH, split_ratio: float = 0.8) -> pd.DataFrame:
+def load_backtest_data(
+    data_path: Union[str, Path] = FEATURED_BTC_DATA_PATH,
+    split_ratio: float = 0.8
+) -> pd.DataFrame:
     """Loads feature-engineered data and extracts the chronological unseen test split."""
     if not os.path.exists(data_path):
-        raise FileNotFoundError(f"Processed dataset not found at: {data_path}")
+        raise FileNotFoundError(f"[ERROR] Processed dataset not found at: {data_path}")
 
     df = pd.read_csv(data_path, parse_dates=['timestamp'])
+    if df.empty:
+        raise ValueError(f"[ERROR] Loaded dataset from '{data_path}' is empty.")
+
     df = df.sort_values('timestamp').reset_index(drop=True)
 
     split_idx = int(len(df) * split_ratio)
@@ -45,8 +58,13 @@ def load_backtest_data(data_path: str = FEATURED_BTC_DATA_PATH, split_ratio: flo
     return test_df
 
 
-def load_production_models():
+def load_production_models() -> Tuple[Any, Any]:
     """Loads serialized Optuna-tuned models and forces CPU execution."""
+    if not os.path.exists(REGRESSOR_MODEL_PATH):
+        raise FileNotFoundError(f"[ERROR] Regressor model not found at: {REGRESSOR_MODEL_PATH}")
+    if not os.path.exists(CLASSIFIER_MODEL_PATH):
+        raise FileNotFoundError(f"[ERROR] Classifier model not found at: {CLASSIFIER_MODEL_PATH}")
+
     reg_model = joblib.load(REGRESSOR_MODEL_PATH)
     clf_model = joblib.load(CLASSIFIER_MODEL_PATH)
     reg_model.set_params(device="cpu")
@@ -54,31 +72,17 @@ def load_production_models():
     return reg_model, clf_model
 
 
-def run_backtest_simulation(
+def _simulate_from_signals(
     test_df: pd.DataFrame,
-    clf_model,
-    reg_model=None,
-    strategy_mode: str = "fused",
-    return_threshold: float = 0.002
-):
+    signals: np.ndarray,
+    initial_capital: float = INITIAL_CAPITAL,
+    taker_fee_rate: float = TAKER_FEE_RATE,
+    slippage_rate: float = SLIPPAGE_RATE
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Simulates hourly trade execution across the holdout test period.
-    
-    Strategies:
-      - 'classifier': Long when classifier predicts 1 (Upward), Flat otherwise.
-      - 'fused': Long when classifier predicts 1 AND regressor return >= return_threshold.
+    Simulates mark-to-market hourly portfolio execution given binary position signals.
     """
-    X_clf = test_df[CLASSIFIER_FEATURES]
-    clf_preds = clf_model.predict(X_clf)
-
-    if strategy_mode == "fused" and reg_model is not None:
-        X_reg = test_df[REGRESSOR_FEATURES]
-        reg_preds = reg_model.predict(X_reg)
-        signals = ((clf_preds == 1) & (reg_preds >= return_threshold)).astype(int)
-    else:
-        signals = (clf_preds == 1).astype(int)
-
-    equity = INITIAL_CAPITAL
+    equity = initial_capital
     position = 0  # 0: 100% Cash (USDT), 1: 100% Long (BTC)
     entry_equity = 0.0
     entry_price = 0.0
@@ -87,12 +91,12 @@ def run_backtest_simulation(
     equity_curve = []
     trade_log = []
 
-    total_friction = TAKER_FEE_RATE + SLIPPAGE_RATE
+    total_friction = taker_fee_rate + slippage_rate
 
     for i in range(len(test_df)):
         price = float(test_df['close'].iloc[i])
         time = test_df['timestamp'].iloc[i]
-        signal = signals[i]
+        signal = int(signals[i])
 
         # 1. Buy Signal (Enter Long from Cash)
         if position == 0 and signal == 1:
@@ -158,7 +162,65 @@ def run_backtest_simulation(
     return equity_curve_df, trade_log_df
 
 
-def calculate_quant_metrics(equity_curve_df: pd.DataFrame, trade_log_df: pd.DataFrame, test_df: pd.DataFrame) -> dict:
+def run_backtest_simulation(
+    test_df: pd.DataFrame,
+    clf_model: Any,
+    reg_model: Optional[Any] = None,
+    strategy_mode: str = "fused",
+    return_threshold: float = 0.002
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Simulates hourly trade execution across the holdout test period.
+    
+    Strategies:
+      - 'classifier': Long when classifier predicts 1 (Upward), Flat otherwise.
+      - 'fused': Long when classifier predicts 1 AND regressor return >= return_threshold.
+    """
+    X_clf = test_df[CLASSIFIER_FEATURES]
+    clf_preds = clf_model.predict(X_clf)
+
+    if strategy_mode == "fused" and reg_model is not None:
+        X_reg = test_df[REGRESSOR_FEATURES]
+        reg_preds = reg_model.predict(X_reg)
+        signals = ((clf_preds == 1) & (reg_preds >= return_threshold)).astype(int)
+    else:
+        signals = (clf_preds == 1).astype(int)
+
+    return _simulate_from_signals(test_df, signals)
+
+
+def run_backtest(
+    test_df: pd.DataFrame,
+    model: Any,
+    scaler: Optional[Any] = None,
+    threshold: float = 0.5
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Backwards-compatible interface supporting empirical research scripts
+    with optional feature scalers and probability thresholds.
+    """
+    feature_cols = [c for c in CLASSIFIER_FEATURES if c in test_df.columns]
+    X = test_df[feature_cols]
+
+    if scaler is not None:
+        X_proc = scaler.transform(X)
+    else:
+        X_proc = X
+
+    if hasattr(model, "predict_proba"):
+        probs = model.predict_proba(X_proc)[:, 1]
+        signals = (probs >= threshold).astype(int)
+    else:
+        signals = model.predict(X_proc)
+
+    return _simulate_from_signals(test_df, signals)
+
+
+def calculate_quant_metrics(
+    equity_curve_df: pd.DataFrame,
+    trade_log_df: pd.DataFrame,
+    test_df: pd.DataFrame
+) -> Dict[str, Any]:
     """Computes comprehensive quantitative risk and return metrics."""
     final_equity = equity_curve_df['equity'].iloc[-1]
     total_return_pct = ((final_equity / INITIAL_CAPITAL) - 1.0) * 100.0
@@ -179,7 +241,7 @@ def calculate_quant_metrics(equity_curve_df: pd.DataFrame, trade_log_df: pd.Data
     # Annualized Sortino (Penalizes only downside risk)
     negative_returns = hourly_returns[hourly_returns < 0.0]
     downside_std = negative_returns.std()
-    sortino = (hourly_returns.mean() / downside_std) * np.sqrt(8760) if downside_std > 0 else 0.0
+    sortino = (hourly_returns.mean() / downside_std) * np.sqrt(8760) if downside_std > 0 and not np.isnan(downside_std) else 0.0
 
     # Maximum Drawdown (MDD)
     running_max = equity_curve_df['equity'].cummax()
@@ -229,9 +291,16 @@ def calculate_quant_metrics(equity_curve_df: pd.DataFrame, trade_log_df: pd.Data
     }
 
 
-def plot_backtest_comparison(equity_curve_df: pd.DataFrame, output_path: str = 'artifacts/backtest_performance.png'):
+# Alias for backwards compatibility with research experiments
+compute_metrics = calculate_quant_metrics
+
+
+def plot_backtest_comparison(
+    equity_curve_df: pd.DataFrame,
+    output_path: Union[str, Path] = 'artifacts/backtest_performance.png'
+) -> None:
     """Generates a professional 2-panel quantitative performance visualization."""
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     
     start_price = equity_curve_df['close'].iloc[0]
     bh_equity = INITIAL_CAPITAL * (equity_curve_df['close'] / start_price)
@@ -265,37 +334,37 @@ def plot_backtest_comparison(equity_curve_df: pd.DataFrame, output_path: str = '
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300)
-    plt.close()
-    print(f"📊 Performance visualization saved to: {output_path}")
+    plt.close(fig)
+    print(f"[SUCCESS] Performance visualization saved to: {output_path}")
 
 
-def main():
-    print("🚀 Initializing Mudra Quantitative Backtesting Engine...")
+def main() -> None:
+    print("[INFO] Initializing Mudra Quantitative Backtesting Engine...")
     test_df = load_backtest_data()
     reg_model, clf_model = load_production_models()
 
-    print(f"📅 Evaluation Period : {test_df['timestamp'].iloc[0]} -> {test_df['timestamp'].iloc[-1]} ({len(test_df):,} hours)")
-    print(f"💰 Initial Capital   : ${INITIAL_CAPITAL:,.2f}")
-    print(f"⚡ Exchange Friction : {TAKER_FEE_RATE*100:.2f}% Taker Fee + {SLIPPAGE_RATE*100:.2f}% Slippage per execution\n")
+    print(f"[INFO] Evaluation Period : {test_df['timestamp'].iloc[0]} -> {test_df['timestamp'].iloc[-1]} ({len(test_df):,} hours)")
+    print(f"[INFO] Initial Capital   : ${INITIAL_CAPITAL:,.2f}")
+    print(f"[INFO] Exchange Friction : {TAKER_FEE_RATE*100:.2f}% Taker Fee + {SLIPPAGE_RATE*100:.2f}% Slippage per execution\n")
 
     # 1. Run Pure Classifier Strategy
-    print("▶️  Simulating Strategy 1: Pure Classifier (Unconstrained)...")
+    print("[INFO] Simulating Strategy 1: Pure Classifier (Unconstrained)...")
     eq_clf, trades_clf = run_backtest_simulation(test_df, clf_model, strategy_mode="classifier")
     m_clf = calculate_quant_metrics(eq_clf, trades_clf, test_df)
 
     # 2. Run Selective Fused Alpha Strategy (0.05% threshold)
-    print("▶️  Simulating Strategy 2: Mudra Fused Alpha (Selective 0.05% Filter)...")
+    print("[INFO] Simulating Strategy 2: Mudra Fused Alpha (Selective 0.05% Filter)...")
     eq_sel, trades_sel = run_backtest_simulation(test_df, clf_model, reg_model=reg_model, strategy_mode="fused", return_threshold=0.0005)
     m_sel = calculate_quant_metrics(eq_sel, trades_sel, test_df)
 
     # 3. Run Strict Capital Preservation Strategy (0.055% threshold)
-    print("▶️  Simulating Strategy 3: Mudra Capital Preservation (Safe Haven Cash)...")
+    print("[INFO] Simulating Strategy 3: Mudra Capital Preservation (Safe Haven Cash)...")
     eq_cash, trades_cash = run_backtest_simulation(test_df, clf_model, reg_model=reg_model, strategy_mode="fused", return_threshold=0.00055)
     m_cash = calculate_quant_metrics(eq_cash, trades_cash, test_df)
 
     # Print Institutional Performance Comparison
     print("\n" + "=" * 96)
-    print("📈 OUT-OF-SAMPLE QUANTITATIVE PERFORMANCE BENCHMARK (7,000 HOURS)")
+    print("[BENCHMARK] OUT-OF-SAMPLE QUANTITATIVE PERFORMANCE BENCHMARK (7,000 HOURS)")
     print("=" * 96)
     print(f"{'Metric':<25} | {'Buy & Hold BTC':<16} | {'Pure Classifier':<16} | {'Mudra Fused (0.05%)':<18} | {'Mudra Cash (0.055%)':<18}")
     print("-" * 96)
@@ -308,11 +377,12 @@ def main():
     print("=" * 96)
 
     # Save artifacts
-    os.makedirs('data/results', exist_ok=True)
+    Path('data/results').mkdir(parents=True, exist_ok=True)
     trades_sel.to_csv('data/results/backtest_trade_log.csv', index=False)
     eq_sel.to_csv('data/results/backtest_equity_curve.csv', index=False)
     plot_backtest_comparison(eq_cash, output_path='artifacts/backtest_performance.png')
-    print("💾 Trade logs and equity curves saved to data/results/")
+    print("[SUCCESS] Trade logs and equity curves saved to data/results/")
+
 
 if __name__ == '__main__':
     main()
