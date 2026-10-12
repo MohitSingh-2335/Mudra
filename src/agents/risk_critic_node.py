@@ -1,11 +1,20 @@
 # src/agents/risk_critic_node.py
 """
 Node 2: Reflexion Risk Critic Agent for Mudra LangGraph System.
-Serves as an autonomous risk supervisor with absolute veto power.
-Audits trade theses against empirical volatility hurdles, transaction drag,
-and calculates volatility-scaled position sizing and stop-loss levels.
+
+Serves as an autonomous risk supervisor with absolute veto authority over
+the Quantitative Strategist's proposed orders. Implements 3 deterministic gates:
+  • Gate 1 (Friction Hurdle): Rejects orders failing to clear the 0.05% fee threshold.
+  • Gate 2 (Volatility Anomaly): Vetoes orders during high-spread liquidation flushes (>3.8%).
+  • Gate 3 (Conviction Floor): Rejects orders with model conviction scores < 4/10.
+
+When approved, dynamically computes:
+  • Volatility-Scaled Sizing: Fractional Kelly approximation pinned to [5%, 20%] of bankroll.
+  • Institutional Risk Levels: Asymmetric stop-loss (-1.5%) and profit target (+2.5%),
+    enforcing a minimum 1.67:1 risk-reward profile.
 """
 
+from typing import Dict, Any, Optional
 from src.agents.graph_state import AgentState
 from src.agents.market_analyst_agent import _get_gemini_api_key, _clean_json_response
 
@@ -17,14 +26,14 @@ def risk_critic_node(state: AgentState) -> AgentState:
     Either authorizes the trade order with risk parameters or executes a VETO.
     """
     action = state.get("trade_action", "HOLD")
-    current_price = state.get("current_price", 65000.0)
+    current_price = max(1.0, float(state.get("current_price", 65000.0)))
     ml_forecast = state.get("ml_forecast", {})
     features = state.get("engineered_features", {})
-    conviction = state.get("conviction_score", 5)
+    conviction = int(state.get("conviction_score", 5))
 
-    expected_return = ml_forecast.get("expected_return_pct", 0.0)
-    clears_hurdle = ml_forecast.get("clears_hurdle", False)
-    vol_spread_pct = features.get("volatility_range_pct", 1.2)
+    expected_return = float(ml_forecast.get("expected_return_pct", 0.0))
+    clears_hurdle = bool(ml_forecast.get("clears_hurdle", False))
+    vol_spread_pct = float(features.get("volatility_range_pct", 1.2))
 
     # 1. HOLD Case: Capital Preservation Already Advised
     if action == "HOLD":
@@ -40,15 +49,15 @@ def risk_critic_node(state: AgentState) -> AgentState:
         )
         return state
 
-    # 2. Gate 1: Transaction Cost Hurdle Audit (For BUY signals)
-    if action == "BUY" and not clears_hurdle:
+    # 2. Gate 1: Transaction Cost Hurdle Audit (For Active BUY/SELL signals)
+    if action in ("BUY", "SELL") and not clears_hurdle:
         state["risk_approved"] = False
         state["veto_reason"] = "Sub-Hurdle Fee Drag: Forecasted return < 0.05% threshold"
         state["recommended_position_pct"] = 0.0
         state["stop_loss_price"] = None
         state["take_profit_price"] = None
         state["risk_critic_critique"] = (
-            f"VETOED BY RISK CRITIC: The Strategist recommended BUY, but expected return "
+            f"VETOED BY RISK CRITIC: The Strategist recommended {action}, but expected return "
             f"({expected_return:+.4f}%) fails to clear the institutional 0.05% hurdle rate. "
             f"Executing this trade would incur fee drag without statistical edge. Order aborted."
         )
@@ -85,12 +94,12 @@ def risk_critic_node(state: AgentState) -> AgentState:
     state["risk_approved"] = True
     state["veto_reason"] = None
 
-    # Volatility-Scaled Sizing (Kelly Fraction approximation: 10% to 20% of bankroll)
+    # Volatility-Scaled Sizing (Kelly Fraction approximation: 5% to 20% of bankroll)
     base_size = 0.10 + ((conviction - 5) * 0.02)
     position_pct = max(0.05, min(0.20, base_size))
     state["recommended_position_pct"] = round(position_pct, 4)
 
-    # Calculate Institutional Stop-Loss (-1.5%) and Take-Profit (+2.5%)
+    # Calculate Institutional Stop-Loss (-1.5%) and Take-Profit (+2.5%) -> 1.67:1 Risk/Reward
     stop_distance = current_price * 0.015
     take_distance = current_price * 0.025
 
@@ -101,7 +110,7 @@ def risk_critic_node(state: AgentState) -> AgentState:
         state["stop_loss_price"] = round(current_price + stop_distance, 2)
         state["take_profit_price"] = round(current_price - take_distance, 2)
 
-    # 6. Generate Detailed Risk Rationale (LLM or Heuristic)
+    # 6. Generate Detailed Risk Rationale (LLM Gateway or Deterministic Fallback)
     api_key = _get_gemini_api_key()
     if api_key and not state.get("circuit_breaker_active", False):
         try:
@@ -136,3 +145,4 @@ Provide a concise 2-sentence formal risk critique authorizing this trade."""
     )
 
     return state
+
