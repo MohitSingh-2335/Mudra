@@ -18,7 +18,7 @@ Mudra is a machine learning trading platform for Bitcoin (`BTC/USDT`). It uses t
 
 Most machine learning models for crypto fail in real markets because of two common mistakes:
 1. **Data Leakage (Lookahead Bias):** Randomly shuffling time-series data lets future price patterns leak into training. Mudra uses a strict chronological split: training on past data (2021 to mid-2025) and testing on 7,000 out-of-sample hours (mid-2025 to 2026).
-2. **Ignoring Trading Fees:** Trading on every small signal burns capital quickly through exchange fees (0.10%) and slippage (0.05%). Mudra only enters a trade when the model's expected return clears a 0.05% fee hurdle.
+2. **Ignoring Trading Fees:** Trading on every small signal burns capital quickly through exchange taker fees (0.05%) and slippage (0.02%). Mudra only enters a trade when the model's expected return clears an institutional 0.05% hurdle rate.
 
 ### Key Results
 During an out-of-sample period where Bitcoin dropped **-45.2%**, Mudra filtered out 96% of low-conviction chop trades and held USDT cash, outperforming Buy & Hold by **+33.55% excess return (Alpha)**.
@@ -39,17 +39,17 @@ Mudra runs automatically every hour in a clean, decoupled pipeline:
 
 ```mermaid
 flowchart LR
-    CRON[Hourly Trigger<br/>cron-job.org] --> WORKER[Worker Runner<br/>GitHub Actions]
+    CRON[Hourly Schedule<br/>GitHub Actions Cron / Webhook] --> WORKER[Worker Runner<br/>scripts/run_hourly_worker.py]
     WORKER --> DATA[Binance API<br/>1h Confirmed Candle]
     DATA --> MODELS[Dual XGBoost<br/>Return + Direction]
     MODELS --> COUNCIL[Risk Council<br/>LangGraph]
-    COUNCIL --> DB[(Neon PostgreSQL<br/>Ticks & Ledger)]
+    COUNCIL --> DB[(Neon PostgreSQL<br/>5 Tables Ledger)]
     DB --> UI[Streamlit Terminal<br/>Web Dashboard]
 ```
 
 ### How the Pipeline Works:
 1. **Trigger:** An external cron ping wakes up the worker at minute 0 of every hour.
-2. **Data & Features:** The worker downloads the latest confirmed 1-hour candle from Binance and builds 26 technical and market features.
+2. **Data & Features:** The worker downloads the latest confirmed 1-hour candle from Binance and builds 26 regression and 39 classification features across price action, order flow, sentiment, and on-chain telemetry.
 3. **ML Inference:** The Regressor predicts next-hour percentage return and price target. The Classifier predicts price direction (`UP` / `DOWN`) and probability.
 4. **Risk Review:** A 2-node LangGraph council checks if the return clears the fee hurdle and ensures volatility is within safe limits.
 5. **Reconciliation:** The worker evaluates the prediction made in the previous hour ($T-1$) against the actual candle close at hour $T$, tagging accuracy and errors.
@@ -62,7 +62,7 @@ flowchart LR
 * **Machine Learning:** XGBoost (tuned with Optuna Bayesian optimization across 500 walk-forward fits).
 * **Explainability:** TreeSHAP for calculating game-theoretic feature importance on every prediction.
 * **Agentic Risk Council:** LangGraph state graph with a Strategist node and a Risk Critic node.
-* **Cloud Database:** Neon Serverless PostgreSQL storing 4 tables (`MarketTick`, `CouncilAudit`, `Reconciliation`, `PaperPortfolio`).
+* **Cloud Database:** Neon Serverless PostgreSQL storing 5 tables (`MarketTick`, `ApiTelemetry`, `CouncilAudit`, `Reconciliation`, `PaperPortfolio`).
 * **Serving & Frontend:** FastAPI for REST endpoints, Streamlit for the dark-theme terminal interface.
 * **Containers:** Docker and Docker Compose for reproducible builds.
 
@@ -84,7 +84,15 @@ docker compose up --build
 conda create -n mudra python=3.11 -y
 conda activate mudra
 pip install -r requirements.txt
+
+# 1. Launch Streamlit Terminal Dashboard
 streamlit run app.py
+
+# 2. Launch FastAPI Intelligence Microservice
+uvicorn src.api.main:app --host 0.0.0.0 --port 8000
+
+# 3. Trigger Hourly Ingestion & Reconciliation Worker Manually
+python scripts/run_hourly_worker.py --force
 ```
 
 ### Run Automated Tests
@@ -155,6 +163,7 @@ Stock_Prediction_ML/
 ├── .github/workflows/       # Automated CI/CD and hourly worker workflow
 ├── artifacts/models/        # Tuned XGBoost regressor and classifier models
 ├── data/                    # Raw and processed historical data
+├── experiments/             # Walk-forward CV & zero-shot foundation models (Chronos, TimesFM, Moirai)
 ├── src/
 │   ├── agents/              # LangGraph Strategist and Risk Critic nodes
 │   ├── api/                 # FastAPI routes and Pydantic schemas
@@ -163,7 +172,7 @@ Stock_Prediction_ML/
 │   ├── explainability.py    # TreeSHAP explainer module
 │   └── ui/                  # Plotly chart visualizers
 ├── tests/                   # 20 automated unit tests (agents, API, database)
-├── scripts/                 # run_hourly_worker.py for automated execution
+├── scripts/                 # Ingestion and run_hourly_worker.py execution runner
 ├── app.py                   # Streamlit web dashboard
 ├── config.py                # Central project configuration and feature lists
 ├── docker-compose.yml       # Docker Compose setup for API and UI
