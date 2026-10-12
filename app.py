@@ -638,17 +638,74 @@ with tab3:
         st.plotly_chart(create_reconciliation_scatter(rec_df), use_container_width=True)
 
         st.markdown("### Historical Delayed Reconciliation Audit Table")
+        with st.expander("📘 How to Read This Delayed Prediction Report Card (Plain-English Guide)", expanded=False):
+            st.markdown(
+                """
+                * **Predicted vs. Actual Direction:** Compares the AI's forecasted trend (`UP`, `DOWN`, `FLAT`) against where the market actually closed.
+                * **Direction Result (`[MATCH]` vs `[MISMATCH]`):** Shows whether the market followed the predicted direction.
+                * **Predicted Price (Expected Move):** The dollar price target and percentage return forecasted 60 minutes in advance.
+                * **Actual Market Close (Realized Move):** The real closing price and percentage move confirmed by Binance.
+                * **Price Difference ($):** The dollar gap between the AI's forecast and the final close.
+                * **AI Diagnosis:** A plain-English summary explaining whether the hour was a tight target hit, a sideways drift, or a directional reversal.
+                """
+            )
+
         # Format table for display
         disp_df = rec_df.copy()
-        disp_df["Direction"] = disp_df["direction_correct"].apply(lambda x: "[WIN]" if x else "[LOSS]")
-        disp_df["Pred Price"] = disp_df["predicted_price"].apply(lambda x: f"${x:,.2f}")
-        disp_df["Actual Price"] = disp_df["actual_price_at_t_plus_1"].apply(lambda x: f"${x:,.2f}")
-        disp_df["Dollar Error"] = disp_df["absolute_error_usd"].apply(lambda x: f"${x:,.2f}")
-        disp_df["Error %"] = disp_df["percentage_error"].apply(lambda x: f"{x:.2f}%")
-        disp_df["Timestamp"] = disp_df["timestamp"].dt.strftime("%Y-%m-%d %H:%M UTC")
+
+        # 1. Plain-English Direction Columns
+        disp_df["Predicted Direction"] = disp_df.get("direction_predicted", pd.Series("FLAT", index=disp_df.index)).fillna("FLAT").astype(str).str.upper()
+        disp_df["Actual Direction"] = disp_df.get("direction_realized", pd.Series("FLAT", index=disp_df.index)).fillna("FLAT").astype(str).str.upper()
+        disp_df["Direction Result"] = disp_df["direction_correct"].apply(lambda x: "[MATCH]" if x else "[MISMATCH]")
+
+        # 2. Combined Price and Percentage Move Columns
+        def _fmt_pred_price(row):
+            p = float(row.get("predicted_price", 0.0) or 0.0)
+            r = float(row.get("predicted_return_pct", 0.0) or 0.0)
+            return f"${p:,.2f} ({r:+.2f}%)"
+
+        def _fmt_actual_price(row):
+            p = float(row.get("actual_price_at_t_plus_1", 0.0) or 0.0)
+            r = float(row.get("actual_return_pct", 0.0) or 0.0)
+            return f"${p:,.2f} ({r:+.2f}%)"
+
+        disp_df["Predicted Price (Expected Move)"] = disp_df.apply(_fmt_pred_price, axis=1)
+        disp_df["Actual Market Close (Realized Move)"] = disp_df.apply(_fmt_actual_price, axis=1)
+        disp_df["Price Difference ($)"] = disp_df["absolute_error_usd"].apply(lambda x: f"${float(x or 0.0):,.2f}")
+        disp_df["Time (UTC)"] = disp_df["timestamp"].dt.strftime("%Y-%m-%d %H:%M UTC")
+
+        # 3. Plain-English AI Diagnosis Sentence
+        def _generate_diagnosis(row):
+            tag = str(row.get("error_attribution_tag", "ACCURATE"))
+            diff = float(row.get("absolute_error_usd", 0.0) or 0.0)
+            ret = float(row.get("actual_return_pct", 0.0) or 0.0)
+            if tag == "ACCURATE":
+                return f"High Precision: Price stayed within ${diff:,.2f} during sideways range."
+            elif tag == "DIRECTION_MISALIGNED":
+                return f"Direction Miss: Market pulled back {ret:+.2f}% (${diff:,.2f} gap)."
+            elif tag == "MOMENTUM_UNDERESTIMATED":
+                return f"Stronger Rally: Market moved upward faster than anticipated (+${diff:,.2f})."
+            elif tag == "MOMENTUM_OVERESTIMATED":
+                return f"Weaker Move: Upward breakout was smaller than forecasted (-${diff:,.2f})."
+            elif tag == "BLACK_SWAN_OUTLIER":
+                return f"Market Flash Anomaly: Extreme liquidation spike ({ret:+.2f}% move)."
+            return f"Evaluated: Price gap ${diff:,.2f}."
+
+        disp_df["AI Diagnosis"] = disp_df.apply(_generate_diagnosis, axis=1)
+
+        display_cols = [
+            "Time (UTC)",
+            "Predicted Direction",
+            "Actual Direction",
+            "Direction Result",
+            "Predicted Price (Expected Move)",
+            "Actual Market Close (Realized Move)",
+            "Price Difference ($)",
+            "AI Diagnosis",
+        ]
 
         st.dataframe(
-            disp_df[["Timestamp", "Direction", "Pred Price", "Actual Price", "Dollar Error", "Error %", "error_attribution_tag"]],
+            disp_df[display_cols],
             use_container_width=True,
             hide_index=True,
         )
