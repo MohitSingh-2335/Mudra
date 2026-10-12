@@ -4,7 +4,7 @@ Runs exclusively in-memory (sqlite:///:memory:) to prevent polluting production 
 """
 import pytest
 from datetime import datetime, timezone, timedelta
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.orm import sessionmaker
 
 from src.database.models import (
@@ -653,5 +653,219 @@ def test_get_average_entry_price_missing_eligible_buy_isolation(in_memory_db):
 
     # Must still return 0.0 cost basis and not borrow Trade 1's records
     assert get_average_entry_price(session, target_btc=0.01) == 0.0
+
+
+def test_reconciliation_exact_one_hour_horizon_alignment(in_memory_db):
+    """
+    Test 1: Verify that a single pending tick is reconciled strictly against its exact
+    T+1h outcome candle (open timestamp = prediction timestamp + 1 hour).
+    """
+    session, _ = in_memory_db
+    t0 = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
+    t1 = t0 + timedelta(hours=1)
+
+    prior_tick = MarketTick(
+        timestamp=t0,
+        open=60000.0,
+        high=60100.0,
+        low=59900.0,
+        close=60000.0,
+        volume=100.0,
+        predicted_return_1h=0.50,
+        predicted_price_1h=60300.0,
+    )
+    session.add(prior_tick)
+    session.flush()
+
+    curr_tick = MarketTick(
+        timestamp=t1,
+        open=60000.0,
+        high=60250.0,
+        low=59950.0,
+        close=60180.0,
+        volume=110.0,
+    )
+    session.add(curr_tick)
+    session.flush()
+
+    reconciled = reconcile_pending_ticks(session, curr_tick)
+    session.commit()
+
+    assert len(reconciled) == 1
+    rec = reconciled[0]
+    assert rec.tick_id == prior_tick.id
+    assert rec.actual_price_at_t_plus_1 == 60180.0
+    assert rec.predicted_return_pct == pytest.approx(0.50, abs=1e-3)
+    assert rec.actual_return_pct == pytest.approx(0.30, abs=1e-3)
+    assert rec.direction_correct is True
+
+
+def test_reconciliation_multiple_pending_with_intervening_outcomes(in_memory_db):
+    """
+    Test 2: Verify that when multiple older pending predictions exist and intervening
+    candles are in market_ticks, each prediction is evaluated against its OWN respective
+    T+1h candle and NEVER all against the newest incoming tick.
+    """
+    session, _ = in_memory_db
+    t0 = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
+    t1 = t0 + timedelta(hours=1)  # 11:00
+    t2 = t0 + timedelta(hours=2)  # 12:00
+
+    tick0 = MarketTick(
+        timestamp=t0,
+        open=100.0,
+        high=102.0,
+        low=99.0,
+        close=100.0,
+        volume=10.0,
+        predicted_price_1h=102.0,
+        predicted_return_1h=2.0,
+    )
+    tick1 = MarketTick(
+        timestamp=t1,
+        open=100.0,
+        high=106.0,
+        low=100.0,
+        close=105.0,  # 10:00 -> 11:00 realized is 105.0 (+5%)
+        volume=15.0,
+        predicted_price_1h=106.0,
+        predicted_return_1h=0.95,
+    )
+    tick2 = MarketTick(
+        timestamp=t2,
+        open=105.0,
+        high=122.0,
+        low=105.0,
+        close=120.0,  # 11:00 -> 12:00 realized is 120.0 (+14.28%)
+        volume=20.0,
+    )
+    # Insert tick0 and tick1 without reconciling
+    session.add_all([tick0, tick1, tick2])
+    session.flush()
+
+    # Incoming current tick is tick2 (12:00)
+    reconciled = reconcile_pending_ticks(session, tick2)
+    session.commit()
+
+    assert len(reconciled) == 2
+
+    # tick0 MUST be reconciled against tick1 (105.0), NOT tick2 (120.0)
+    rec0 = next(r for r in reconciled if r.tick_id == tick0.id)
+    assert rec0.actual_price_at_t_plus_1 == 105.0
+    assert rec0.actual_return_pct == pytest.approx(5.0, abs=1e-3)
+
+    # tick1 MUST be reconciled against tick2 (120.0)
+    rec1 = next(r for r in reconciled if r.tick_id == tick1.id)
+    assert rec1.actual_price_at_t_plus_1 == 120.0
+    assert rec1.actual_return_pct == pytest.approx(14.2857, abs=1e-3)
+
+
+def test_reconciliation_missing_expected_candle_leaves_unresolved(in_memory_db, caplog):
+    """
+    Test 3: Verify that if an hourly sync cycle was missed and the required outcome
+    candle does not exist in market_ticks, the prediction is left UNRESOLVED,
+    a diagnostic log is issued, and NO incorrect record is inserted.
+    """
+    import logging
+    session, _ = in_memory_db
+    t0 = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
+    t4 = t0 + timedelta(hours=4)  # 14:00 (11:00, 12:00, 13:00 missing)
+
+    tick0 = MarketTick(
+        timestamp=t0,
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        volume=10.0,
+        predicted_price_1h=101.0,
+        predicted_return_1h=1.0,
+    )
+    tick4 = MarketTick(
+        timestamp=t4,
+        open=145.0,
+        high=155.0,
+        low=140.0,
+        close=150.0,
+        volume=30.0,
+    )
+    session.add_all([tick0, tick4])
+    session.flush()
+
+    # Reconciling with tick4 when 11:00 candle is missing
+    with caplog.at_level(logging.WARNING):
+        reconciled = reconcile_pending_ticks(session, tick4)
+        session.commit()
+
+    # Must NOT reconcile tick0 against tick4!
+    assert len(reconciled) == 0
+    all_recs = session.execute(select(Reconciliation)).scalars().all()
+    assert len(all_recs) == 0
+    assert "missing from market_ticks. Prediction left unresolved." in caplog.text
+
+    # Backfill the missing 11:00 candle
+    t1 = t0 + timedelta(hours=1)
+    tick1_backfill = MarketTick(
+        timestamp=t1,
+        open=100.0,
+        high=104.0,
+        low=99.0,
+        close=103.0,
+        volume=12.0,
+    )
+    session.add(tick1_backfill)
+    session.flush()
+
+    # Re-running reconciliation now resolves tick0 against the backfilled 11:00 candle
+    reconciled_after_backfill = reconcile_pending_ticks(session, tick4)
+    session.commit()
+
+    assert len(reconciled_after_backfill) == 1
+    assert reconciled_after_backfill[0].tick_id == tick0.id
+    assert reconciled_after_backfill[0].actual_price_at_t_plus_1 == 103.0
+
+
+def test_reconciliation_preserves_existing_reconciliation_records(in_memory_db):
+    """
+    Test 4: Verify idempotency: repeatedly running reconcile_pending_ticks does not
+    duplicate or modify existing settled reconciliation records.
+    """
+    session, _ = in_memory_db
+    t0 = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
+    t1 = t0 + timedelta(hours=1)
+
+    tick0 = MarketTick(
+        timestamp=t0,
+        open=100.0,
+        high=102.0,
+        low=99.0,
+        close=100.0,
+        volume=10.0,
+        predicted_price_1h=101.0,
+        predicted_return_1h=1.0,
+    )
+    tick1 = MarketTick(
+        timestamp=t1,
+        open=100.0,
+        high=103.0,
+        low=99.0,
+        close=102.0,
+        volume=12.0,
+    )
+    session.add_all([tick0, tick1])
+    session.flush()
+
+    reconciled_1 = reconcile_pending_ticks(session, tick1)
+    session.commit()
+    assert len(reconciled_1) == 1
+
+    # Second pass: must return [] and leave existing record untouched
+    reconciled_2 = reconcile_pending_ticks(session, tick1)
+    session.commit()
+    assert len(reconciled_2) == 0
+
+    all_recs = session.execute(select(Reconciliation)).scalars().all()
+    assert len(all_recs) == 1
+
 
 
