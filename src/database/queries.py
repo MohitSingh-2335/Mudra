@@ -100,12 +100,17 @@ def get_reconciliation_kpis(lookback_hours: int = 168) -> Dict[str, Any]:
     except Exception as exc:
         logger.warning(f"Failed to fetch reconciliation KPIs: {exc}")
         return {
+            "total_evaluated": 0,
             "total_reconciled": 0,
+            "win_rate_pct": 0.0,
             "directional_accuracy_pct": 0.0,
             "mae_usd": 0.0,
             "mape_pct": 0.0,
+            "information_coefficient": 0.0,
             "information_coefficient_ic": 0.0,
+            "black_swans_filtered": 0,
             "black_swan_count": 0,
+            "accurate_count": 0,
             "tag_breakdown": {},
         }
 
@@ -154,11 +159,13 @@ def get_portfolio_kpis(current_price: float) -> Dict[str, Any]:
             "current_btc_price": round(current_price, 2),
             "btc_position_value_usd": 0.0,
             "total_equity_usd": 10000.0,
+            "cumulative_return_pct": 0.0,
             "benchmark_btc_equity": 10000.0,
             "alpha_usd": 0.0,
             "alpha_pct": 0.0,
             "realized_pnl_usd": 0.0,
             "total_fees_usd": 0.0,
+            "drawdown_pct": 0.0,
             "total_trades": 0,
         }
 
