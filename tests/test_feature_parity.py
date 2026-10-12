@@ -213,31 +213,34 @@ def test_taker_buy_ratio_preserved_when_supplied_in_candles(sample_historical_ca
     assert res_override["taker_buy_ratio"] == pytest.approx(explicit_override, abs=1e-4)
 
 
-def test_candle_closure_timestamp_verification(monkeypatch):
+def test_candle_closure_timestamp_excludes_forming_candle(monkeypatch):
     """
-    Verify that fetch_historical_candles excludes actively forming candles
-    by checking close_time against current timestamp, maintaining chronological order.
+    Test A: Verify that fetch_historical_candles excludes actively forming candles
+    by evaluating close_time against the current time, maintaining ascending chronological order.
     """
     from datetime import datetime, timezone
     import requests
 
-    now_ms = 1700000000000  # Base epoch in ms
+    # Anchor to dynamic current UTC time
+    now_dt = datetime.now(timezone.utc)
+    now_ms = now_dt.timestamp() * 1000.0
 
-    # Build 36 completed closed candles + 1 currently forming candle (close_time in the future)
+    # Build 36 completed closed candles (closed in the past relative to now_ms)
     mock_klines = []
     for i in range(36):
-        open_time = now_ms - (37 - i) * 3600000
-        close_time = open_time + 3600000 - 1  # In the past
+        open_time = now_ms - (38 - i) * 3600000
+        close_time = open_time + 3600000 - 1  # Completed in the past
+        close_price = 60000.0 + i * 10.0
         mock_klines.append([
-            open_time, "60000.0", "60500.0", "59800.0", "60200.0", "100.0",
+            open_time, "60000.0", "60500.0", "59800.0", str(close_price), "100.0",
             close_time, "6020000.0", 1500, "55.0", "3311000.0", "0"
         ])
 
-    # 37th candle is actively forming: close_time is in the future
+    # 37th candle is actively forming: close_time is 30 minutes in the future
     forming_open = now_ms - 1800000  # Started 30 min ago
-    forming_close = forming_open + 3600000 - 1  # 30 min into the future
+    forming_close = forming_open + 3600000 - 1  # Closes 30 min in the future
     mock_klines.append([
-        forming_open, "60200.0", "60800.0", "60100.0", "60600.0", "45.0",
+        forming_open, "60200.0", "60800.0", "60100.0", "75000.0", "45.0",
         forming_close, "2727000.0", 800, "20.0", "1212000.0", "0"
     ])
 
@@ -248,17 +251,130 @@ def test_candle_closure_timestamp_verification(monkeypatch):
 
     monkeypatch.setattr(requests, "get", lambda *args, **kwargs: MockResponse())
 
-    # Fetch historical candles
+    # Fetch historical candles (requesting 35 lookback)
     candles_df = fetch_historical_candles(symbol="BTCUSDT", limit=35)
 
-    # Verify that the unclosed forming candle was EXCLUDED
+    # Verify that the unclosed forming candle (close=75000.0) was EXCLUDED strictly by timestamp
     latest_bar_close = candles_df["close"].iloc[-1]
-    assert latest_bar_close == 60200.0, (
-        f"Active unclosed candle was not excluded! Got {latest_bar_close}, expected closed bar 60200.0"
+    expected_closed_price = 60000.0 + 35 * 10.0  # 60350.0
+    assert latest_bar_close == expected_closed_price, (
+        f"Active unclosed candle was not excluded! Got {latest_bar_close}, expected closed bar {expected_closed_price}"
     )
-    assert len(candles_df) >= 35
-    # Verify strict ascending chronological ordering
+    assert len(candles_df) == 35
     assert candles_df["timestamp"].is_monotonic_increasing
+
+
+def test_candle_closure_retains_all_closed_candles_without_blind_slice(monkeypatch):
+    """
+    Test B: Verify that when all returned candles are already closed,
+    NO candle is discarded by a blind slice fallback, and all requested closed bars are retained.
+    """
+    from datetime import datetime, timezone
+    import requests
+
+    now_dt = datetime.now(timezone.utc)
+    now_ms = now_dt.timestamp() * 1000.0
+
+    # Build 36 completed closed candles (0 forming candles)
+    mock_klines = []
+    for i in range(36):
+        open_time = now_ms - (38 - i) * 3600000
+        close_time = open_time + 3600000 - 1
+        close_price = 60000.0 + i * 10.0
+        mock_klines.append([
+            open_time, "60000.0", "60500.0", "59800.0", str(close_price), "100.0",
+            close_time, "6020000.0", 1500, "55.0", "3311000.0", "0"
+        ])
+
+    class MockResponse:
+        status_code = 200
+        def json(self):
+            return mock_klines
+
+    monkeypatch.setattr(requests, "get", lambda *args, **kwargs: MockResponse())
+
+    candles_df = fetch_historical_candles(symbol="BTCUSDT", limit=35)
+
+    # The 36th candle (index 35, price 60350.0) MUST NOT be discarded by a fallback
+    latest_bar_close = candles_df["close"].iloc[-1]
+    expected_closed_price = 60000.0 + 35 * 10.0  # 60350.0
+    assert latest_bar_close == expected_closed_price, (
+        f"Valid closed candle was discarded! Got {latest_bar_close}, expected {expected_closed_price}"
+    )
+    assert len(candles_df) == 35
+    assert candles_df["timestamp"].is_monotonic_increasing
+
+
+def test_sync_fetch_latest_confirmed_candle_binance_and_coinbase(monkeypatch):
+    """
+    Verify that src.engine.sync.fetch_latest_confirmed_candle parses timestamps correctly
+    using pandas without raising NameError or RuntimeError on both Binance and Coinbase paths.
+    """
+    from datetime import datetime, timezone
+    import requests
+    from src.engine.sync import fetch_latest_confirmed_candle
+
+    now_dt = datetime.now(timezone.utc)
+    now_ms = now_dt.timestamp() * 1000.0
+    now_sec = now_dt.timestamp()
+
+    # 1. Test Binance Path
+    mock_binance_klines = []
+    for i in range(102):
+        open_time = now_ms - (103 - i) * 3600000
+        close_time = open_time + 3600000 - 1
+        mock_binance_klines.append([
+            open_time, "60000.0", "60500.0", "59800.0", "60200.0", "100.0",
+            close_time, "6020000.0", 1500, "55.0", "3311000.0", "0"
+        ])
+
+    class MockBinanceResponse:
+        status_code = 200
+        def json(self):
+            return mock_binance_klines
+
+    monkeypatch.setattr(requests, "get", lambda *args, **kwargs: MockBinanceResponse())
+
+    res_binance = fetch_latest_confirmed_candle("BTCUSDT")
+    assert res_binance["close"] == 60200.0
+    assert isinstance(res_binance["timestamp"], datetime)
+    assert len(res_binance["candles"]) == 100
+    # Crucially verify pd.to_datetime executed cleanly and populated pd.Timestamp
+    assert isinstance(res_binance["candles"][-1]["timestamp"], pd.Timestamp)
+    assert res_binance["number_of_trades"] == 1500
+
+    # 2. Test Coinbase Fallback Path (Binance fails with 500, Coinbase succeeds)
+    # Coinbase returns [time, low, high, open, close, volume] descending
+    mock_cb_candles = []
+    for i in range(100):
+        # time is in seconds
+        candle_sec = now_sec - (i + 1) * 3600  # Closed in the past
+        mock_cb_candles.append([
+            candle_sec, 59800.0, 60500.0, 60000.0, 60250.0, 100.0
+        ])
+
+    def mock_get_dispatcher(url, *args, **kwargs):
+        class MockResp:
+            def __init__(self, code, data):
+                self.status_code = code
+                self._data = data
+            def json(self):
+                return self._data
+
+        if "binance" in url:
+            return MockResp(500, {})
+        return MockResp(200, mock_cb_candles)
+
+    monkeypatch.setattr(requests, "get", mock_get_dispatcher)
+
+    res_cb = fetch_latest_confirmed_candle("BTCUSDT")
+    assert res_cb["close"] == 60250.0
+    assert isinstance(res_cb["timestamp"], datetime)
+    assert len(res_cb["candles"]) == 100
+    assert isinstance(res_cb["candles"][-1]["timestamp"], pd.Timestamp)
+    # Coinbase unobserved trade count must be None, not 10000
+    assert res_cb["number_of_trades"] is None
+    assert res_cb["candles"][-1]["number_of_trades"] is None
 
 
 def test_coinbase_fallback_unobserved_trade_count_handling(sample_historical_candles):

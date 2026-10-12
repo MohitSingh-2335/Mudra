@@ -22,6 +22,7 @@ import time
 from datetime import datetime, timezone
 from typing import Dict, Any, Tuple
 import requests
+import pandas as pd
 from sqlalchemy import select, desc
 
 from src.database.connection import get_db, test_connection
@@ -48,8 +49,6 @@ def fetch_latest_confirmed_candle(symbol: str = "BTCUSDT") -> Dict[str, Any]:
             klines = resp.json()
             now_ms = datetime.now(timezone.utc).timestamp() * 1000.0
             confirmed_klines = [k for k in klines if float(k[6]) <= now_ms]
-            if len(confirmed_klines) == len(klines) and len(klines) > 1:
-                confirmed_klines = klines[:-1]
 
             if len(confirmed_klines) >= 35:
                 selected_klines = confirmed_klines[-100:]
@@ -97,8 +96,6 @@ def fetch_latest_confirmed_candle(symbol: str = "BTCUSDT") -> Dict[str, Any]:
             candles = resp.json()
             now_sec = datetime.now(timezone.utc).timestamp()
             confirmed_candles = [k for k in candles if (float(k[0]) + 3600.0) <= now_sec]
-            if len(confirmed_candles) == len(candles) and len(candles) > 1:
-                confirmed_candles = candles[1:]
 
             if len(confirmed_candles) >= 35:
                 selected_candles = list(reversed(confirmed_candles[:100]))

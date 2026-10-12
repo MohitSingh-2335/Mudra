@@ -43,9 +43,6 @@ def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LI
             # Verify closure by timestamp: close_time_ms (index 6) must have elapsed
             now_ms = datetime.now(timezone.utc).timestamp() * 1000.0
             closed_klines = [c for c in klines if float(c[6]) <= now_ms]
-            # Safety fallback for clock skew: exclude the final active forming kline
-            if len(closed_klines) == len(klines) and len(klines) > 1:
-                closed_klines = klines[:-1]
 
             if len(closed_klines) >= 35:
                 # Take exactly the requested lookback history preserving ascending chronological order
@@ -79,8 +76,6 @@ def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LI
             # Verify closure by timestamp: bucket end time (c[0] + 3600s) must have elapsed
             now_sec = datetime.now(timezone.utc).timestamp()
             closed_candles = [c for c in raw if (float(c[0]) + 3600.0) <= now_sec]
-            if len(closed_candles) == len(raw) and len(raw) > 1:
-                closed_candles = raw[1:]
 
             if len(closed_candles) >= 35:
                 # Coinbase returns descending (newest first); select latest `limit` then reverse for ascending order
