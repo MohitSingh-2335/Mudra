@@ -431,22 +431,12 @@ with tab1:
         d = int(ts.day)
         w = int(ts.weekday() if hasattr(ts, "weekday") else ts.dayofweek)
 
-        # Build feature vector matching REGRESSOR_FEATURES strictly
-        sample_input = {col: 0.0 for col in REGRESSOR_FEATURES}
-        sample_input["taker_buy_ratio"] = float(taker)
-        sample_input["volume"] = float(recent_candle.get("volume", 1000.0))
-        sample_input["high_low_ratio"] = hl_ratio
-        sample_input["close_lag_1"] = float(recent_candle["close"])
-        sample_input["vol_1h"] = float(recent_candle.get("volume", 1000.0))
-        sample_input["vol_mean_6h"] = float(recent_candle.get("volume", 1000.0))
-        sample_input["fng_value"] = 50.0
-        sample_input["hour"] = h
-        sample_input["day"] = d
-        sample_input["dayofweek"] = w
-        sample_input["hour_sin"] = float(np.sin(2 * np.pi * h / 24.0))
-        sample_input["hour_cos"] = float(np.cos(2 * np.pi * h / 24.0))
-        sample_input["day_sin"] = float(np.sin(2 * np.pi * d / 31.0))
-        sample_input["day_cos"] = float(np.cos(2 * np.pi * d / 31.0))
+        # Build feature vector using shared extract_features_for_inference for training parity
+        from src.feature_engineering import extract_features_for_inference
+        if len(live_market_df) >= 35:
+            sample_input = extract_features_for_inference(live_market_df)
+        else:
+            sample_input = {col: 0.0 for col in REGRESSOR_FEATURES}
 
         input_df = pd.DataFrame([{col: sample_input[col] for col in REGRESSOR_FEATURES}], columns=REGRESSOR_FEATURES)
 
