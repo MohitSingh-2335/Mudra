@@ -4,8 +4,21 @@ Fetches historical market ticks, delayed reconciliation records,
 and paper portfolio equity curves directly from Neon PostgreSQL.
 Defensively handles connection drops, cold starts, and uninitialized schemas.
 """
-from typing import Dict, Any, Optional
 import logging
+import sys
+from pathlib import Path
+from typing import Dict, Any, Optional
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+# Pre-load onnxruntime before numerical/db query engines to stabilize Windows OpenMP DLL runtime
+try:
+    import onnxruntime  # noqa: F401
+except ImportError:
+    pass
+
 import pandas as pd
 from sqlalchemy import select, desc
 
@@ -14,6 +27,14 @@ from src.database.models import MarketTick, Reconciliation, PaperPortfolio, Coun
 
 logger = logging.getLogger(__name__)
 
+__all__ = [
+    "get_latest_market_ticks",
+    "get_reconciliation_history",
+    "get_reconciliation_kpis",
+    "get_portfolio_history",
+    "get_portfolio_kpis",
+    "get_latest_council_audit",
+]
 
 
 def get_latest_market_ticks(limit: int = 100) -> pd.DataFrame:
@@ -155,3 +176,17 @@ def get_latest_council_audit() -> Optional[Dict[str, Any]]:
     except Exception as exc:
         logger.warning(f"Failed to fetch latest council audit: {exc}")
         return None
+
+
+if __name__ == '__main__':
+    print("[INFO] Testing database query services...")
+    ticks_df = get_latest_market_ticks(limit=5)
+    print(f"[QUERY] Latest market ticks count: {len(ticks_df)}")
+    rec_kpis = get_reconciliation_kpis(lookback_hours=24)
+    print(f"[QUERY] Reconciliation evaluated count: {rec_kpis.get('total_reconciled', 0)}")
+    port_kpis = get_portfolio_kpis(current_price=65000.0)
+    print(f"[QUERY] Portfolio total equity: ${port_kpis.get('total_equity_usd', 10000.0):,.2f}")
+    latest_audit = get_latest_council_audit()
+    print(f"[QUERY] Latest council audit found: {latest_audit is not None}")
+    print("[SUCCESS] All database query services verified.")
+
