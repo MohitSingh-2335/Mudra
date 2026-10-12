@@ -6,8 +6,9 @@ and attributes Risk Critic veto quality.
 """
 import sys
 from pathlib import Path
+import logging
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
 import numpy as np
 from sqlalchemy.orm import Session
@@ -19,6 +20,8 @@ if str(ROOT_DIR) not in sys.path:
 
 from src.database.models import MarketTick, Reconciliation, CouncilAudit
 
+logger = logging.getLogger("mudra.reconciliation")
+
 __all__ = [
     "reconcile_pending_ticks",
     "get_reconciliation_summary",
@@ -27,8 +30,11 @@ __all__ = [
 
 def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[Reconciliation]:
     """
-    Finds all prior market ticks with unsettled predictions (lacking a Reconciliation entry)
-    and evaluates them against the newly closed current_tick.
+    Finds prior market ticks with unsettled predictions (lacking a Reconciliation entry)
+    and evaluates each one strictly against its intended T+1 hour outcome candle.
+    
+    If the expected outcome candle at prediction_timestamp + 1h is unavailable in the database,
+    the prediction is left unresolved with a diagnostic log and is never graded against a later candle.
     
     Parameters:
         session: Active SQLAlchemy DB session
@@ -59,7 +65,39 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
     reconciled_records: List[Reconciliation] = []
 
     for prior_tick in pending_ticks:
-        actual_price = max(1.0, float(current_tick.close))
+        expected_ts = prior_tick.timestamp + timedelta(hours=1)
+
+        # 1. Match outcome candle: use current_tick if it is the exact expected candle,
+        # otherwise look up the historical candle in market_ticks matching expected_ts
+        if current_tick.timestamp == expected_ts:
+            outcome_candle = current_tick
+        else:
+            outcome_candle = session.execute(
+                select(MarketTick).where(MarketTick.timestamp == expected_ts)
+            ).scalars().first()
+
+        # 2. Defend against market/symbol cross-contamination if metadata is present
+        if outcome_candle and prior_tick.features and outcome_candle.features:
+            if isinstance(prior_tick.features, dict) and isinstance(outcome_candle.features, dict):
+                p_sym = prior_tick.features.get("symbol")
+                o_sym = outcome_candle.features.get("symbol")
+                if p_sym and o_sym and p_sym != o_sym:
+                    outcome_candle = None
+
+        # 3. If the expected outcome candle is unavailable, leave prediction unresolved
+        if not outcome_candle or outcome_candle.close <= 0:
+            p_ts_str = prior_tick.timestamp.isoformat() if hasattr(prior_tick.timestamp, "isoformat") else str(prior_tick.timestamp)
+            exp_ts_str = expected_ts.isoformat() if hasattr(expected_ts, "isoformat") else str(expected_ts)
+            logger.warning(
+                "[RECONCILIATION_UNRESOLVED] Tick ID %s (%s): expected T+1h outcome candle at %s "
+                "is missing from market_ticks. Prediction left unresolved.",
+                prior_tick.id,
+                p_ts_str,
+                exp_ts_str,
+            )
+            continue
+
+        actual_price = max(1.0, float(outcome_candle.close))
         predicted_price = float(prior_tick.predicted_price_1h)
         base_price = max(1.0, float(prior_tick.close))
 
