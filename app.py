@@ -129,18 +129,19 @@ def generate_live_forecast(
     if is_stale or live_df is None or live_df.empty or reg_model is None:
         return None
 
+    if len(live_df) < 35:
+        return None
+
+    from src.feature_engineering import extract_features_for_inference
+    try:
+        sample_input = extract_features_for_inference(live_df)
+    except Exception:
+        return None
+
     recent_candle = live_df.iloc[-1]
     current_price = float(recent_candle["close"])
     spread_pct = ((recent_candle["high"] - recent_candle["low"]) / recent_candle["close"]) * 100.0
     taker = float(recent_candle.get("taker_buy_ratio", 0.5))
-    hl_ratio = float(recent_candle["high"] / recent_candle["low"]) if recent_candle["low"] > 0 else 1.0
-
-    # Build feature vector using shared extract_features_for_inference for training parity
-    from src.feature_engineering import extract_features_for_inference
-    if len(live_df) >= 35:
-        sample_input = extract_features_for_inference(live_df)
-    else:
-        sample_input = {col: 0.0 for col in REGRESSOR_FEATURES}
 
     input_df = pd.DataFrame([{col: sample_input[col] for col in REGRESSOR_FEATURES}], columns=REGRESSOR_FEATURES)
 
@@ -160,10 +161,7 @@ def generate_live_forecast(
     prob_down = 50.0
     direction_label = "UP" if pred_ret_pct >= 0 else "DOWN"
     if clf_model:
-        sample_clf = {col: sample_input.get(col, 0.0) for col in CLASSIFIER_FEATURES}
-        sample_clf["close_lag_1"] = float(recent_candle["close"])
-        sample_clf["high_low_ratio"] = hl_ratio
-        clf_df = pd.DataFrame([sample_clf], columns=CLASSIFIER_FEATURES)
+        clf_df = pd.DataFrame([{col: sample_input[col] for col in CLASSIFIER_FEATURES}], columns=CLASSIFIER_FEATURES)
         try:
             move_code = int(clf_model.predict(clf_df)[0])
             direction_label = "UP" if move_code == 1 else "DOWN"
@@ -209,17 +207,16 @@ def generate_live_shap_attribution(
     if is_stale or live_df is None or live_df.empty or explainer_clf is None:
         return None
 
-    recent_candle = live_df.iloc[-1]
-    sample_clf = {col: 0.0 for col in CLASSIFIER_FEATURES}
-    sample_clf["taker_buy_ratio"] = float(recent_candle.get("taker_buy_ratio", 0.5))
-    if "volume" in recent_candle:
-        sample_clf["volume"] = float(recent_candle["volume"])
-    if "high" in recent_candle and "low" in recent_candle and recent_candle["low"] > 0:
-        sample_clf["high_low_ratio"] = float(recent_candle["high"] / recent_candle["low"])
-    if "close" in recent_candle:
-        sample_clf["close_lag_1"] = float(recent_candle["close"])
+    if len(live_df) < 35:
+        return None
 
-    clf_input_df = pd.DataFrame([{col: sample_clf[col] for col in CLASSIFIER_FEATURES}], columns=CLASSIFIER_FEATURES)
+    from src.feature_engineering import extract_features_for_inference
+    try:
+        sample_input = extract_features_for_inference(live_df)
+    except Exception:
+        return None
+
+    clf_input_df = pd.DataFrame([{col: sample_input[col] for col in CLASSIFIER_FEATURES}], columns=CLASSIFIER_FEATURES)
     try:
         return explain_single_prediction(explainer_clf, clf_input_df, top_n=top_n)
     except Exception:
