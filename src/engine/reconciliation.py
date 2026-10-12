@@ -71,13 +71,10 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
         absolute_error_usd = abs(actual_price - predicted_price)
         percentage_error = (absolute_error_usd / actual_price) * 100.0
 
-        # 3. Directional Alignment
-        dir_pred = "UP" if predicted_return_pct > 0.05 else ("DOWN" if predicted_return_pct < -0.05 else "FLAT")
-        dir_real = "UP" if actual_return_pct > 0.05 else ("DOWN" if actual_return_pct < -0.05 else "FLAT")
-        
-        pred_sign = np.sign(predicted_return_pct) if abs(predicted_return_pct) >= 0.02 else 0
-        real_sign = np.sign(actual_return_pct) if abs(actual_return_pct) >= 0.02 else 0
-        direction_correct = bool(pred_sign == real_sign)
+        # 3. Directional Alignment (Strict binary UP / DOWN: non-negative return is UP, negative is DOWN)
+        dir_pred = "UP" if predicted_return_pct >= 0.0 else "DOWN"
+        dir_real = "UP" if actual_return_pct >= 0.0 else "DOWN"
+        direction_correct = bool(dir_pred == dir_real)
 
         # 4. 3-Sigma Black Swan Detection (BTC hourly 3-sigma is typically > 3.8% return)
         is_black_swan = bool(abs(actual_return_pct) >= 3.8 or abs(residual_error) >= 3.8)
@@ -85,14 +82,18 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
         # 5. Institutional Error Attribution Tagging
         if is_black_swan:
             tag = "BLACK_SWAN_OUTLIER"
-        elif percentage_error <= 0.35:
-            tag = "ACCURATE"
-        elif direction_correct and abs(actual_return_pct) > abs(predicted_return_pct):
-            tag = "MOMENTUM_UNDERESTIMATED"
-        elif direction_correct and abs(actual_return_pct) < abs(predicted_return_pct):
-            tag = "MOMENTUM_OVERESTIMATED"
+        elif direction_correct:
+            if percentage_error <= 0.35:
+                tag = "ACCURATE"
+            elif abs(actual_return_pct) > abs(predicted_return_pct):
+                tag = "MOMENTUM_UNDERESTIMATED"
+            else:
+                tag = "MOMENTUM_OVERESTIMATED"
         else:
-            tag = "DIRECTION_MISALIGNED"
+            if percentage_error <= 0.20 or absolute_error_usd < 150.0:
+                tag = "SIDEWAYS_DRIFT"
+            else:
+                tag = "DIRECTION_MISALIGNED"
 
         # 6. Instantiate Reconciliation Record
         rec = Reconciliation(
