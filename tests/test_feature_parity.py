@@ -921,5 +921,179 @@ def test_merge_onchain_timestamp_and_boundary_semantics():
     assert merged_naive["onchain_num_tx"].iloc[1] == 222.0
 
 
+def test_merge_fear_greed_prevents_same_day_leakage():
+    """
+    Verify that an intraday candle at date D does NOT receive date D's sentiment index,
+    preventing lookahead leakage. It must strictly receive the fully completed day D-1 metrics.
+    """
+    from src.agents.fear_greed_agent import merge_fear_greed
+
+    timestamps = [
+        "2026-10-10 12:00:00",
+        "2026-10-10 23:00:00",
+        "2026-10-11 05:00:00",
+        "2026-10-11 23:00:00",
+    ]
+    candle_df = pd.DataFrame({"timestamp": timestamps, "close": [60000.0, 60100.0, 60200.0, 60300.0]})
+
+    mock_fng = pd.DataFrame({
+        "date": [pd.to_datetime("2026-10-09").date(), pd.to_datetime("2026-10-10").date(), pd.to_datetime("2026-10-11").date()],
+        "fng_value": [30.0, 42.0, 88.0],
+    })
+
+    merged = merge_fear_greed(candle_df, fng_df=mock_fng)
+
+    # At 2026-10-10 (any hour): latest completed day is 2026-10-09 (30.0)
+    assert merged.loc[merged["timestamp"] == "2026-10-10 12:00:00", "fng_value"].iloc[0] == 30.0
+    assert merged.loc[merged["timestamp"] == "2026-10-10 23:00:00", "fng_value"].iloc[0] == 30.0
+
+    # At 2026-10-11 05:00:00: latest completed day is 2026-10-10 (42.0), NOT same-day 2026-10-11 (88.0)
+    leakage_candle = merged.loc[merged["timestamp"] == "2026-10-11 05:00:00"]
+    assert leakage_candle["fng_value"].iloc[0] == 42.0, (
+        f"Temporal leakage detected! Intraday candle received {leakage_candle['fng_value'].iloc[0]} "
+        f"instead of completed prior day's value 42.0."
+    )
+    assert leakage_candle["fng_value"].iloc[0] != 88.0
+
+
+def test_merge_fear_greed_prevents_backward_fill_and_sets_pre_observation_default():
+    """
+    Verify that historical candles preceding the earliest FNG observation receive NEUTRAL_DEFAULT (50.0)
+    and are NEVER backward-filled with future sentiment observations.
+    """
+    from src.agents.fear_greed_agent import merge_fear_greed
+
+    timestamps = [
+        "2026-10-07 10:00:00",
+        "2026-10-08 10:00:00",
+        "2026-10-11 10:00:00",
+    ]
+    candle_df = pd.DataFrame({"timestamp": timestamps, "close": [58000.0, 59000.0, 60000.0]})
+
+    # FNG data only begins on 2026-10-10
+    mock_fng = pd.DataFrame({
+        "date": [pd.to_datetime("2026-10-10").date()],
+        "fng_value": [78.0],
+    })
+
+    merged = merge_fear_greed(candle_df, fng_df=mock_fng)
+
+    # 2026-10-07 and 2026-10-08 must receive 50.0 (NEUTRAL_DEFAULT), not backward-filled 78.0
+    val_07 = merged.loc[merged["timestamp"] == "2026-10-07 10:00:00", "fng_value"].iloc[0]
+    val_08 = merged.loc[merged["timestamp"] == "2026-10-08 10:00:00", "fng_value"].iloc[0]
+    assert val_07 == 50.0, f"Backward-fill leakage! Expected 50.0, got {val_07}"
+    assert val_08 == 50.0, f"Backward-fill leakage! Expected 50.0, got {val_08}"
+
+    # 2026-10-11 looks up completed day 2026-10-10 -> 78.0
+    val_11 = merged.loc[merged["timestamp"] == "2026-10-11 10:00:00", "fng_value"].iloc[0]
+    assert val_11 == 78.0
+
+
+def test_merge_fear_greed_forward_fills_missing_observation_dates():
+    """
+    Verify that when FNG data contains missing observation dates (API gaps or delayed releases),
+    the previous observed sentiment is forward-filled across the gap rather than dropping to 50.0.
+    """
+    from src.agents.fear_greed_agent import merge_fear_greed
+
+    timestamps = [
+        "2026-10-10 12:00:00",  # targets 2026-10-09 (observed: 25.0)
+        "2026-10-11 12:00:00",  # targets 2026-10-10 (missing date: should forward-fill 25.0)
+        "2026-10-12 12:00:00",  # targets 2026-10-11 (observed: 65.0)
+    ]
+    candle_df = pd.DataFrame({"timestamp": timestamps, "close": [60000.0, 60100.0, 60200.0]})
+
+    # FNG data has an intentional gap on 2026-10-10
+    mock_fng = pd.DataFrame({
+        "date": [pd.to_datetime("2026-10-09").date(), pd.to_datetime("2026-10-11").date()],
+        "fng_value": [25.0, 65.0],
+    })
+
+    merged = merge_fear_greed(candle_df, fng_df=mock_fng)
+
+    # Row 0: targets 2026-10-09 -> 25.0
+    assert merged["fng_value"].iloc[0] == 25.0
+    # Row 1: targets 2026-10-10 (missing) -> must forward-fill 25.0, NOT drop to 50.0
+    assert merged["fng_value"].iloc[1] == 25.0, (
+        f"Missing observation was not forward-filled! Got {merged['fng_value'].iloc[1]}, expected 25.0"
+    )
+    # Row 2: targets 2026-10-11 -> 65.0
+    assert merged["fng_value"].iloc[2] == 65.0
+
+
+def test_merge_fear_greed_midnight_utc_and_timezone_boundaries():
+    """
+    Verify timezone handling (UTC awareness, non-UTC conversion, string parsing)
+    and clean transitions across midnight boundaries.
+    """
+    from src.agents.fear_greed_agent import merge_fear_greed
+
+    # 1. Midnight boundary in UTC
+    tz_aware_ts = pd.date_range("2026-10-10 22:00:00", periods=4, freq="h", tz="UTC")
+    df_tz = pd.DataFrame({"timestamp": tz_aware_ts, "close": [60000.0] * 4})
+
+    mock_fng = pd.DataFrame({
+        "date": [pd.to_datetime("2026-10-09").date(), pd.to_datetime("2026-10-10").date()],
+        "fng_value": [33.0, 66.0],
+    })
+
+    merged_tz = merge_fear_greed(df_tz, fng_df=mock_fng)
+    # 2026-10-10 22:00 UTC -> targets 2026-10-09 -> 33.0
+    # 2026-10-10 23:00 UTC -> targets 2026-10-09 -> 33.0
+    # 2026-10-11 00:00 UTC -> targets 2026-10-10 -> 66.0
+    # 2026-10-11 01:00 UTC -> targets 2026-10-10 -> 66.0
+    assert merged_tz["fng_value"].iloc[0] == 33.0
+    assert merged_tz["fng_value"].iloc[1] == 33.0
+    assert merged_tz["fng_value"].iloc[2] == 66.0
+    assert merged_tz["fng_value"].iloc[3] == 66.0
+
+    # 2. Non-UTC timezone conversion (e.g. +05:30)
+    # 2026-10-11 05:00:00+05:30 corresponds to 2026-10-10 23:30:00 UTC -> targets 2026-10-09 -> 33.0
+    # 2026-10-11 06:00:00+05:30 corresponds to 2026-10-11 00:30:00 UTC -> targets 2026-10-10 -> 66.0
+    ts_non_utc = pd.to_datetime(["2026-10-11 05:00:00+05:30", "2026-10-11 06:00:00+05:30"])
+    df_non_utc = pd.DataFrame({"timestamp": ts_non_utc, "close": [60000.0, 60100.0]})
+    merged_non_utc = merge_fear_greed(df_non_utc, fng_df=mock_fng)
+    assert merged_non_utc["fng_value"].iloc[0] == 33.0
+    assert merged_non_utc["fng_value"].iloc[1] == 66.0
+
+
+def test_merge_fear_greed_rolling_mean_consistency():
+    """
+    Verify downstream consistency of fng_mean_3d (72-hour rolling window)
+    when computed via create_features after causal merge_fear_greed.
+    """
+    from src.agents.fear_greed_agent import merge_fear_greed
+    from src.feature_engineering import create_features
+
+    # 100 hourly candles across 4+ days
+    timestamps = pd.date_range("2026-10-10 00:00:00", periods=100, freq="h", tz="UTC")
+    candle_df = pd.DataFrame({
+        "timestamp": timestamps,
+        "open": [60000.0] * 100,
+        "high": [60500.0] * 100,
+        "low": [59500.0] * 100,
+        "close": [60000.0] * 100,
+        "volume": [100.0] * 100,
+    })
+
+    # FNG data: 2026-10-09 through 2026-10-13 constant at 40.0
+    dates = pd.date_range("2026-10-09", periods=6, freq="D").date
+    mock_fng = pd.DataFrame({
+        "date": dates,
+        "fng_value": [40.0] * len(dates),
+    })
+
+    merged = merge_fear_greed(candle_df, fng_df=mock_fng)
+    assert (merged["fng_value"] == 40.0).all()
+
+    # Pass through feature engineering
+    feat_df = create_features(merged, drop_na=False)
+    assert "fng_mean_3d" in feat_df.columns
+    # Row 71 (the 72nd candle) should have rolling mean of 40.0 exactly
+    assert feat_df["fng_mean_3d"].iloc[71] == pytest.approx(40.0, abs=1e-5)
+    assert feat_df["fng_mean_3d"].iloc[-1] == pytest.approx(40.0, abs=1e-5)
+
+
+
 
 
