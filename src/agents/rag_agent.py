@@ -1,13 +1,30 @@
 # src/agents/rag_agent.py
+"""
+Mudra Market Domain Vector Store & Semantic Retrieval Engine (RAG).
 
+Provides persistent vector search using ChromaDB and Google AI Studio's
+768-dimensional text-embedding-004 API. Enables zero-local-PyTorch / zero-bloat
+semantic context retrieval for the Quantitative Strategist node.
+"""
+
+import logging
 import os
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+from pathlib import Path
+from typing import List, Optional, Dict, Any
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 # Silence ChromaDB internal telemetry warnings
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
+logging.getLogger("chromadb.telemetry").setLevel(logging.ERROR)
+logging.getLogger("chromadb.telemetry.posthog").setLevel(logging.ERROR)
 
-from typing import List, Optional
 import google.generativeai as genai
 import chromadb
 from chromadb.config import Settings
@@ -59,9 +76,9 @@ def _get_gemini_api_key() -> Optional[str]:
 class GeminiEmbeddingFunction(EmbeddingFunction):
     """
     Lightweight, pure Python embedding function using Google AI Studio's
-    gemini-embedding-001 API (768-dimensional). Zero local PyTorch/ONNX dependencies.
+    text-embedding-004 API (768-dimensional). Zero local PyTorch/ONNX dependencies.
     """
-    def __init__(self, api_key: Optional[str] = None, model_name: str = "models/gemini-embedding-001"):
+    def __init__(self, api_key: Optional[str] = None, model_name: str = "models/text-embedding-004"):
         self.api_key = api_key or _get_gemini_api_key()
         self.model_name = model_name
         if self.api_key:
@@ -81,7 +98,7 @@ class GeminiEmbeddingFunction(EmbeddingFunction):
             )
             return res["embedding"]
         except Exception as e:
-            print(f"⚠️ Gemini Embedding API warning ({e}), using safe fallback.")
+            print(f"[WARNING] Gemini Embedding API error ({e}), utilizing defensive fallback.")
             return [[0.0] * 768 for _ in input]
 
 
@@ -133,10 +150,11 @@ FOUNDATIONAL_KNOWLEDGE = [
 class MarketKnowledgeRAG:
     """Manages persistent ChromaDB vector storage and semantic retrieval for Mudra."""
 
-    def __init__(self, db_path=CHROMADB_DIR, collection_name=CHROMA_COLLECTION_NAME):
+    def __init__(self, db_path: str = CHROMADB_DIR, collection_name: str = CHROMA_COLLECTION_NAME):
+        Path(db_path).mkdir(parents=True, exist_ok=True)
         self.client = chromadb.PersistentClient(
             path=db_path,
-            settings=Settings(anonymized_telemetry=False)
+            settings=Settings(anonymized_telemetry=False, is_persistent=True)
         )
         self.embedding_fn = GeminiEmbeddingFunction()
         self.collection = self.client.get_or_create_collection(
@@ -148,14 +166,14 @@ class MarketKnowledgeRAG:
     def _seed_if_empty(self):
         """Pre-seeds the knowledge base if currently empty."""
         if self.collection.count() == 0:
-            print("🌱 Seeding ChromaDB with foundational market domain knowledge via Gemini text-embedding-004...")
+            print("[INFO] Seeding ChromaDB with foundational market domain knowledge via Gemini text-embedding-004...")
             ids = [item["id"] for item in FOUNDATIONAL_KNOWLEDGE]
             documents = [item["doc"] for item in FOUNDATIONAL_KNOWLEDGE]
             metadatas = [{"category": item["category"]} for item in FOUNDATIONAL_KNOWLEDGE]
             self.collection.add(ids=ids, documents=documents, metadatas=metadatas)
-            print(f"✅ Pre-seeded {len(ids)} knowledge documents into ChromaDB.")
+            print(f"[SUCCESS] Pre-seeded {len(ids)} knowledge documents into ChromaDB.")
 
-    def add_document(self, doc_id: str, text: str, metadata: Optional[dict] = None):
+    def add_document(self, doc_id: str, text: str, metadata: Optional[dict] = None) -> None:
         """Adds or updates a document in the vector store."""
         metadata = metadata or {}
         self.collection.upsert(ids=[doc_id], documents=[text], metadatas=[metadata])
@@ -166,11 +184,13 @@ class MarketKnowledgeRAG:
         Returns a list of relevant text excerpts.
         """
         results = self.collection.query(query_texts=[query], n_results=n_results)
-        documents = results.get("documents", [[]])[0]
-        return documents
+        raw_docs = results.get("documents")
+        if raw_docs and len(raw_docs) > 0:
+            return raw_docs[0]
+        return []
 
 
-_rag_instance = None
+_rag_instance: Optional[MarketKnowledgeRAG] = None
 
 def get_rag_agent() -> MarketKnowledgeRAG:
     """Singleton getter for MarketKnowledgeRAG."""
@@ -183,7 +203,8 @@ def get_rag_agent() -> MarketKnowledgeRAG:
 if __name__ == '__main__':
     rag = get_rag_agent()
     test_query = "bullish breakout with high taker volume and positive momentum"
-    print(f"\n🔎 Testing Semantic RAG Retrieval for: '{test_query}'")
+    print(f"\n[TEST] Testing Semantic RAG Retrieval for: '{test_query}'")
     context = rag.retrieve_market_context(test_query, n_results=2)
     for i, doc in enumerate(context, 1):
         print(f"   [{i}] {doc}")
+
