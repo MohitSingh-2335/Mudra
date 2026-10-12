@@ -51,9 +51,10 @@ def strategist_node(state: AgentState) -> AgentState:
             "high": float(market_res.get("high", state["current_price"] * 1.01)),
             "low": float(market_res.get("low", state["current_price"] * 0.99)),
             "volume": float(market_res.get("volume", 1500.0)),
-            "taker_buy_ratio": float(market_res.get("taker_buy_ratio", 0.50))
         }
-        if isinstance(market_res, dict) and "candles" in market_res:
+        if isinstance(market_res, dict) and market_res.get("taker_buy_ratio") is not None:
+            tech_input["taker_buy_ratio"] = float(market_res["taker_buy_ratio"])
+        if isinstance(market_res, dict) and "candles" in market_res and market_res["candles"] is not None:
             tech_input["candles"] = market_res["candles"]
 
         tech_res = calculate_technical_signals.invoke(tech_input)
