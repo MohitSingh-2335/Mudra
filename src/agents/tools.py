@@ -9,10 +9,9 @@ import joblib
 import requests
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, Optional
-from langchain_core.tools import tool
-
+from typing import Dict, Any, Optional, Union
 from datetime import datetime, timezone
+from langchain_core.tools import tool
 
 from config import (
     REGRESSOR_MODEL_PATH,
@@ -28,9 +27,10 @@ def get_live_market_data(symbol: str = "BTCUSDT") -> Dict[str, Any]:
     """
     Fetches the latest live market candlestick and order-flow telemetry for the target cryptocurrency.
     Primary source: Binance Dedicated Vision (data-api.binance.vision).
-    Fallback source: Coinbase Institutional Public Feed (api.exchange.coinbase.com).
+    Fallback source 1: Coinbase Institutional Public Feed (api.exchange.coinbase.com).
+    Fallback source 2: Local Pre-computed Parquet/CSV Dataset.
     """
-    # 1. Try Binance Dedicated Vision (No auth, institutional taker buy volume)
+    # 1. Try Binance Dedicated Vision (No auth required, institutional taker volume)
     try:
         url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&limit=5"
         resp = requests.get(url, timeout=5)
@@ -80,7 +80,7 @@ def get_live_market_data(symbol: str = "BTCUSDT") -> Dict[str, Any]:
                     "high": high,
                     "low": low,
                     "volume": vol,
-                    "taker_buy_ratio": 0.50,  # Coinbase omits taker breakdown; neutral default
+                    "taker_buy_ratio": 0.50,  # Coinbase omits taker volume; neutral 0.50
                     "number_of_trades": 0,
                     "source": "Coinbase Institutional Public (Fallback)",
                     "status": "online"
@@ -88,27 +88,28 @@ def get_live_market_data(symbol: str = "BTCUSDT") -> Dict[str, Any]:
     except Exception:
         pass
 
-    # 3. Fallback to Local Parquet / CSV Simulation
+    # 3. Fallback to Local Featured Dataset
     try:
         if os.path.exists(FEATURED_BTC_DATA_PATH):
             df = pd.read_csv(FEATURED_BTC_DATA_PATH)
-            last_row = df.iloc[-1]
-            close = float(last_row.get("close", 65000.0))
-            return {
-                "symbol": symbol,
-                "close": close,
-                "high": float(last_row.get("high", close * 1.01)),
-                "low": float(last_row.get("low", close * 0.99)),
-                "volume": float(last_row.get("volume", 1500.0)),
-                "taker_buy_ratio": float(last_row.get("taker_buy_ratio", 0.50)),
-                "number_of_trades": int(last_row.get("number_of_trades", 15000)),
-                "source": "Local Historical Parquet Replay",
-                "status": "simulation"
-            }
+            if not df.empty:
+                last_row = df.iloc[-1]
+                close = float(last_row.get("close", 65000.0))
+                return {
+                    "symbol": symbol,
+                    "close": close,
+                    "high": float(last_row.get("high", close * 1.01)),
+                    "low": float(last_row.get("low", close * 0.99)),
+                    "volume": float(last_row.get("volume", 1500.0)),
+                    "taker_buy_ratio": float(last_row.get("taker_buy_ratio", 0.50)),
+                    "number_of_trades": int(last_row.get("number_of_trades", 15000)),
+                    "source": "Local Historical Dataset Replay",
+                    "status": "simulation"
+                }
     except Exception:
         pass
 
-    # Absolute safety fallback
+    # Absolute deterministic safety fallback
     return {
         "symbol": symbol,
         "close": 65000.0,
@@ -130,11 +131,11 @@ def calculate_technical_signals(
     volume: float,
     taker_buy_ratio: float = 0.5,
     open_price: Optional[float] = None,
-    timestamp: Optional[Any] = None
+    timestamp: Optional[Union[str, datetime]] = None
 ) -> Dict[str, Any]:
     """
     Computes key microstructural and technical momentum indicators from price and order-flow inputs.
-    Calculates volatility range, order-flow buyer dominance, and trend bias with aligned feature keys.
+    Calculates volatility range, order-flow buyer dominance, and cyclical calendar representations.
     """
     spread = high - low
     spread_pct = (spread / close) * 100.0 if close > 0 else 0.0
@@ -150,11 +151,11 @@ def calculate_technical_signals(
     else:
         flow_bias = "Neutral Balanced Liquidity"
 
-    # Synthetic RSI approximation for single bar relative to spread
+    # Synthetic RSI approximation for single bar relative to taker aggression
     simulated_rsi = 50.0 + (taker_buy_ratio - 0.5) * 60.0
     simulated_rsi = max(10.0, min(90.0, simulated_rsi))
 
-    # Time-based cyclical features
+    # Time-based cyclical trigonometric features
     ts = pd.to_datetime(timestamp, utc=True) if timestamp else datetime.now(timezone.utc)
     hour = int(ts.hour)
     dayofweek = int(ts.weekday() if hasattr(ts, "weekday") else getattr(ts, "dayofweek", 0))
@@ -220,7 +221,11 @@ def get_model_return_forecast(features: Optional[Dict[str, Any]] = None) -> Dict
         raw_pred_return = 0.0
         if os.path.exists(REGRESSOR_MODEL_PATH):
             model_reg = joblib.load(REGRESSOR_MODEL_PATH)
-            model_reg.set_params(device="cpu")
+            if hasattr(model_reg, "set_params"):
+                try:
+                    model_reg.set_params(device="cpu")
+                except Exception:
+                    pass
 
             row_reg = {}
             for col in REGRESSOR_FEATURES:
@@ -244,7 +249,11 @@ def get_model_return_forecast(features: Optional[Dict[str, Any]] = None) -> Dict
 
         if os.path.exists(CLASSIFIER_MODEL_PATH):
             model_clf = joblib.load(CLASSIFIER_MODEL_PATH)
-            model_clf.set_params(device="cpu")
+            if hasattr(model_clf, "set_params"):
+                try:
+                    model_clf.set_params(device="cpu")
+                except Exception:
+                    pass
 
             row_clf = {}
             for col in CLASSIFIER_FEATURES:
@@ -274,9 +283,9 @@ def get_model_return_forecast(features: Optional[Dict[str, Any]] = None) -> Dict
 
         direction = "UP" if move_code == 1 else "DOWN"
         if not clears_hurdle:
-            direction_badge = "SIDEWAYS / CHOP ⚪"
+            direction_badge = "SIDEWAYS / CHOP"
         else:
-            direction_badge = "BULLISH 🟢" if move_code == 1 else "BEARISH 🔴"
+            direction_badge = "BULLISH" if move_code == 1 else "BEARISH"
 
         confidence = max(prob_up, prob_down)
 
@@ -301,13 +310,12 @@ def get_model_return_forecast(features: Optional[Dict[str, Any]] = None) -> Dict
             "clears_hurdle": False,
             "hurdle_threshold_pct": 0.05,
             "direction": "SIDEWAYS",
-            "direction_badge": "NEUTRAL ⚪",
+            "direction_badge": "NEUTRAL",
             "direction_probability_up": 50.0,
             "direction_probability_down": 50.0,
             "confidence": 0.50,
             "status": f"error: {str(e)}"
         }
-
 
 
 @tool
