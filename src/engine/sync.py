@@ -36,22 +36,41 @@ __all__ = ["sync_hourly_quant_cycle", "fetch_latest_confirmed_candle"]
 
 def fetch_latest_confirmed_candle(symbol: str = "BTCUSDT") -> Dict[str, Any]:
     """
-    Fetches the most recently confirmed closed 1-hour candle.
+    Fetches the most recently confirmed closed 1-hour candle alongside
+    the preceding sequence of historical candles for rolling feature parity.
     Primary: Binance Dedicated Vision. Fallback: Coinbase Institutional.
     """
     # 1. Binance Dedicated Vision
     try:
-        url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&limit=5"
+        url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&limit=100"
         resp = requests.get(url, timeout=10)
         if resp.status_code == 200:
             klines = resp.json()
-            if len(klines) >= 2:
-                # klines[-2] is the most recently confirmed CLOSED candle
-                c = klines[-2]
+            if len(klines) >= 35:
+                # klines[:-1] are confirmed closed candles; klines[-1] is the active unclosed bar
+                confirmed_klines = klines[:-1]
+                c = confirmed_klines[-1]
                 ts = datetime.fromtimestamp(c[0] / 1000.0, tz=timezone.utc)
                 vol = float(c[5])
                 taker_base = float(c[9])
-                taker_ratio = float(taker_base / vol) if vol > 0 else 0.5
+                taker_ratio = float(taker_base / vol) if vol > 0 else 0.50
+
+                candle_records = []
+                for k in confirmed_klines:
+                    k_vol = float(k[5])
+                    k_taker = float(k[9])
+                    k_ratio = float(k_taker / k_vol) if k_vol > 0 else 0.50
+                    candle_records.append({
+                        "timestamp": pd.to_datetime(k[0], unit="ms", utc=True),
+                        "open": float(k[1]),
+                        "high": float(k[2]),
+                        "low": float(k[3]),
+                        "close": float(k[4]),
+                        "volume": k_vol,
+                        "number_of_trades": int(k[8]),
+                        "taker_buy_ratio": round(k_ratio, 4),
+                    })
+
                 return {
                     "timestamp": ts,
                     "open": float(c[1]),
@@ -61,6 +80,7 @@ def fetch_latest_confirmed_candle(symbol: str = "BTCUSDT") -> Dict[str, Any]:
                     "volume": vol,
                     "taker_buy_ratio": round(taker_ratio, 4),
                     "number_of_trades": int(c[8]),
+                    "candles": candle_records,
                 }
     except Exception:
         pass
@@ -71,10 +91,25 @@ def fetch_latest_confirmed_candle(symbol: str = "BTCUSDT") -> Dict[str, Any]:
         resp = requests.get(url, headers={"User-Agent": "Mudra-Sync/1.0"}, timeout=10)
         if resp.status_code == 200:
             candles = resp.json()
-            if len(candles) >= 2:
-                # candles[1] is the previous closed hourly candle
-                c = candles[1]
+            if len(candles) >= 35:
+                # candles[0] is current unclosed; candles[1:] are confirmed closed
+                confirmed_candles = list(reversed(candles[1:100]))
+                c = confirmed_candles[-1]
                 ts = datetime.fromtimestamp(c[0], tz=timezone.utc)
+
+                candle_records = []
+                for k in confirmed_candles:
+                    candle_records.append({
+                        "timestamp": pd.to_datetime(k[0], unit="s", utc=True),
+                        "low": float(k[1]),
+                        "high": float(k[2]),
+                        "open": float(k[3]),
+                        "close": float(k[4]),
+                        "volume": float(k[5]),
+                        "taker_buy_ratio": 0.50,
+                        "number_of_trades": 10000,
+                    })
+
                 return {
                     "timestamp": ts,
                     "open": float(c[3]),
@@ -84,6 +119,7 @@ def fetch_latest_confirmed_candle(symbol: str = "BTCUSDT") -> Dict[str, Any]:
                     "volume": float(c[5]),
                     "taker_buy_ratio": 0.50,
                     "number_of_trades": 10000,
+                    "candles": candle_records,
                 }
     except Exception:
         pass
@@ -123,6 +159,7 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
             "volume": candle["volume"],
             "taker_buy_ratio": candle.get("taker_buy_ratio", 0.5),
             "timestamp": candle["timestamp"],
+            "candles": candle.get("candles"),
         })
         ml_output = get_model_return_forecast.invoke({"features": signals_output})
         pred_return = float(ml_output.get("expected_return_pct", 0.0))
