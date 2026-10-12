@@ -62,7 +62,9 @@ def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LI
                         "number_of_trades": int(c[8]),
                         "taker_buy_ratio": round(taker_ratio, 4),
                     })
-                return pd.DataFrame(records)
+                df_out = pd.DataFrame(records)
+                df_out.attrs["source"] = "binance"
+                return df_out
     except Exception:
         pass
 
@@ -92,7 +94,9 @@ def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LI
                         "number_of_trades": None,  # Coinbase does not report trade count; do not fabricate
                         "taker_buy_ratio": 0.50,
                     })
-                return pd.DataFrame(records)
+                df_out = pd.DataFrame(records)
+                df_out.attrs["source"] = "coinbase"
+                return df_out
     except Exception:
         pass
 
@@ -102,12 +106,16 @@ def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LI
             df_local = pd.read_csv(FEATURED_BTC_DATA_PATH)
             if len(df_local) >= 35:
                 df_local["timestamp"] = pd.to_datetime(df_local["timestamp"], utc=True)
-                return df_local.tail(limit).reset_index(drop=True)
+                df_out = df_local.tail(limit).reset_index(drop=True)
+                df_out.attrs["source"] = "local_fallback"
+                return df_out
         elif os.path.exists(BTCUSDT_1H_CSV):
             from src.data_preprocessing import load_and_clean_data
             df_local = load_and_clean_data(BTCUSDT_1H_CSV)
             if len(df_local) >= 35:
-                return df_local.tail(limit).reset_index(drop=True)
+                df_out = df_local.tail(limit).reset_index(drop=True)
+                df_out.attrs["source"] = "local_fallback"
+                return df_out
     except Exception:
         pass
 
