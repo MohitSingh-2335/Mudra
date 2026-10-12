@@ -3,11 +3,16 @@ Database Connection Manager and Session Factory for Mudra.
 Supports Neon Serverless PostgreSQL with SSL pooling and SQLite local fallback.
 """
 import os
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator, Tuple, Optional
 import tomllib
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from sqlalchemy import create_engine, text, Engine
 from sqlalchemy.orm import sessionmaker, Session
@@ -133,15 +138,26 @@ def init_db(target_engine: Optional[Engine] = None) -> None:
 def test_connection() -> Tuple[bool, str, float]:
     """
     Tests database connectivity and measures round-trip latency.
+    Dynamically handles PostgreSQL (SELECT version();) and SQLite (SELECT sqlite_version();).
     Returns: (is_success, server_version_or_error, latency_ms)
     """
     start_time = time.perf_counter()
     try:
         with engine.connect() as conn:
-            result = conn.execute(text("SELECT version();")).fetchone()
+            is_sqlite = engine.dialect.name == "sqlite"
+            query_str = "SELECT sqlite_version();" if is_sqlite else "SELECT version();"
+            result = conn.execute(text(query_str)).fetchone()
             latency_ms = (time.perf_counter() - start_time) * 1000.0
-            version_str = str(result[0]) if result else "Unknown"
+            version_str = f"SQLite {result[0]}" if (is_sqlite and result) else (str(result[0]) if result else "Unknown")
             return True, version_str, latency_ms
     except Exception as exc:
         latency_ms = (time.perf_counter() - start_time) * 1000.0
         return False, str(exc), latency_ms
+
+
+if __name__ == '__main__':
+    print("[INFO] Testing Mudra database connectivity and latency...")
+    success, info, latency = test_connection()
+    status = "SUCCESS" if success else "FAILED"
+    print(f"[{status}] Connected: {success} | Version: {info} | Latency: {latency:.2f}ms")
+
