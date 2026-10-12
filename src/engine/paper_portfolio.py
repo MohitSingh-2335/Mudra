@@ -32,27 +32,49 @@ __all__ = [
 ]
 
 
-def get_average_entry_price(session: Session, target_btc: float) -> float:
+def get_average_entry_price(session: Session, target_btc: float, include_fees: bool = True) -> float:
     """
-    Computes the volume-weighted average entry price for open BTC inventory.
+    Computes the volume-weighted average cost basis per BTC for open BTC inventory.
+    When include_fees=True (default), allocates the entry transaction fee into the unit cost basis
+    so that net realized P&L accurately accounts for both entry and exit trading friction.
     Accumulates backwards over recent BUY orders until target inventory is covered.
     """
     if target_btc <= 1e-8:
         return 0.0
-    stmt = (
-        select(PaperPortfolio.execution_price, PaperPortfolio.btc_amount)
-        .where(PaperPortfolio.action == "BUY")
+
+    # Scope to BUY orders strictly after the most recent SELL liquidation
+    last_sell_id = session.execute(
+        select(PaperPortfolio.id)
+        .where(PaperPortfolio.action == "SELL")
         .order_by(PaperPortfolio.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+    stmt = (
+        select(PaperPortfolio.execution_price, PaperPortfolio.btc_amount, PaperPortfolio.fee_deducted_usd)
+        .where(PaperPortfolio.action == "BUY")
     )
-    records = session.execute(stmt).all()
+    if last_sell_id is not None:
+        scoped_stmt = stmt.where(PaperPortfolio.id > last_sell_id).order_by(PaperPortfolio.id.desc())
+        records = session.execute(scoped_stmt).all()
+        if not records:
+            # Fallback if ledger was populated without strictly sequential IDs
+            records = session.execute(stmt.order_by(PaperPortfolio.id.desc())).all()
+    else:
+        records = session.execute(stmt.order_by(PaperPortfolio.id.desc())).all()
+
     accum_btc = 0.0
     accum_cost = 0.0
-    for price, amount in records:
+    for price, amount, fee in records:
+        if amount <= 0:
+            continue
         needed = min(amount, target_btc - accum_btc)
-        accum_cost += needed * price
+        unit_cost = (price + (fee / amount)) if include_fees else price
+        accum_cost += needed * unit_cost
         accum_btc += needed
         if accum_btc >= target_btc - 1e-8:
             break
+
     return (accum_cost / accum_btc) if accum_btc > 0 else 0.0
 
 
@@ -158,8 +180,8 @@ def execute_paper_order(
         
         net_proceeds = gross_proceeds - fee_usd
         
-        # Institutional weighted average cost basis accounting
-        avg_entry = get_average_entry_price(session, btc)
+        # Institutional weighted average cost basis accounting (including entry fee)
+        avg_entry = get_average_entry_price(session, btc, include_fees=True)
         cost_basis = btc * avg_entry
         realized_pnl = net_proceeds - cost_basis
         
