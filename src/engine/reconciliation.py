@@ -4,13 +4,24 @@ Grades predictions at T+1 against realized Binance market candles,
 decomposes forecast residuals, isolates 3-sigma black-swan outliers,
 and attributes Risk Critic veto quality.
 """
+import sys
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 import numpy as np
 from sqlalchemy.orm import Session
 from sqlalchemy import select, and_, desc
 
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from src.database.models import MarketTick, Reconciliation, CouncilAudit
+
+__all__ = [
+    "reconcile_pending_ticks",
+    "get_reconciliation_summary",
+]
 
 
 def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[Reconciliation]:
@@ -47,9 +58,9 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
     reconciled_records: List[Reconciliation] = []
 
     for prior_tick in pending_ticks:
-        actual_price = float(current_tick.close)
+        actual_price = max(1.0, float(current_tick.close))
         predicted_price = float(prior_tick.predicted_price_1h)
-        base_price = float(prior_tick.close)
+        base_price = max(1.0, float(prior_tick.close))
 
         # 1. Return Calculations
         predicted_return_pct = ((predicted_price - base_price) / base_price) * 100.0
@@ -116,6 +127,10 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
                     audit.veto_attribution = "SAVED_CAPITAL"  # Critic avoided loss!
                 elif audit.strategist_action == "BUY" and actual_return_pct > 0.10:
                     audit.veto_attribution = "OPPORTUNITY_COST"  # Critic was too cautious
+                elif audit.strategist_action == "SELL" and actual_return_pct > 0:
+                    audit.veto_attribution = "SAVED_CAPITAL"  # Critic avoided short loss on market rally
+                elif audit.strategist_action == "SELL" and actual_return_pct < -0.10:
+                    audit.veto_attribution = "OPPORTUNITY_COST"  # Critic missed profitable short drop
                 else:
                     audit.veto_attribution = "NEUTRAL"
             else:
@@ -147,7 +162,9 @@ def get_reconciliation_summary(session: Session, limit: int = 168) -> Dict[str, 
     if not records:
         return {
             "total_evaluated": 0,
+            "total_reconciled": 0,
             "win_rate_pct": 0.0,
+            "directional_accuracy_pct": 0.0,
             "mae_usd": 0.0,
             "mape_pct": 0.0,
             "information_coefficient": 0.0,
@@ -166,16 +183,33 @@ def get_reconciliation_summary(session: Session, limit: int = 168) -> Dict[str, 
     pred_returns = [r.predicted_return_pct for r in records]
     actual_returns = [r.actual_return_pct for r in records]
     if len(records) >= 3 and np.std(pred_returns) > 1e-8 and np.std(actual_returns) > 1e-8:
-        ic = float(np.corrcoef(pred_returns, actual_returns)[0, 1])
+        corr_val = np.corrcoef(pred_returns, actual_returns)[0, 1]
+        ic = float(np.nan_to_num(corr_val, nan=0.0))
     else:
         ic = 0.0
 
+    win_rate = round((wins / total) * 100.0, 2)
     return {
         "total_evaluated": total,
-        "win_rate_pct": round((wins / total) * 100.0, 2),
+        "total_reconciled": total,
+        "win_rate_pct": win_rate,
+        "directional_accuracy_pct": win_rate,
         "mae_usd": round(mae, 2),
         "mape_pct": round(mape, 3),
         "information_coefficient": round(ic, 4),
         "black_swans_filtered": black_swans,
         "accurate_count": accurate,
     }
+
+
+if __name__ == '__main__':
+    from src.database.connection import get_db
+    print("[INFO] Testing Ground Truth Reconciliation Engine...")
+    with get_db() as session:
+        summary = get_reconciliation_summary(session, limit=24)
+        print(f"[RECONCILIATION] Total Evaluated: {summary['total_evaluated']}")
+        print(f"[RECONCILIATION] Win Rate: {summary['win_rate_pct']}%")
+        print(f"[RECONCILIATION] MAE: ${summary['mae_usd']:,.2f} | MAPE: {summary['mape_pct']:.3f}%")
+        print(f"[RECONCILIATION] Information Coefficient: {summary['information_coefficient']:.4f}")
+        print(f"[RECONCILIATION] Accurate Count: {summary['accurate_count']} | Black Swans: {summary['black_swans_filtered']}")
+    print("[SUCCESS] Reconciliation Engine verification completed.")
