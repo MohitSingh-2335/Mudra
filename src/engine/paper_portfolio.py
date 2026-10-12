@@ -4,16 +4,56 @@ Manages cash, BTC inventory, transaction fees, slippage,
 mark-to-market valuation, peak-to-trough drawdowns,
 and excess Alpha attribution over Buy & Hold benchmark.
 """
+import sys
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from src.database.models import PaperPortfolio
 
 INITIAL_CAPITAL_USD = 10000.0
 TAKER_FEE_PCT = 0.05    # 0.05% Binance VIP0 / BNB spot fee
 SLIPPAGE_PCT = 0.02     # 0.02% modeled market order price impact
+
+__all__ = [
+    "execute_paper_order",
+    "get_portfolio_summary",
+    "get_latest_portfolio_state",
+    "get_average_entry_price",
+    "INITIAL_CAPITAL_USD",
+    "TAKER_FEE_PCT",
+    "SLIPPAGE_PCT",
+]
+
+
+def get_average_entry_price(session: Session, target_btc: float) -> float:
+    """
+    Computes the volume-weighted average entry price for open BTC inventory.
+    Accumulates backwards over recent BUY orders until target inventory is covered.
+    """
+    if target_btc <= 1e-8:
+        return 0.0
+    stmt = (
+        select(PaperPortfolio.execution_price, PaperPortfolio.btc_amount)
+        .where(PaperPortfolio.action == "BUY")
+        .order_by(PaperPortfolio.id.desc())
+    )
+    records = session.execute(stmt).all()
+    accum_btc = 0.0
+    accum_cost = 0.0
+    for price, amount in records:
+        needed = min(amount, target_btc - accum_btc)
+        accum_cost += needed * price
+        accum_btc += needed
+        if accum_btc >= target_btc - 1e-8:
+            break
+    return (accum_cost / accum_btc) if accum_btc > 0 else 0.0
 
 
 def get_latest_portfolio_state(session: Session) -> Optional[PaperPortfolio]:
@@ -52,6 +92,7 @@ def execute_paper_order(
     Returns:
         The newly committed PaperPortfolio record.
     """
+    current_price = max(1.0, float(current_price))
     latest = get_latest_portfolio_state(session)
     baseline_price = get_baseline_btc_price(session) or current_price
 
@@ -117,8 +158,9 @@ def execute_paper_order(
         
         net_proceeds = gross_proceeds - fee_usd
         
-        # Estimate realized PnL relative to initial deposit ratio
-        cost_basis = INITIAL_CAPITAL_USD - latest.cash_balance
+        # Institutional weighted average cost basis accounting
+        avg_entry = get_average_entry_price(session, btc)
+        cost_basis = btc * avg_entry
         realized_pnl = net_proceeds - cost_basis
         
         cash += net_proceeds
@@ -129,7 +171,8 @@ def execute_paper_order(
         action = "HOLD"
 
     # 3. Mark to Market Valuation
-    unrealized_pnl = btc * (current_price - exec_price) if btc > 0 else 0.0
+    open_entry = get_average_entry_price(session, btc) if btc > 0 else 0.0
+    unrealized_pnl = btc * (current_price - open_entry) if btc > 0 else 0.0
     total_equity = cash + (btc * current_price)
     cum_return_pct = ((total_equity - INITIAL_CAPITAL_USD) / INITIAL_CAPITAL_USD) * 100.0
 
@@ -174,6 +217,7 @@ def get_portfolio_summary(session: Session, current_price: float) -> Dict[str, A
     Returns an institutional summary of current portfolio performance.
     Used by Streamlit Terminal and API endpoints.
     """
+    current_price = max(1.0, float(current_price))
     latest = get_latest_portfolio_state(session)
     if latest is None:
         return {
@@ -188,8 +232,8 @@ def get_portfolio_summary(session: Session, current_price: float) -> Dict[str, A
             "total_trades": 0,
         }
 
-    stmt_count = select(PaperPortfolio).where(PaperPortfolio.action.in_(["BUY", "SELL"]))
-    trade_count = len(session.execute(stmt_count).scalars().all())
+    stmt_count = select(func.count(PaperPortfolio.id)).where(PaperPortfolio.action.in_(["BUY", "SELL"]))
+    trade_count = int(session.execute(stmt_count).scalar() or 0)
 
     # Mark current equity with live price
     live_equity = float(latest.cash_balance) + (float(latest.btc_balance) * current_price)
@@ -209,3 +253,16 @@ def get_portfolio_summary(session: Session, current_price: float) -> Dict[str, A
         "drawdown_pct": round(float(latest.drawdown_pct), 2),
         "total_trades": trade_count,
     }
+
+
+if __name__ == '__main__':
+    from src.database.connection import get_db
+    print("[INFO] Testing Forward Paper Trading Portfolio Engine...")
+    with get_db() as session:
+        state = get_latest_portfolio_state(session)
+        print(f"[PORTFOLIO] Latest Ledger ID: {state.id if state else 'None'}")
+        summary = get_portfolio_summary(session, current_price=65000.0)
+        print(f"[PORTFOLIO] Total Equity: ${summary['total_equity_usd']:,.2f} | Cash: ${summary['cash_balance']:,.2f}")
+        print(f"[PORTFOLIO] BTC Balance: {summary['btc_balance']:.6f} | Cumulative Return: {summary['cumulative_return_pct']:+.2f}%")
+        print(f"[PORTFOLIO] Benchmark Buy & Hold: ${summary['benchmark_btc_equity']:,.2f} | Alpha: ${summary['alpha_usd']:+,.2f} ({summary['alpha_pct']:+.2f}%)")
+    print("[SUCCESS] Paper Portfolio verification completed.")
