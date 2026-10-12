@@ -3,6 +3,21 @@ Mudra Quant Synchronization Engine.
 Provides a unified, thread-safe sync pipeline for both the 24/7 headless cron worker
 and on-demand Streamlit UI terminal triggers.
 """
+import os
+from pathlib import Path
+import sys
+
+# Ensure repository root is on sys.path
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+# Pre-load onnxruntime before numerical engines to prevent Windows OpenMP runtime collision (0xC0000005)
+try:
+    import onnxruntime  # noqa: F401
+except ImportError:
+    pass
+
 import time
 from datetime import datetime, timezone
 from typing import Dict, Any, Tuple
@@ -15,6 +30,8 @@ from src.engine.reconciliation import reconcile_pending_ticks
 from src.engine.paper_portfolio import execute_paper_order, get_portfolio_summary
 from src.agents.trading_graph import run_trading_graph
 from src.agents.tools import calculate_technical_signals, get_model_return_forecast
+
+__all__ = ["sync_hourly_quant_cycle", "fetch_latest_confirmed_candle"]
 
 
 def fetch_latest_confirmed_candle(symbol: str = "BTCUSDT") -> Dict[str, Any]:
@@ -119,6 +136,13 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
         # 2. Record or Update MarketTick
         if existing:
             current_tick = existing
+            if force:
+                current_tick.market_regime = regime
+                current_tick.predicted_return_1h = pred_return
+                current_tick.predicted_price_1h = pred_price
+                current_tick.model_confidence = confidence
+                current_tick.features = signals_output
+                session.flush()
         else:
             current_tick = MarketTick(
                 timestamp=candle["timestamp"],
@@ -190,3 +214,12 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
 
         summary = get_portfolio_summary(session, candle["close"])
         return True, f"Recorded tick #{current_tick.id} at ${candle['close']:,.2f} ({decision} | Kelly: {kelly*100:.1f}%)", summary
+
+
+if __name__ == "__main__":
+    force_flag = "--force" in sys.argv
+    print(f"Triggering sync cycle (force={force_flag})...")
+    success, msg, summ = sync_hourly_quant_cycle(force=force_flag)
+    print(f"Status: {success} | Message: {msg}")
+    if summ:
+        print(f"Portfolio Summary: {summ}")
