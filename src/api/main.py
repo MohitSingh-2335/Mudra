@@ -1,7 +1,24 @@
 # src/api/main.py
 
+# Pre-load onnxruntime before numerical engines to prevent Windows OpenMP runtime collision (0xC0000005)
+try:
+    import onnxruntime  # noqa: F401
+except ImportError:
+    pass
+
 import os
 import sys
+from pathlib import Path
+
+# Ensure repository root is on sys.path
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+# Guard stdout reconfiguration against Windows CRT pipe corruption
+if hasattr(sys.stdout, "reconfigure") and sys.stdout.isatty():
+    sys.stdout.reconfigure(encoding="utf-8")
+
 from src.agents.market_analyst_agent import generate_market_commentary
 import joblib
 import pandas as pd
@@ -9,9 +26,6 @@ import numpy as np
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-
-# Ensure stdout handles UTF-8
-sys.stdout.reconfigure(encoding='utf-8')
 
 from config import (
     REGRESSOR_MODEL_PATH,
@@ -28,8 +42,12 @@ from src.api.schemas import (
     FeatureAttribution,
     FullAnalysisResponse,
     AgentTradeRequest,
-    AgentTradeResponse
+    AgentTradeResponse,
+    ReconciliationSummaryResponse,
+    PortfolioSummaryResponse,
 )
+
+__all__ = ["app", "lifespan", "models"]
 
 # Global model store for high-throughput serving
 models = {}
@@ -38,7 +56,7 @@ models = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Loads models and explainers into memory at startup."""
-    print("🚀 Initializing Mudra Production Inference Engine...")
+    print("[INIT] Initializing Mudra Production Inference Engine...")
     try:
         reg_model = joblib.load(REGRESSOR_MODEL_PATH)
         clf_model = joblib.load(CLASSIFIER_MODEL_PATH)
@@ -50,13 +68,13 @@ async def lifespan(app: FastAPI):
         models["regressor"] = reg_model
         models["classifier"] = clf_model
         models["explainer"] = get_tree_explainer(clf_model)
-        print("✅ Models and TreeSHAP explainer loaded successfully.")
+        print("[INIT] Models and TreeSHAP explainer loaded successfully.")
     except Exception as e:
-        print(f"🚨 Failed to load model artifacts: {e}")
+        print(f"[ERROR] Failed to load model artifacts: {e}")
         raise RuntimeError(f"Model initialization failure: {e}")
 
     yield
-    print("🛑 Shutting down Mudra Inference Engine...")
+    print("[SHUTDOWN] Shutting down Mudra Inference Engine...")
     models.clear()
 
 
@@ -192,7 +210,7 @@ async def run_agent_trade(req: AgentTradeRequest):
         )
 
 
-@app.get("/reconciliation/summary", tags=["Observability & Database"])
+@app.get("/reconciliation/summary", response_model=ReconciliationSummaryResponse, tags=["Observability & Database"])
 async def get_reconciliation_metrics(lookback_hours: int = 168):
     """Returns rolling delayed reconciliation accuracy metrics from Neon PostgreSQL."""
     from src.database.queries import get_reconciliation_kpis
@@ -205,7 +223,7 @@ async def get_reconciliation_metrics(lookback_hours: int = 168):
         )
 
 
-@app.get("/portfolio/summary", tags=["Observability & Database"])
+@app.get("/portfolio/summary", response_model=PortfolioSummaryResponse, tags=["Observability & Database"])
 async def get_portfolio_metrics(current_price: float = 83000.0):
     """Returns current forward paper portfolio snapshot and excess Alpha from Neon."""
     from src.database.queries import get_portfolio_kpis
