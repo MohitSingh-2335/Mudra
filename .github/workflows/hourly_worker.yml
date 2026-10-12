@@ -1,11 +1,7 @@
 name: Mudra 24/7 Hourly Quant Worker
 
 on:
-  schedule:
-    # Runs at 5 minutes past every UTC hour (e.g. 02:35 AM IST, 03:35 AM IST)
-    # Off-peak minute bypasses GitHub Actions minute-0 queue congestion
-    - cron: '5 * * * *'
-  workflow_dispatch:  # Enables manual 1-click execution in GitHub Actions UI
+  workflow_dispatch:  # Triggered autonomously 24/7 via cron-job.org high-availability API & manual execution
 
 concurrency:
   group: hourly-quant-worker
