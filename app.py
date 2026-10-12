@@ -100,59 +100,16 @@ def load_models():
 reg_model, clf_model, explainer_clf = load_models()
 
 
+from src.agents.tools import fetch_historical_candles
+
 # --- Cached Data Fetchers (TTL = 60s) ---
 @st.cache_data(ttl=60)
 def fetch_live_market_candles(symbol: str = "BTCUSDT") -> pd.DataFrame:
-    """Streams the latest 100 hourly candles from Binance Dedicated Vision (with Coinbase fallback)."""
-    # 1. Binance Dedicated Vision
+    """Streams the latest 100 confirmed closed hourly candles reusing shared tools fetcher."""
     try:
-        url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&limit=100"
-        r = requests.get(url, timeout=5)
-        if r.status_code == 200:
-            raw = r.json()
-            records = []
-            for c in raw:
-                records.append({
-                    "timestamp": pd.to_datetime(c[0], unit="ms", utc=True),
-                    "open": float(c[1]),
-                    "high": float(c[2]),
-                    "low": float(c[3]),
-                    "close": float(c[4]),
-                    "volume": float(c[5]),
-                    "taker_buy_ratio": round(float(c[9]) / float(c[5]), 4) if float(c[5]) > 0 else 0.5,
-                })
-            return pd.DataFrame(records)
+        return fetch_historical_candles(symbol=symbol, limit=100)
     except Exception:
-        pass
-
-    # 2. Coinbase Institutional Public Feed
-    try:
-        url = "https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=3600"
-        r = requests.get(url, headers={"User-Agent": "Mudra-Terminal/1.0"}, timeout=5)
-        if r.status_code == 200:
-            raw = r.json()[:100]
-            records = []
-            for c in reversed(raw):
-                records.append({
-                    "timestamp": pd.to_datetime(c[0], unit="s", utc=True),
-                    "low": float(c[1]),
-                    "high": float(c[2]),
-                    "open": float(c[3]),
-                    "close": float(c[4]),
-                    "volume": float(c[5]),
-                    "taker_buy_ratio": 0.50,
-                })
-            return pd.DataFrame(records)
-    except Exception:
-        pass
-
-    # 3. Local Parquet Fallback
-    if os.path.exists(FEATURED_BTC_DATA_PATH):
-        df_local = pd.read_csv(FEATURED_BTC_DATA_PATH)
-        df_local["timestamp"] = pd.to_datetime(df_local["timestamp"], utc=True)
-        return df_local.tail(100)
-
-    return pd.DataFrame()
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=60)
@@ -234,9 +191,18 @@ if st.sidebar.button("Refresh Terminal Feeds", use_container_width=True):
 st.sidebar.markdown("---")
 st.sidebar.subheader("Infrastructure Health")
 
-# Fetch live market data
+# Fetch live market data (strictly confirmed closed hourly candles)
 live_market_df = fetch_live_market_candles()
 current_price = float(live_market_df["close"].iloc[-1]) if not live_market_df.empty else 83000.0
+
+# Assess feed staleness / offline replay status
+is_stale_fallback = False
+stale_age_hours = 0.0
+if not live_market_df.empty:
+    latest_candle_ts = pd.to_datetime(live_market_df["timestamp"].iloc[-1], utc=True)
+    stale_age_hours = (datetime.now(timezone.utc) - latest_candle_ts).total_seconds() / 3600.0
+    if stale_age_hours > 3.0 or live_market_df.attrs.get("source") == "local_fallback":
+        is_stale_fallback = True
 
 # Fetch Neon cloud DB state
 db_state = fetch_cloud_database_state(current_price=current_price)
@@ -246,7 +212,13 @@ if db_state["db_ok"]:
 else:
     st.sidebar.error("**Neon Cloud:** Disconnected (SQLite test fallback)")
 
-st.sidebar.info("**24/7 Engine:** GitHub Actions Hourly Cron (`5 * * * *`)")
+if is_stale_fallback:
+    st.sidebar.warning(f"**Market Feed:** Offline Replay ({stale_age_hours:.0f}h lag)")
+elif not live_market_df.empty:
+    feed_src = str(live_market_df.attrs.get("source", "Live")).title()
+    st.sidebar.success(f"**Market Feed:** {feed_src} Confirmed Closed")
+else:
+    st.sidebar.error("**Market Feed:** Feed Offline")
 st.sidebar.markdown("---")
 st.sidebar.markdown(
     """
@@ -333,7 +305,8 @@ price_24h_ago = float(live_market_df["close"].iloc[-24]) if len(live_market_df) 
 delta_24h_pct = ((current_price - price_24h_ago) / price_24h_ago) * 100.0
 
 with kpi1:
-    st.metric("BTC Spot Price", f"${current_price:,.2f}", f"{delta_24h_pct:+.2f}% (24h)")
+    spot_label = "BTC Spot Price [OFFLINE REPLAY]" if is_stale_fallback else "BTC Spot Price"
+    st.metric(spot_label, f"${current_price:,.2f}", f"{delta_24h_pct:+.2f}% (24h)")
 
 with kpi2:
     audit = db_state["latest_audit"]
@@ -413,11 +386,15 @@ with tab1:
     )
 
     with st.expander("Python Microstructural Technical Analysis (20/50 EMA Ribbon & Order Flow)"):
+        if is_stale_fallback:
+            st.info(f"ℹ️ Technical chart displaying historical local data replay ({stale_age_hours:.0f}h lag).")
         candlestick_fig = create_tradingview_candlestick(live_market_df)
         st.plotly_chart(candlestick_fig, use_container_width=True)
 
     # Next-Hour Forecast Panel
     st.markdown("### Next-Hour Model Forecast Breakdown")
+    if is_stale_fallback:
+        st.warning(f"⚠️ Live market feed unavailable. Model forecast displaying historical local replay data ({stale_age_hours:.0f}h lag). Live hourly predictions are paused.")
     f_col1, f_col2, f_col3, f_col4, f_col5 = st.columns(5)
 
     if not live_market_df.empty and reg_model:
@@ -470,7 +447,9 @@ with tab1:
             except Exception:
                 pass
 
-        if not cleared_hurdle:
+        if is_stale_fallback:
+            direction_badge = f"{direction_label} [OFFLINE REPLAY]"
+        elif not cleared_hurdle:
             direction_badge = "SIDEWAYS (CHOP)"
         elif direction_label == "UP":
             direction_badge = "BULLISH (UP)"
@@ -913,6 +892,8 @@ with tab5:
     st.markdown("---")
     st.markdown("#### Live TreeSHAP Shapley Factor Attribution")
     st.caption("Exact mathematical feature contributions pushing the probability UP (Bullish) or DOWN (Bearish).")
+    if is_stale_fallback:
+        st.warning("⚠️ Live market feed unavailable. TreeSHAP factor attributions evaluated on historical replay data.")
 
     if not live_market_df.empty and explainer_clf:
         recent_candle = live_market_df.iloc[-1]
