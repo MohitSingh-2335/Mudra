@@ -8,37 +8,80 @@
 # benchmark from 05_PHASE1_BACKTESTING_REPORT.md), so results are directly
 # comparable.
 #
-# Install first:
+# Install first (optional foundation research dependency):
 #   pip install chronos-forecasting torch
-#
-# Run locally on CPU for this first pass (small eval set, no training) or
-# set DEVICE="cuda" if you have a GPU / are in Colab.
 
+import sys
+from pathlib import Path
+from typing import Any, List, Optional
+
+# Guard project root resolution for standalone CLI execution
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+
+import os
 import numpy as np
 import pandas as pd
-from chronos import Chronos2Pipeline
+
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    torch = None  # type: ignore[assignment]
+    TORCH_AVAILABLE = False
+
+try:
+    from chronos import Chronos2Pipeline
+    CHRONOS_AVAILABLE = True
+except ImportError:
+    Chronos2Pipeline = None  # type: ignore[assignment]
+    CHRONOS_AVAILABLE = False
 
 from src.data_preprocessing import load_and_clean_data
+from config import BTCUSDT_1H_CSV
 
 CONTEXT_LEN = 512   # hours of history fed to the model per forecast
 N_EVAL = 500        # held-out points to evaluate — keep small for a first CPU pass
-DEVICE = "cpu"       # "cuda" if available
 
 
-def main():
-    df = load_and_clean_data('data/raw/BTCUSDT-1H.csv').reset_index(drop=True)
+def get_device() -> str:
+    """Detects available hardware acceleration for foundation model evaluation."""
+    if TORCH_AVAILABLE and torch is not None and torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+
+def main() -> None:
+    print("[INFO] Initializing Amazon Chronos-2 Zero-Shot Foundation Benchmark...")
+    if not CHRONOS_AVAILABLE:
+        print("[ERROR] Optional dependency 'chronos-forecasting' is not installed in the active environment.")
+        print("[INFO] To run zero-shot foundation model experiments, install:")
+        print("       pip install chronos-forecasting torch")
+        return
+
+    device = get_device()
+    print(f"[INFO] Hardware Acceleration Runtime: {device.upper()}")
+
+    if not os.path.exists(BTCUSDT_1H_CSV):
+        raise FileNotFoundError(f"[ERROR] Raw candlestick dataset not found at '{BTCUSDT_1H_CSV}'.")
+
+    df = load_and_clean_data(BTCUSDT_1H_CSV).reset_index(drop=True)
     split_idx = int(len(df) * 0.8)
     test_df = df.iloc[split_idx:].reset_index(drop=True)
 
     eval_start = max(CONTEXT_LEN, len(test_df) - N_EVAL)
     eval_indices = list(range(eval_start, len(test_df)))
 
-    print("Loading Chronos-2 (zero-shot, no training)...")
-    pipeline = Chronos2Pipeline.from_pretrained("amazon/chronos-2", device_map=DEVICE)
+    print("[INFO] Loading Chronos-2 weights (amazon/chronos-2, zero-shot)...")
+    pipeline = Chronos2Pipeline.from_pretrained("amazon/chronos-2", device_map=device)
 
     actuals, preds, prev_closes = [], [], []
 
-    print(f"Running {len(eval_indices)} rolling zero-shot forecasts (context={CONTEXT_LEN}h each)...")
+    print(f"[INFO] Running {len(eval_indices)} rolling zero-shot forecasts (context={CONTEXT_LEN}h each)...")
     for n, i in enumerate(eval_indices):
         context = test_df.iloc[i - CONTEXT_LEN:i]
         context_df = pd.DataFrame({
@@ -60,7 +103,7 @@ def main():
         prev_closes.append(test_df['close'].iloc[i - 1])
 
         if n % 50 == 0:
-            print(f"  {n}/{len(eval_indices)} done...")
+            print(f"[PROGRESS] {n}/{len(eval_indices)} rolling horizons completed...")
 
     actuals = np.array(actuals)
     preds = np.array(preds)
@@ -76,7 +119,7 @@ def main():
     dir_acc = (pred_dir == actual_dir).mean() * 100
 
     print("\n" + "=" * 60)
-    print("ZERO-SHOT CHRONOS-2 RESULTS")
+    print("[BENCHMARK] ZERO-SHOT CHRONOS-2 RESULTS")
     print("=" * 60)
     print(f"Eval points          : {len(eval_indices)}")
     print(f"RMSE (Chronos-2)      : {rmse:.4f}")
@@ -90,9 +133,10 @@ def main():
         'timestamp': test_df['timestamp'].iloc[eval_indices].values,
         'actual': actuals, 'predicted': preds, 'prev_close': prev_closes,
     })
+    Path('data/results').mkdir(parents=True, exist_ok=True)
     out.to_csv('data/results/zero_shot_chronos_results.csv', index=False)
-    print("\nSaved: data/results/zero_shot_chronos_results.csv")
+    print("[SUCCESS] Zero-shot Chronos-2 results saved to data/results/zero_shot_chronos_results.csv")
 
 
 if __name__ == '__main__':
-    main()
+    main()
