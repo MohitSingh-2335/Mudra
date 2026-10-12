@@ -76,33 +76,66 @@ def get_fear_greed_for_date(
     return NEUTRAL_DEFAULT
 
 
-def merge_fear_greed(df: pd.DataFrame, timestamp_col: str = "timestamp") -> pd.DataFrame:
+def merge_fear_greed(
+    df: pd.DataFrame,
+    timestamp_col: str = "timestamp",
+    fng_df: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
     """
-    Broadcasts daily Fear & Greed sentiment across all hourly candles on that date.
-    Gracefully fails soft to NEUTRAL_DEFAULT (50.0) if external API is unreachable.
+    Broadcasts daily Fear & Greed sentiment across hourly candles preserving temporal causality.
+    At any hourly timestamp T on calendar date D, the latest fully completed sentiment index is from date D-1.
+    Forward-fills past observations across gaps, and fills pre-observation historical dates with NEUTRAL_DEFAULT (50.0).
+    Never backward-fills future observations into earlier dates.
 
     Args:
         df (pd.DataFrame): Candlestick DataFrame with timestamp column.
         timestamp_col (str): Column name containing timestamps.
+        fng_df (Optional[pd.DataFrame]): Optional pre-fetched Fear & Greed DataFrame with 'date' and 'fng_value'.
+                                         If None, fetches historical index from Alternative.me API.
 
     Returns:
-        pd.DataFrame: Merged DataFrame with 'fng_value' column.
+        pd.DataFrame: Merged DataFrame with causal 'fng_value' column.
     """
-    fng_df = fetch_fear_greed_index()
     df = df.copy()
-    df["_date"] = pd.to_datetime(df[timestamp_col]).dt.date
 
-    if fng_df is None or fng_df.empty:
-        df["fng_value"] = NEUTRAL_DEFAULT
-        return df.drop(columns=["_date"])
+    # Parse timestamps and determine the latest fully completed UTC calendar date (D - 1 day)
+    ts_series = pd.to_datetime(df[timestamp_col])
+    if ts_series.dt.tz is not None:
+        ts_utc = ts_series.dt.tz_convert("UTC")
+    else:
+        ts_utc = ts_series.dt.tz_localize("UTC")
+    df["_target_date"] = (ts_utc.dt.floor("D") - pd.Timedelta(days=1)).dt.date
 
     # Prevent duplicate column suffixes (_x, _y) if column already exists
     if "fng_value" in df.columns:
         df = df.drop(columns=["fng_value"])
 
-    df = df.merge(fng_df[["date", "fng_value"]], left_on="_date", right_on="date", how="left")
-    df["fng_value"] = df["fng_value"].fillna(NEUTRAL_DEFAULT)
-    return df.drop(columns=["_date", "date"])
+    if fng_df is None:
+        try:
+            fng_df = fetch_fear_greed_index()
+        except Exception as e:
+            print(f"[WARNING] fear_greed_agent fetch exception ({e}) — falling back to neutral default.")
+            fng_df = None
+
+    if fng_df is None or fng_df.empty:
+        df["fng_value"] = NEUTRAL_DEFAULT
+        return df.drop(columns=["_target_date"])
+
+    fng_df = fng_df.copy()
+    if not pd.api.types.is_datetime64_any_dtype(fng_df["date"]):
+        fng_df["date"] = pd.to_datetime(fng_df["date"]).dt.date
+    if "fng_value" in fng_df.columns:
+        fng_df["fng_value"] = pd.to_numeric(fng_df["fng_value"], errors="coerce")
+
+    # Sort chronologically, drop duplicates keeping last observation deterministically
+    fng_df = fng_df.sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
+
+    df = df.merge(fng_df[["date", "fng_value"]], left_on="_target_date", right_on="date", how="left")
+
+    # Forward-fill past observations forward, but fill dates before the first observation with NEUTRAL_DEFAULT
+    df["fng_value"] = df["fng_value"].ffill().fillna(NEUTRAL_DEFAULT)
+
+    return df.drop(columns=["_target_date", "date"], errors="ignore")
 
 
 if __name__ == "__main__":
