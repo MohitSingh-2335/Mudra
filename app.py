@@ -23,6 +23,7 @@ if str(ROOT_DIR) not in sys.path:
 if hasattr(sys.stdout, "reconfigure") and sys.stdout.isatty():
     sys.stdout.reconfigure(encoding="utf-8")
 
+from typing import Tuple, Dict, Any, Optional
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -98,6 +99,131 @@ def load_models():
 
 
 reg_model, clf_model, explainer_clf = load_models()
+
+
+def check_feed_staleness(df: pd.DataFrame, max_lag_hours: float = 3.0) -> Tuple[bool, float]:
+    """
+    Evaluates whether the market candle DataFrame is a stale fallback or offline replay.
+    Returns (is_stale, stale_age_hours).
+    """
+    if df is None or df.empty:
+        return True, 0.0
+    latest_candle_ts = pd.to_datetime(df["timestamp"].iloc[-1], utc=True)
+    stale_age_hours = max(0.0, (datetime.now(timezone.utc) - latest_candle_ts).total_seconds() / 3600.0)
+    if stale_age_hours > max_lag_hours or df.attrs.get("source") == "local_fallback":
+        return True, stale_age_hours
+    return False, stale_age_hours
+
+
+def generate_live_forecast(
+    live_df: pd.DataFrame,
+    reg_model: Any,
+    clf_model: Any,
+    is_stale: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """
+    Generates next-hour regression and classification forecast strictly when the market feed
+    is fresh and confirmed closed. When is_stale is True, skips inference to prevent
+    presenting stale replay data as live predictions.
+    """
+    if is_stale or live_df is None or live_df.empty or reg_model is None:
+        return None
+
+    recent_candle = live_df.iloc[-1]
+    current_price = float(recent_candle["close"])
+    spread_pct = ((recent_candle["high"] - recent_candle["low"]) / recent_candle["close"]) * 100.0
+    taker = float(recent_candle.get("taker_buy_ratio", 0.5))
+    hl_ratio = float(recent_candle["high"] / recent_candle["low"]) if recent_candle["low"] > 0 else 1.0
+
+    # Build feature vector using shared extract_features_for_inference for training parity
+    from src.feature_engineering import extract_features_for_inference
+    if len(live_df) >= 35:
+        sample_input = extract_features_for_inference(live_df)
+    else:
+        sample_input = {col: 0.0 for col in REGRESSOR_FEATURES}
+
+    input_df = pd.DataFrame([{col: sample_input[col] for col in REGRESSOR_FEATURES}], columns=REGRESSOR_FEATURES)
+
+    # 1. Regressor Output (Raw decimal fraction: 0.0035 -> +0.35%)
+    try:
+        raw_pred_ret = float(reg_model.predict(input_df)[0])
+    except Exception:
+        raw_pred_ret = 0.0
+
+    pred_ret_pct = raw_pred_ret * 100.0
+    pred_dollar_move = current_price * raw_pred_ret
+    pred_target = current_price + pred_dollar_move
+    cleared_hurdle = abs(pred_ret_pct) >= 0.05
+
+    # 2. Classifier Output (Direction: 1 = UP, 0 = DOWN)
+    prob_up = 50.0
+    prob_down = 50.0
+    direction_label = "UP" if pred_ret_pct >= 0 else "DOWN"
+    if clf_model:
+        sample_clf = {col: sample_input.get(col, 0.0) for col in CLASSIFIER_FEATURES}
+        sample_clf["close_lag_1"] = float(recent_candle["close"])
+        sample_clf["high_low_ratio"] = hl_ratio
+        clf_df = pd.DataFrame([sample_clf], columns=CLASSIFIER_FEATURES)
+        try:
+            move_code = int(clf_model.predict(clf_df)[0])
+            direction_label = "UP" if move_code == 1 else "DOWN"
+            if hasattr(clf_model, "predict_proba"):
+                probs = clf_model.predict_proba(clf_df)[0]
+                prob_down = float(probs[0]) * 100.0
+                prob_up = float(probs[1]) * 100.0
+        except Exception:
+            pass
+
+    if not cleared_hurdle:
+        direction_badge = "SIDEWAYS (CHOP)"
+    elif direction_label == "UP":
+        direction_badge = "BULLISH (UP)"
+    else:
+        direction_badge = "BEARISH (DOWN)"
+
+    return {
+        "raw_pred_ret": raw_pred_ret,
+        "pred_ret_pct": pred_ret_pct,
+        "pred_dollar_move": pred_dollar_move,
+        "pred_target": pred_target,
+        "cleared_hurdle": cleared_hurdle,
+        "direction_label": direction_label,
+        "direction_badge": direction_badge,
+        "prob_up": prob_up,
+        "prob_down": prob_down,
+        "taker": taker,
+        "spread_pct": spread_pct,
+    }
+
+
+def generate_live_shap_attribution(
+    live_df: pd.DataFrame,
+    explainer_clf: Any,
+    is_stale: bool = False,
+    top_n: int = 4,
+) -> Optional[Tuple[float, list, list, Any]]:
+    """
+    Computes TreeSHAP factor attributions strictly when the market feed is fresh.
+    When is_stale is True, skips calculation to prevent presenting stale explanations as live.
+    """
+    if is_stale or live_df is None or live_df.empty or explainer_clf is None:
+        return None
+
+    recent_candle = live_df.iloc[-1]
+    sample_clf = {col: 0.0 for col in CLASSIFIER_FEATURES}
+    sample_clf["taker_buy_ratio"] = float(recent_candle.get("taker_buy_ratio", 0.5))
+    if "volume" in recent_candle:
+        sample_clf["volume"] = float(recent_candle["volume"])
+    if "high" in recent_candle and "low" in recent_candle and recent_candle["low"] > 0:
+        sample_clf["high_low_ratio"] = float(recent_candle["high"] / recent_candle["low"])
+    if "close" in recent_candle:
+        sample_clf["close_lag_1"] = float(recent_candle["close"])
+
+    clf_input_df = pd.DataFrame([{col: sample_clf[col] for col in CLASSIFIER_FEATURES}], columns=CLASSIFIER_FEATURES)
+    try:
+        return explain_single_prediction(explainer_clf, clf_input_df, top_n=top_n)
+    except Exception:
+        return None
 
 
 from src.agents.tools import fetch_historical_candles
@@ -196,13 +322,7 @@ live_market_df = fetch_live_market_candles()
 current_price = float(live_market_df["close"].iloc[-1]) if not live_market_df.empty else 83000.0
 
 # Assess feed staleness / offline replay status
-is_stale_fallback = False
-stale_age_hours = 0.0
-if not live_market_df.empty:
-    latest_candle_ts = pd.to_datetime(live_market_df["timestamp"].iloc[-1], utc=True)
-    stale_age_hours = (datetime.now(timezone.utc) - latest_candle_ts).total_seconds() / 3600.0
-    if stale_age_hours > 3.0 or live_market_df.attrs.get("source") == "local_fallback":
-        is_stale_fallback = True
+is_stale_fallback, stale_age_hours = check_feed_staleness(live_market_df)
 
 # Fetch Neon cloud DB state
 db_state = fetch_cloud_database_state(current_price=current_price)
@@ -394,78 +514,43 @@ with tab1:
     # Next-Hour Forecast Panel
     st.markdown("### Next-Hour Model Forecast Breakdown")
     if is_stale_fallback:
-        st.warning(f"⚠️ Live market feed unavailable. Model forecast displaying historical local replay data ({stale_age_hours:.0f}h lag). Live hourly predictions are paused.")
-    f_col1, f_col2, f_col3, f_col4, f_col5 = st.columns(5)
-
-    if not live_market_df.empty and reg_model:
-        recent_candle = live_market_df.iloc[-1]
-        spread_pct = ((recent_candle["high"] - recent_candle["low"]) / recent_candle["close"]) * 100.0
-        taker = recent_candle.get("taker_buy_ratio", 0.5)
-        hl_ratio = float(recent_candle["high"] / recent_candle["low"]) if recent_candle["low"] > 0 else 1.0
-
-        ts = pd.to_datetime(recent_candle["timestamp"], utc=True)
-        h = int(ts.hour)
-        d = int(ts.day)
-        w = int(ts.weekday() if hasattr(ts, "weekday") else ts.dayofweek)
-
-        # Build feature vector using shared extract_features_for_inference for training parity
-        from src.feature_engineering import extract_features_for_inference
-        if len(live_market_df) >= 35:
-            sample_input = extract_features_for_inference(live_market_df)
-        else:
-            sample_input = {col: 0.0 for col in REGRESSOR_FEATURES}
-
-        input_df = pd.DataFrame([{col: sample_input[col] for col in REGRESSOR_FEATURES}], columns=REGRESSOR_FEATURES)
-
-        # 1. Regressor Output (Raw decimal fraction: 0.0035 -> +0.35%)
-        try:
-            raw_pred_ret = float(reg_model.predict(input_df)[0])
-        except Exception:
-            raw_pred_ret = 0.0
-
-        pred_ret_pct = raw_pred_ret * 100.0
-        pred_dollar_move = current_price * raw_pred_ret
-        pred_target = current_price + pred_dollar_move
-        cleared_hurdle = abs(pred_ret_pct) >= 0.05
-
-        # 2. Classifier Output (Direction: 1 = UP, 0 = DOWN)
-        prob_up = 50.0
-        prob_down = 50.0
-        direction_label = "UP" if pred_ret_pct >= 0 else "DOWN"
-        if clf_model:
-            sample_clf = {col: sample_input.get(col, 0.0) for col in CLASSIFIER_FEATURES}
-            sample_clf["close_lag_1"] = float(recent_candle["close"])
-            sample_clf["high_low_ratio"] = hl_ratio
-            clf_df = pd.DataFrame([sample_clf], columns=CLASSIFIER_FEATURES)
-            try:
-                move_code = int(clf_model.predict(clf_df)[0])
-                direction_label = "UP" if move_code == 1 else "DOWN"
-                if hasattr(clf_model, "predict_proba"):
-                    probs = clf_model.predict_proba(clf_df)[0]
-                    prob_down = float(probs[0]) * 100.0
-                    prob_up = float(probs[1]) * 100.0
-            except Exception:
-                pass
-
-        if is_stale_fallback:
-            direction_badge = f"{direction_label} [OFFLINE REPLAY]"
-        elif not cleared_hurdle:
-            direction_badge = "SIDEWAYS (CHOP)"
-        elif direction_label == "UP":
-            direction_badge = "BULLISH (UP)"
-        else:
-            direction_badge = "BEARISH (DOWN)"
-
-        with f_col1:
-            st.metric("Predicted Direction", direction_badge, f"Up Prob: {prob_up:.1f}%")
-        with f_col2:
-            st.metric("Expected 1h Move", f"{pred_ret_pct:+.3f}%", "Cleared 0.05% Hurdle [PASS]" if cleared_hurdle else "Below Fee Hurdle [SKIP]")
-        with f_col3:
-            st.metric("Target Close Price", f"${pred_target:,.2f}", f"${pred_dollar_move:+,.2f}")
-        with f_col4:
-            st.metric("Taker Buy Ratio", f"{taker:.4f}", "Order Flow: " + ("Buyer Pressure (+)" if taker > 0.52 else ("Seller Pressure (-)" if taker < 0.48 else "Balanced (0)")))
-        with f_col5:
-            st.metric("Hourly Volatility Spread", f"{spread_pct:.2f}%", "Regime: " + ("Extreme Flush [ALERT]" if spread_pct > 3.8 else "Controlled [NORMAL]"))
+        st.warning(
+            f"⚠️ Live market feed unavailable (offline replay active, {stale_age_hours:.0f}h lag). "
+            "Next-hour live model forecast inference is paused to prevent misleading predictions."
+        )
+    else:
+        forecast_result = generate_live_forecast(
+            live_df=live_market_df,
+            reg_model=reg_model,
+            clf_model=clf_model,
+            is_stale=is_stale_fallback,
+        )
+        if forecast_result:
+            f_col1, f_col2, f_col3, f_col4, f_col5 = st.columns(5)
+            with f_col1:
+                st.metric("Predicted Direction", forecast_result["direction_badge"], f"Up Prob: {forecast_result['prob_up']:.1f}%")
+            with f_col2:
+                st.metric(
+                    "Expected 1h Move",
+                    f"{forecast_result['pred_ret_pct']:+.3f}%",
+                    "Cleared 0.05% Hurdle [PASS]" if forecast_result["cleared_hurdle"] else "Below Fee Hurdle [SKIP]",
+                )
+            with f_col3:
+                st.metric("Target Close Price", f"${forecast_result['pred_target']:,.2f}", f"${forecast_result['pred_dollar_move']:+,.2f}")
+            with f_col4:
+                taker = forecast_result["taker"]
+                st.metric(
+                    "Taker Buy Ratio",
+                    f"{taker:.4f}",
+                    "Order Flow: " + ("Buyer Pressure (+)" if taker > 0.52 else ("Seller Pressure (-)" if taker < 0.48 else "Balanced (0)")),
+                )
+            with f_col5:
+                spread_pct = forecast_result["spread_pct"]
+                st.metric(
+                    "Hourly Volatility Spread",
+                    f"{spread_pct:.2f}%",
+                    "Regime: " + ("Extreme Flush [ALERT]" if spread_pct > 3.8 else "Controlled [NORMAL]"),
+                )
 
 
 # -------------------------------------------------------------------------------------
@@ -893,23 +978,19 @@ with tab5:
     st.markdown("#### Live TreeSHAP Shapley Factor Attribution")
     st.caption("Exact mathematical feature contributions pushing the probability UP (Bullish) or DOWN (Bearish).")
     if is_stale_fallback:
-        st.warning("⚠️ Live market feed unavailable. TreeSHAP factor attributions evaluated on historical replay data.")
-
-    if not live_market_df.empty and explainer_clf:
-        recent_candle = live_market_df.iloc[-1]
-        sample_clf = {col: 0.0 for col in CLASSIFIER_FEATURES}
-        sample_clf["taker_buy_ratio"] = float(recent_candle.get("taker_buy_ratio", 0.5))
-        if "volume" in recent_candle:
-            sample_clf["volume"] = float(recent_candle["volume"])
-        if "high" in recent_candle and "low" in recent_candle and recent_candle["low"] > 0:
-            sample_clf["high_low_ratio"] = float(recent_candle["high"] / recent_candle["low"])
-        if "close" in recent_candle:
-            sample_clf["close_lag_1"] = float(recent_candle["close"])
-
-        clf_input_df = pd.DataFrame([{col: sample_clf[col] for col in CLASSIFIER_FEATURES}], columns=CLASSIFIER_FEATURES)
-
-        try:
-            base_val, top_pos, top_neg, fig_shap = explain_single_prediction(explainer_clf, clf_input_df, top_n=4)
+        st.warning(
+            "⚠️ Live market feed unavailable (offline replay active). "
+            "Live TreeSHAP factor attribution inference is paused to prevent presenting stale explanations as live."
+        )
+    else:
+        shap_res = generate_live_shap_attribution(
+            live_df=live_market_df,
+            explainer_clf=explainer_clf,
+            is_stale=is_stale_fallback,
+            top_n=4,
+        )
+        if shap_res:
+            base_val, top_pos, top_neg, fig_shap = shap_res
             sh_col1, sh_col2 = st.columns(2)
             with sh_col1:
                 st.markdown("**Bullish Contributors (Pushed Up):**")
@@ -919,5 +1000,5 @@ with tab5:
                 st.markdown("**Bearish Contributors (Pushed Down):**")
                 for driver in top_neg:
                     st.markdown(f"- **`{driver['feature']}`**: SHAP value `{driver['shap']:.4f}`")
-        except Exception as exc:
+        else:
             st.info("[INFO] TreeSHAP factor attributions ready on next candle close.")
