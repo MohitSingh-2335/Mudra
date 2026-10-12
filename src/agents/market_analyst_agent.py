@@ -1,17 +1,36 @@
 # src/agents/market_analyst_agent.py
+"""
+Mudra Market Analyst Agent.
 
-import os
-import sys
+Synthesizes quantitative ML forecasts, local TreeSHAP feature attributions,
+and ChromaDB macro domain knowledge into structured institutional market commentary.
+Exposes core LLM gateway utilities for Node 1 (Strategist) and Node 2 (Risk Critic).
+"""
+
 import json
+import logging
+import os
 import re
-sys.stdout.reconfigure(encoding='utf-8')
+import sys
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 # Silence ChromaDB internal telemetry
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
+logging.getLogger("chromadb.telemetry").setLevel(logging.ERROR)
+logging.getLogger("chromadb.telemetry.posthog").setLevel(logging.ERROR)
 
-from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+
+from src.agents.rag_agent import get_rag_agent
 
 # Load environment variables if present
 load_dotenv('.env')
@@ -169,7 +188,7 @@ def generate_market_commentary(
         import google.generativeai as genai
         genai.configure(api_key=api_key)
 
-        model = genai.GenerativeModel("gemini-3.8-flash")
+        model = genai.GenerativeModel("gemini-1.5-flash")
 
         pos_str = ", ".join([f"{d['feature']}: SHAP={d['shap']:+.4f}" for d in top_pos_drivers]) or "None"
         neg_str = ", ".join([f"{d['feature']}: SHAP={d['shap']:+.4f}" for d in top_neg_drivers]) or "None"
@@ -209,6 +228,14 @@ Do not include any explanation outside the JSON object.
         response = model.generate_content(prompt)
         cleaned_json = _clean_json_response(response.text)
         report_data = json.loads(cleaned_json)
+
+        # Defensive clamping and normalization
+        valid_theses = {"STRONG BULLISH", "MODERATE BULLISH", "NEUTRAL", "MODERATE BEARISH", "STRONG BEARISH"}
+        raw_thesis = str(report_data.get("trade_thesis", "NEUTRAL")).upper().strip()
+        report_data["trade_thesis"] = raw_thesis if raw_thesis in valid_theses else "NEUTRAL"
+        raw_conv = report_data.get("conviction_score", 5)
+        report_data["conviction_score"] = max(1, min(10, int(raw_conv)))
+
         return MarketAnalystReport(**report_data)
 
     except Exception as e:
@@ -220,7 +247,7 @@ Do not include any explanation outside the JSON object.
 
 
 if __name__ == '__main__':
-    print("🤖 Testing Market Analyst Agent...")
+    print("[INFO] Testing Market Analyst Agent...")
     sample_pos = [{"feature": "taker_buy_ratio", "shap": 0.0932, "value": 0.65}, {"feature": "return_mean_6h", "shap": 0.0711, "value": 0.008}]
     sample_neg = [{"feature": "volume_lag_1", "shap": -0.0409, "value": 1200.0}]
 
@@ -228,15 +255,16 @@ if __name__ == '__main__':
         current_price=62904.0,
         pred_price=63150.0,
         pred_return=0.0039,
-        pred_move_text="Upward 📈",
+        pred_move_text="Upward",
         top_pos_drivers=sample_pos,
         top_neg_drivers=sample_neg
     )
 
-    print(f"\n📊 Thesis: {report.trade_thesis} (Conviction: {report.conviction_score}/10)")
-    print(f"📝 Executive Summary:\n   {report.executive_summary}")
-    print(f"\n🔬 Quant Driver Analysis:\n   {report.quantitative_driver_analysis}")
-    print(f"\n🌐 Macro Context:\n   {report.macro_market_context}")
-    print("\n⚠️ Key Risks:")
+    print(f"\n[REPORT] Thesis: {report.trade_thesis} (Conviction: {report.conviction_score}/10)")
+    print(f"[EXECUTIVE] Executive Summary:\n   {report.executive_summary}")
+    print(f"\n[ANALYSIS] Quant Driver Analysis:\n   {report.quantitative_driver_analysis}")
+    print(f"\n[MACRO] Macro Context:\n   {report.macro_market_context}")
+    print("\n[RISKS] Key Risks:")
     for r in report.key_risks:
         print(f"   - {r}")
+
