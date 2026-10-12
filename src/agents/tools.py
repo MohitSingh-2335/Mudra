@@ -27,20 +27,31 @@ from src.feature_engineering import extract_features_for_inference
 
 def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LIMIT) -> pd.DataFrame:
     """
-    Fetches the latest sequence of hourly candlesticks for rolling indicator computation.
+    Fetches the latest sequence of confirmed closed hourly candlesticks for rolling indicator computation.
+    Verifies candle closure via provider timestamps to prevent active unclosed bars from entering inference.
     Primary: Binance Dedicated Vision.
     Fallback 1: Coinbase Institutional Public Feed.
     Fallback 2: Local historical dataset.
     """
     # 1. Binance Dedicated Vision
     try:
-        url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&limit={limit}"
+        # Request extra candles to account for dropping the actively forming candle
+        url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&limit={limit + 2}"
         resp = requests.get(url, timeout=5)
         if resp.status_code == 200:
             klines = resp.json()
-            if len(klines) >= 35:
+            # Verify closure by timestamp: close_time_ms (index 6) must have elapsed
+            now_ms = datetime.now(timezone.utc).timestamp() * 1000.0
+            closed_klines = [c for c in klines if float(c[6]) <= now_ms]
+            # Safety fallback for clock skew: exclude the final active forming kline
+            if len(closed_klines) == len(klines) and len(klines) > 1:
+                closed_klines = klines[:-1]
+
+            if len(closed_klines) >= 35:
+                # Take exactly the requested lookback history preserving ascending chronological order
+                selected_klines = closed_klines[-limit:]
                 records = []
-                for c in klines:
+                for c in selected_klines:
                     vol = float(c[5])
                     taker_vol = float(c[9])
                     taker_ratio = float(taker_vol / vol) if vol > 0 else 0.50
@@ -65,10 +76,17 @@ def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LI
         resp = requests.get(cb_url, headers={"User-Agent": "Mudra-Quant/1.0"}, timeout=5)
         if resp.status_code == 200:
             raw = resp.json()
-            if len(raw) >= 35:
-                raw_subset = list(reversed(raw[:limit]))
+            # Verify closure by timestamp: bucket end time (c[0] + 3600s) must have elapsed
+            now_sec = datetime.now(timezone.utc).timestamp()
+            closed_candles = [c for c in raw if (float(c[0]) + 3600.0) <= now_sec]
+            if len(closed_candles) == len(raw) and len(raw) > 1:
+                closed_candles = raw[1:]
+
+            if len(closed_candles) >= 35:
+                # Coinbase returns descending (newest first); select latest `limit` then reverse for ascending order
+                selected_candles = list(reversed(closed_candles[:limit]))
                 records = []
-                for c in raw_subset:
+                for c in selected_candles:
                     records.append({
                         "timestamp": pd.to_datetime(c[0], unit="s", utc=True),
                         "low": float(c[1]),
@@ -76,7 +94,7 @@ def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LI
                         "open": float(c[3]),
                         "close": float(c[4]),
                         "volume": float(c[5]),
-                        "number_of_trades": 10000,
+                        "number_of_trades": None,  # Coinbase does not report trade count; do not fabricate
                         "taker_buy_ratio": 0.50,
                     })
                 return pd.DataFrame(records)
@@ -105,10 +123,13 @@ def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LI
 def get_live_market_data(symbol: str = "BTCUSDT") -> Dict[str, Any]:
     """
     Fetches the latest live market candlestick and order-flow telemetry for the target cryptocurrency,
-    including the historical sequence of candles required for rolling indicator parity.
+    including the historical sequence of confirmed closed candles required for rolling indicator parity.
     """
     df_candles = fetch_historical_candles(symbol=symbol, limit=LIVE_FETCH_LIMIT)
     latest = df_candles.iloc[-1]
+
+    raw_trades = latest.get("number_of_trades")
+    trades_val = int(raw_trades) if pd.notna(raw_trades) and raw_trades is not None else None
 
     return {
         "symbol": symbol,
@@ -118,7 +139,7 @@ def get_live_market_data(symbol: str = "BTCUSDT") -> Dict[str, Any]:
         "low": float(latest["low"]),
         "volume": float(latest["volume"]),
         "taker_buy_ratio": float(latest.get("taker_buy_ratio", 0.50)),
-        "number_of_trades": int(latest.get("number_of_trades", 10000)),
+        "number_of_trades": trades_val,
         "timestamp": latest.get("timestamp"),
         "source": "Market Data Feed with HistoricalParity",
         "status": "online",
@@ -132,7 +153,7 @@ def calculate_technical_signals(
     high: Optional[float] = None,
     low: Optional[float] = None,
     volume: Optional[float] = None,
-    taker_buy_ratio: float = 0.50,
+    taker_buy_ratio: Optional[float] = None,
     open_price: Optional[float] = None,
     timestamp: Optional[Union[str, datetime]] = None,
     candles: Optional[Union[pd.DataFrame, List[Dict[str, Any]]]] = None,
@@ -141,6 +162,7 @@ def calculate_technical_signals(
     """
     Computes technical and microstructural indicators with strict training parity.
     Extracts all 26 regressor and 39 classifier features from historical candle sequences.
+    Preserves observed taker_buy_ratio in candles unless an explicit override is provided.
     """
     # 1. Resolve Candlestick Sequence
     if candles is not None:
@@ -166,8 +188,11 @@ def calculate_technical_signals(
             candles_df.at[last_idx, "volume"] = float(volume)
         if open_price is not None and open_price > 0:
             candles_df.at[last_idx, "open"] = float(open_price)
+        # Preserve observed ratio: only overwrite when an explicit ratio is supplied
         if taker_buy_ratio is not None:
             candles_df.at[last_idx, "taker_buy_ratio"] = float(taker_buy_ratio)
+        elif "taker_buy_ratio" not in candles_df.columns:
+            candles_df["taker_buy_ratio"] = 0.50
         if timestamp is not None:
             candles_df.at[last_idx, "timestamp"] = pd.to_datetime(timestamp)
 
