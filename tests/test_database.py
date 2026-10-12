@@ -18,6 +18,7 @@ from src.database.models import (
 from src.database.connection import init_db
 from src.engine.reconciliation import reconcile_pending_ticks, get_reconciliation_summary
 from src.engine.paper_portfolio import execute_paper_order, get_portfolio_summary, INITIAL_CAPITAL_USD
+from src.api.schemas import ReconciliationSummaryResponse, PortfolioSummaryResponse
 
 
 @pytest.fixture
@@ -356,3 +357,169 @@ def test_paper_portfolio_full_lifecycle(in_memory_db):
     summary = get_portfolio_summary(session, 63000.0)
     assert summary["total_trades"] == 2
     assert summary["cash_balance"] > 10045.0
+    assert summary["current_btc_price"] == 63000.0
+    assert summary["btc_position_value_usd"] == 0.0
+    assert summary["total_equity_usd"] == round(summary["cash_balance"] + summary["btc_position_value_usd"], 2)
+    assert summary["realized_pnl_usd"] > 40.0
+    assert summary["total_fees_usd"] > 0.80  # Both buy and sell fees
+
+    # Step 5: Subsequent HOLD must NOT erase cumulative realized PnL or total fees
+    execute_paper_order(session, "HOLD", 64000.0)
+    summary_hold = get_portfolio_summary(session, 64000.0)
+    assert summary_hold["realized_pnl_usd"] == summary["realized_pnl_usd"]
+    assert summary_hold["total_fees_usd"] == summary["total_fees_usd"]
+    assert summary_hold["total_trades"] == 2
+
+    # Step 6: Subsequent BUY increases total fees and trades, preserves earlier realized PnL
+    execute_paper_order(session, "BUY", 64000.0, kelly_fraction=0.10)
+    summary_buy = get_portfolio_summary(session, 64000.0)
+    assert summary_buy["realized_pnl_usd"] == summary["realized_pnl_usd"]
+    assert summary_buy["total_fees_usd"] > summary["total_fees_usd"]
+    assert summary_buy["total_trades"] == 3
+    assert summary_buy["btc_position_value_usd"] > 0.0
+    assert summary_buy["total_equity_usd"] == round(summary_buy["cash_balance"] + summary_buy["btc_position_value_usd"], 2)
+
+    # Validate against PortfolioSummaryResponse schema
+    schema_model = PortfolioSummaryResponse(**summary_buy)
+    assert schema_model.realized_pnl_usd == summary_buy["realized_pnl_usd"]
+    assert schema_model.total_fees_usd == summary_buy["total_fees_usd"]
+    assert schema_model.cumulative_return_pct == summary_buy["cumulative_return_pct"]
+
+
+def test_empty_portfolio_summary(in_memory_db):
+    """Verifies that an uninitialized / empty portfolio ledger returns valid baseline schema."""
+    session, _ = in_memory_db
+    summary = get_portfolio_summary(session, current_price=65000.0)
+
+    assert summary["cash_balance"] == INITIAL_CAPITAL_USD
+    assert summary["btc_balance"] == 0.0
+    assert summary["current_btc_price"] == 65000.0
+    assert summary["btc_position_value_usd"] == 0.0
+    assert summary["total_equity_usd"] == INITIAL_CAPITAL_USD
+    assert summary["cumulative_return_pct"] == 0.0
+    assert summary["benchmark_btc_equity"] == INITIAL_CAPITAL_USD
+    assert summary["alpha_usd"] == 0.0
+    assert summary["alpha_pct"] == 0.0
+    assert summary["realized_pnl_usd"] == 0.0
+    assert summary["total_fees_usd"] == 0.0
+    assert summary["drawdown_pct"] == 0.0
+    assert summary["total_trades"] == 0
+
+    schema_model = PortfolioSummaryResponse(**summary)
+    assert schema_model.total_equity_usd == INITIAL_CAPITAL_USD
+    assert schema_model.btc_position_value_usd == 0.0
+
+
+def test_reconciliation_summary_metrics_and_tag_breakdown(in_memory_db):
+    """
+    Verifies that get_reconciliation_summary produces accurate aggregation,
+    including IC calculation, black swan counts, and complete tag_breakdown frequency mapping.
+    """
+    session, _ = in_memory_db
+
+    # 1. Empty case
+    empty_summary = get_reconciliation_summary(session, limit=24)
+    assert empty_summary["total_reconciled"] == 0
+    assert empty_summary["directional_accuracy_pct"] == 0.0
+    assert empty_summary["information_coefficient_ic"] == 0.0
+    assert empty_summary["black_swan_count"] == 0
+    assert empty_summary["tag_breakdown"] == {}
+
+    # 2. Populated records
+    now = datetime.now(timezone.utc)
+    t1 = MarketTick(timestamp=now - timedelta(hours=4), open=60000.0, high=60200.0, low=59900.0, close=60100.0, volume=100.0)
+    t2 = MarketTick(timestamp=now - timedelta(hours=3), open=60100.0, high=60300.0, low=60000.0, close=60200.0, volume=100.0)
+    t3 = MarketTick(timestamp=now - timedelta(hours=2), open=60200.0, high=60400.0, low=60100.0, close=60300.0, volume=100.0)
+    t4 = MarketTick(timestamp=now - timedelta(hours=1), open=60300.0, high=60500.0, low=57000.0, close=57200.0, volume=100.0)
+    session.add_all([t1, t2, t3, t4])
+    session.flush()
+
+    r1 = Reconciliation(
+        timestamp=now - timedelta(hours=3),
+        tick_id=t1.id,
+        predicted_price=60200.0,
+        actual_price_at_t_plus_1=60200.0,
+        predicted_return_pct=0.0017,
+        actual_return_pct=0.0017,
+        residual_error=0.0,
+        absolute_error_usd=0.0,
+        percentage_error=0.0,
+        direction_predicted="UP",
+        direction_realized="UP",
+        direction_correct=True,
+        is_black_swan=False,
+        error_attribution_tag="ACCURATE",
+    )
+    r2 = Reconciliation(
+        timestamp=now - timedelta(hours=2),
+        tick_id=t2.id,
+        predicted_price=60100.0,
+        actual_price_at_t_plus_1=60150.0,
+        predicted_return_pct=-0.0010,
+        actual_return_pct=-0.0008,
+        residual_error=50.0,
+        absolute_error_usd=50.0,
+        percentage_error=0.08,
+        direction_predicted="DOWN",
+        direction_realized="DOWN",
+        direction_correct=True,
+        is_black_swan=False,
+        error_attribution_tag="ACCURATE",
+    )
+    r3 = Reconciliation(
+        timestamp=now - timedelta(hours=1),
+        tick_id=t3.id,
+        predicted_price=60500.0,
+        actual_price_at_t_plus_1=60250.0,
+        predicted_return_pct=0.005,
+        actual_return_pct=-0.0005,
+        residual_error=-250.0,
+        absolute_error_usd=250.0,
+        percentage_error=0.41,
+        direction_predicted="UP",
+        direction_realized="DOWN",
+        direction_correct=False,
+        is_black_swan=False,
+        error_attribution_tag="SIDEWAYS_DRIFT",
+    )
+    r4 = Reconciliation(
+        timestamp=now,
+        tick_id=t4.id,
+        predicted_price=60400.0,
+        actual_price_at_t_plus_1=57200.0,
+        predicted_return_pct=0.002,
+        actual_return_pct=-0.051,
+        residual_error=-3200.0,
+        absolute_error_usd=3200.0,
+        percentage_error=5.3,
+        direction_predicted="UP",
+        direction_realized="DOWN",
+        direction_correct=False,
+        is_black_swan=True,
+        error_attribution_tag="BLACK_SWAN_OUTLIER",
+    )
+    session.add_all([r1, r2, r3, r4])
+    session.commit()
+
+    summary = get_reconciliation_summary(session, limit=24)
+    assert summary["total_reconciled"] == 4
+    assert summary["directional_accuracy_pct"] == 50.0
+    assert summary["black_swan_count"] == 1
+    assert summary["black_swans_filtered"] == 1
+    assert summary["tag_breakdown"] == {
+        "ACCURATE": 2,
+        "SIDEWAYS_DRIFT": 1,
+        "BLACK_SWAN_OUTLIER": 1,
+    }
+    assert summary["information_coefficient_ic"] == summary["information_coefficient"]
+    assert isinstance(summary["information_coefficient_ic"], float)
+    assert -1.0 <= summary["information_coefficient_ic"] <= 1.0
+    assert summary["information_coefficient_ic"] != 0.0
+
+    # Ensure schema validation preserves all fields
+    schema_model = ReconciliationSummaryResponse(**summary)
+    assert schema_model.total_reconciled == 4
+    assert schema_model.directional_accuracy_pct == 50.0
+    assert schema_model.black_swan_count == 1
+    assert schema_model.information_coefficient_ic == summary["information_coefficient_ic"]
+    assert schema_model.tag_breakdown["ACCURATE"] == 2
