@@ -1,17 +1,30 @@
 # src/api/schemas.py
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field, ConfigDict
 from src.agents.market_analyst_agent import MarketAnalystReport
+
+__all__ = [
+    "HealthResponse",
+    "PredictRequest",
+    "FeatureAttribution",
+    "PredictResponse",
+    "ExplainResponse",
+    "FullAnalysisResponse",
+    "AgentTradeRequest",
+    "AgentTradeResponse",
+    "ReconciliationSummaryResponse",
+    "PortfolioSummaryResponse",
+]
 
 
 class HealthResponse(BaseModel):
     """Health check status response."""
     model_config = ConfigDict(protected_namespaces=())
     status: str = Field(default="ok", examples=["ok"])
-    model_version: str = Field(default="optuna_xgboost_v1")
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    model_version: str = Field(default="optuna_tuned_xgboost_v1")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class PredictRequest(BaseModel):
@@ -37,7 +50,7 @@ class PredictResponse(BaseModel):
     predicted_return: float
     directional_movement: str
     movement_code: int
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class ExplainResponse(BaseModel):
@@ -45,7 +58,7 @@ class ExplainResponse(BaseModel):
     base_value: float
     top_bullish_drivers: List[FeatureAttribution]
     top_bearish_drivers: List[FeatureAttribution]
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class FullAnalysisResponse(BaseModel):
@@ -66,6 +79,7 @@ class AgentTradeRequest(BaseModel):
 
 class AgentTradeResponse(BaseModel):
     """Response payload from LangGraph 2-node Strategist -> Reflexion Risk Critic pipeline."""
+    model_config = ConfigDict(extra="ignore", protected_namespaces=())
     symbol: str
     current_price: float
     trade_action: str
@@ -82,4 +96,33 @@ class AgentTradeResponse(BaseModel):
     tools_called: List[str]
     rag_context: str
     timestamp: str
+    final_decision: Optional[str] = None
+    risk_verdict: Optional[str] = None
 
+
+class ReconciliationSummaryResponse(BaseModel):
+    """Rolling ground truth reconciliation metrics."""
+    model_config = ConfigDict(extra="ignore")
+    total_reconciled: int = Field(default=0)
+    directional_accuracy_pct: float = Field(default=0.0)
+    mae_usd: float = Field(default=0.0)
+    mape_pct: float = Field(default=0.0)
+    information_coefficient_ic: float = Field(default=0.0)
+    black_swan_count: int = Field(default=0)
+    tag_breakdown: Dict[str, int] = Field(default_factory=dict)
+
+
+class PortfolioSummaryResponse(BaseModel):
+    """Paper portfolio execution metrics and excess Alpha."""
+    model_config = ConfigDict(extra="ignore")
+    cash_balance: float = Field(default=10000.0)
+    btc_balance: float = Field(default=0.0)
+    current_btc_price: float = Field(default=0.0)
+    btc_position_value_usd: float = Field(default=0.0)
+    total_equity_usd: float = Field(default=10000.0)
+    benchmark_btc_equity: float = Field(default=10000.0)
+    alpha_usd: float = Field(default=0.0)
+    alpha_pct: float = Field(default=0.0)
+    realized_pnl_usd: float = Field(default=0.0)
+    total_fees_usd: float = Field(default=0.0)
+    total_trades: int = Field(default=0)
