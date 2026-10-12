@@ -1,13 +1,19 @@
 # src/agents/strategist_node.py
 """
 Node 1: Quantitative Strategist Agent for Mudra LangGraph System.
-Gathers market data, triggers ML inference, queries RAG context,
-and synthesizes a structured trade thesis with circuit breaker fallback.
+
+Orchestrates multi-source telemetry gathering, model inference, and RAG retrieval:
+  1. Gathers live/cached market data (Binance / Coinbase / Local).
+  2. Computes microstructural technical signals (taker buy ratio, spreads).
+  3. Executes dual XGBoost inference (expected return % and directional probability).
+  4. Dispatches regime-conditioned semantic queries to ChromaDB vector store.
+  5. Synthesizes a structured trade thesis via LLM gateway (Gemini) or engages
+     the deterministic rule-engine circuit breaker on quota exhaustion/network faults.
 """
 
 import os
 import json
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 
 from src.agents.graph_state import AgentState
@@ -57,9 +63,8 @@ def strategist_node(state: AgentState) -> AgentState:
         state["ml_forecast"] = ml_res
         state["tools_called"].append("get_model_return_forecast")
 
-    # 4. Gather RAG Macro Context via Tool if missing
+    # 4. Gather RAG Macro Context via Tool if missing (Regime-Conditioned Dispatch)
     if not state.get("rag_context"):
-        # PROPOSED DYNAMIC QUERY:
         vol_spread = state.get("engineered_features", {}).get("volatility_range_pct", 1.0)
         taker_ratio = state.get("engineered_features", {}).get("taker_buy_ratio", 0.50)
         clears_hurdle = state.get("ml_forecast", {}).get("clears_hurdle", False)
@@ -72,6 +77,7 @@ def strategist_node(state: AgentState) -> AgentState:
             rag_query = f"{symbol} distribution selling pressure retail fear capitulation"
         else:
             rag_query = f"{symbol} sideways chop mean reversion range regime"
+
         rag_res = query_macro_sentiment_rag.invoke({"query": rag_query})
         state["rag_context"] = rag_res
         state["tools_called"].append("query_macro_sentiment_rag")
@@ -86,7 +92,7 @@ def strategist_node(state: AgentState) -> AgentState:
     taker_ratio = state["market_data"].get("taker_buy_ratio", 0.50)
 
     direction = state["ml_forecast"].get("direction", "SIDEWAYS")
-    direction_badge = state["ml_forecast"].get("direction_badge", "NEUTRAL ⚪")
+    direction_badge = state["ml_forecast"].get("direction_badge", "NEUTRAL")
     prob_up = state["ml_forecast"].get("direction_probability_up", 50.0)
 
     # 5. Synthesize Thesis via Gemini API or Circuit Breaker
@@ -120,14 +126,21 @@ Respond ONLY with valid JSON with these keys:
             clean_text = _clean_json_response(response.text)
             parsed = json.loads(clean_text)
 
-            state["trade_action"] = str(parsed.get("trade_action", "HOLD")).upper()
-            state["conviction_score"] = int(parsed.get("conviction_score", 5))
+            raw_action = str(parsed.get("trade_action", "HOLD")).strip().upper()
+            state["trade_action"] = raw_action if raw_action in ("BUY", "SELL", "HOLD") else "HOLD"
+
+            try:
+                raw_conv = int(parsed.get("conviction_score", 5))
+                state["conviction_score"] = max(1, min(10, raw_conv))
+            except (ValueError, TypeError):
+                state["conviction_score"] = 5
+
             state["executive_summary"] = str(parsed.get("executive_summary", ""))
             state["strategist_thesis"] = str(parsed.get("strategist_thesis", ""))
             state["circuit_breaker_active"] = False
             return state
         except Exception:
-            # Trip circuit breaker on any LLM gateway failure
+            # Trip circuit breaker on any LLM gateway failure or quota exhaustion
             pass
 
     # 6. Deterministic Heuristic Engine Fallback (Circuit Breaker)
@@ -166,3 +179,4 @@ Respond ONLY with valid JSON with these keys:
     )
 
     return state
+
