@@ -523,3 +523,79 @@ def test_reconciliation_summary_metrics_and_tag_breakdown(in_memory_db):
     assert schema_model.black_swan_count == 1
     assert schema_model.information_coefficient_ic == summary["information_coefficient_ic"]
     assert schema_model.tag_breakdown["ACCURATE"] == 2
+
+
+def test_net_realized_pnl_accounting_two_completed_trades(in_memory_db):
+    """
+    Deterministic regression test verifying net realized P&L accounting:
+    1. Entry fee is incorporated into cost basis so that net realized PnL deducts
+       both entry and exit transaction fees (and slippage) without double-counting.
+    2. Net realized PnL strictly equals cash delta for closed positions.
+    3. Subsequent HOLD preserves cumulative realized PnL and total fees.
+    4. Second BUY and SELL trade properly scopes cost basis to the new trade and
+       accumulates realized PnL and fees.
+    5. Total equity strictly matches cash + marked-to-market BTC position value.
+    """
+    session, _ = in_memory_db
+
+    # --- TRADE 1 ---
+    # Step 1: BUY at $60,000 ($1,000 deployed from $10,000 initial bankroll)
+    r_buy1 = execute_paper_order(session, "BUY", 60000.0, kelly_fraction=0.10)
+    assert r_buy1.cash_balance == pytest.approx(9000.0, abs=1e-2)
+    assert r_buy1.fee_deducted_usd == pytest.approx(0.50, abs=1e-2)   # 0.05% of $1,000
+    assert r_buy1.slippage_usd == pytest.approx(0.20, abs=1e-2)       # 0.02% of $1,000
+    assert r_buy1.realized_pnl_usd == 0.0                             # Zero realized on buy
+    btc_amount_1 = r_buy1.btc_amount
+
+    # Step 2: SELL at $63,000 (position closed)
+    r_sell1 = execute_paper_order(session, "SELL", 63000.0)
+    assert r_sell1.btc_balance == 0.0
+    # Expected net realized PnL:
+    # Gross proceeds: btc_amount_1 * 62987.40 = $1,049.055
+    # Sell fee: 1049.055 * 0.05% = $0.525
+    # Net proceeds: $1,048.531
+    # Cost basis (including entry fee): $1,000.000
+    # Net realized PnL: $1,048.531 - $1,000.000 = $48.531
+    expected_pnl_1 = 48.53
+    assert r_sell1.realized_pnl_usd == pytest.approx(expected_pnl_1, abs=1e-2)
+    # Crucial identity: cash delta from initial capital must match realized PnL exactly
+    assert r_sell1.cash_balance - INITIAL_CAPITAL_USD == pytest.approx(r_sell1.realized_pnl_usd, abs=1e-2)
+
+    summary1 = get_portfolio_summary(session, 63000.0)
+    assert summary1["realized_pnl_usd"] == pytest.approx(expected_pnl_1, abs=1e-2)
+    assert summary1["total_fees_usd"] == pytest.approx(1.02, abs=1e-2)  # Buy fee (0.50) + Sell fee (0.52)
+    assert summary1["total_equity_usd"] == round(summary1["cash_balance"] + summary1["btc_position_value_usd"], 2)
+
+    # --- INTERMEDIATE HOLD ---
+    # Step 3: HOLD at $64,000
+    r_hold = execute_paper_order(session, "HOLD", 64000.0)
+    assert r_hold.realized_pnl_usd == 0.0
+    summary_hold = get_portfolio_summary(session, 64000.0)
+    assert summary_hold["realized_pnl_usd"] == summary1["realized_pnl_usd"]
+    assert summary_hold["total_fees_usd"] == summary1["total_fees_usd"]
+    assert summary_hold["total_equity_usd"] == summary1["total_equity_usd"]
+
+    # --- TRADE 2 ---
+    # Step 4: BUY at $64,000 with 10% Kelly (deploy 10% of ~$10,048.53 = ~$1,004.85)
+    r_buy2 = execute_paper_order(session, "BUY", 64000.0, kelly_fraction=0.10)
+    assert r_buy2.fee_deducted_usd == pytest.approx(0.50, abs=1e-2)
+    assert r_buy2.realized_pnl_usd == 0.0
+    capital_spent_2 = 10048.53 - r_buy2.cash_balance
+
+    # Step 5: SELL at $65,000
+    r_sell2 = execute_paper_order(session, "SELL", 65000.0)
+    assert r_sell2.btc_balance == 0.0
+    # Expected Trade 2 net realized PnL: ~$14.27
+    expected_pnl_2 = 14.27
+    assert r_sell2.realized_pnl_usd == pytest.approx(expected_pnl_2, abs=1e-2)
+
+    # Cumulative summary across all trades
+    summary2 = get_portfolio_summary(session, 65000.0)
+    expected_cum_pnl = expected_pnl_1 + expected_pnl_2  # 48.53 + 14.27 = 62.80
+    assert summary2["realized_pnl_usd"] == pytest.approx(expected_cum_pnl, abs=1e-2)
+    assert summary2["total_fees_usd"] == pytest.approx(2.04, abs=1e-2)  # 4 trade legs ~ $2.04
+    assert summary2["total_trades"] == 4
+    assert summary2["total_equity_usd"] == round(summary2["cash_balance"] + summary2["btc_position_value_usd"], 2)
+    # Total portfolio profit equals cumulative realized PnL when inventory is zero
+    assert summary2["total_equity_usd"] - INITIAL_CAPITAL_USD == pytest.approx(summary2["realized_pnl_usd"], abs=1e-2)
+
