@@ -516,9 +516,124 @@ def test_fetch_live_market_candles_stale_local_fallback_flagged(monkeypatch):
     assert df_fallback.attrs.get("source") == "local_fallback"
 
     # Verify staleness evaluation logic
-    latest_candle_ts = pd.to_datetime(df_fallback["timestamp"].iloc[-1], utc=True)
-    stale_age_hours = (datetime.now(timezone.utc) - latest_candle_ts).total_seconds() / 3600.0
-    is_stale = (stale_age_hours > 3.0 or df_fallback.attrs.get("source") == "local_fallback")
+    from app import check_feed_staleness, generate_live_forecast, generate_live_shap_attribution
+    is_stale, stale_age_hours = check_feed_staleness(df_fallback)
     assert is_stale is True
+    assert stale_age_hours >= 0.0
+
+
+def test_stale_fallback_skips_forecast_inference(sample_historical_candles):
+    """
+    Verify that when is_stale is True, generate_live_forecast strictly skips model inference,
+    does not invoke reg_model.predict or clf_model.predict, and returns None.
+    """
+    from unittest.mock import MagicMock
+    from app import generate_live_forecast
+
+    mock_reg = MagicMock()
+    mock_clf = MagicMock()
+
+    # Pass DataFrame with is_stale=True
+    res = generate_live_forecast(
+        live_df=sample_historical_candles,
+        reg_model=mock_reg,
+        clf_model=mock_clf,
+        is_stale=True,
+    )
+
+    assert res is None
+    assert mock_reg.predict.called is False
+    assert mock_clf.predict.called is False
+
+
+def test_stale_fallback_skips_shap_inference(sample_historical_candles, monkeypatch):
+    """
+    Verify that when is_stale is True, generate_live_shap_attribution strictly skips TreeSHAP
+    attribution calculations, does not invoke explain_single_prediction, and returns None.
+    """
+    from unittest.mock import MagicMock
+    import app
+    from app import generate_live_shap_attribution
+
+    mock_explainer = MagicMock()
+    explain_mock = MagicMock()
+    monkeypatch.setattr(app, "explain_single_prediction", explain_mock)
+
+    res = generate_live_shap_attribution(
+        live_df=sample_historical_candles,
+        explainer_clf=mock_explainer,
+        is_stale=True,
+    )
+
+    assert res is None
+    assert explain_mock.called is False
+
+
+def test_fresh_feed_executes_forecast_and_shap_inference(sample_historical_candles, monkeypatch):
+    """
+    Verify that when the market feed is confirmed fresh (is_stale=False), generate_live_forecast
+    and generate_live_shap_attribution execute cleanly along the live inference path and return valid outputs.
+    """
+    import numpy as np
+    import pytest
+    from unittest.mock import MagicMock
+    from datetime import datetime, timezone, timedelta
+    import app
+    from app import check_feed_staleness, generate_live_forecast, generate_live_shap_attribution
+
+    # Create fresh feed ending 1 hour ago
+    fresh_df = sample_historical_candles.copy()
+    now_dt = datetime.now(timezone.utc)
+    fresh_timestamps = [now_dt - timedelta(hours=len(fresh_df) - i) for i in range(len(fresh_df))]
+    fresh_df["timestamp"] = fresh_timestamps
+    fresh_df.attrs["source"] = "binance"
+
+    is_stale, age_h = check_feed_staleness(fresh_df)
+    assert is_stale is False
+
+    mock_reg = MagicMock()
+    mock_reg.predict.return_value = np.array([0.002])  # +0.20% predicted return (clears 0.05% hurdle)
+
+    mock_clf = MagicMock()
+    mock_clf.predict.return_value = np.array([1])      # UP
+    mock_clf.predict_proba.return_value = np.array([[0.20, 0.80]])
+
+    forecast = generate_live_forecast(
+        live_df=fresh_df,
+        reg_model=mock_reg,
+        clf_model=mock_clf,
+        is_stale=False,
+    )
+
+    assert forecast is not None
+    assert mock_reg.predict.called is True
+    assert mock_clf.predict.called is True
+    assert forecast["cleared_hurdle"] is True
+    assert forecast["direction_badge"] == "BULLISH (UP)"
+    assert forecast["pred_ret_pct"] == pytest.approx(0.20, abs=1e-3)
+    assert forecast["prob_up"] == pytest.approx(80.0, abs=1e-1)
+
+    # Test fresh TreeSHAP path
+    mock_explainer = MagicMock()
+    expected_drivers = [{"feature": "return_mean_6h", "shap": 0.065}]
+    monkeypatch.setattr(
+        app,
+        "explain_single_prediction",
+        lambda explainer, df, top_n: (0.50, expected_drivers, [], None),
+    )
+
+    shap_res = generate_live_shap_attribution(
+        live_df=fresh_df,
+        explainer_clf=mock_explainer,
+        is_stale=False,
+        top_n=4,
+    )
+
+    assert shap_res is not None
+    base_val, top_pos, top_neg, fig = shap_res
+    assert base_val == 0.50
+    assert len(top_pos) == 1
+    assert top_pos[0]["feature"] == "return_mean_6h"
+
 
 
