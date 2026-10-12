@@ -42,21 +42,25 @@ def fetch_latest_confirmed_candle(symbol: str = "BTCUSDT") -> Dict[str, Any]:
     """
     # 1. Binance Dedicated Vision
     try:
-        url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&limit=100"
+        url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&limit=102"
         resp = requests.get(url, timeout=10)
         if resp.status_code == 200:
             klines = resp.json()
-            if len(klines) >= 35:
-                # klines[:-1] are confirmed closed candles; klines[-1] is the active unclosed bar
+            now_ms = datetime.now(timezone.utc).timestamp() * 1000.0
+            confirmed_klines = [k for k in klines if float(k[6]) <= now_ms]
+            if len(confirmed_klines) == len(klines) and len(klines) > 1:
                 confirmed_klines = klines[:-1]
-                c = confirmed_klines[-1]
+
+            if len(confirmed_klines) >= 35:
+                selected_klines = confirmed_klines[-100:]
+                c = selected_klines[-1]
                 ts = datetime.fromtimestamp(c[0] / 1000.0, tz=timezone.utc)
                 vol = float(c[5])
                 taker_base = float(c[9])
                 taker_ratio = float(taker_base / vol) if vol > 0 else 0.50
 
                 candle_records = []
-                for k in confirmed_klines:
+                for k in selected_klines:
                     k_vol = float(k[5])
                     k_taker = float(k[9])
                     k_ratio = float(k_taker / k_vol) if k_vol > 0 else 0.50
@@ -91,14 +95,18 @@ def fetch_latest_confirmed_candle(symbol: str = "BTCUSDT") -> Dict[str, Any]:
         resp = requests.get(url, headers={"User-Agent": "Mudra-Sync/1.0"}, timeout=10)
         if resp.status_code == 200:
             candles = resp.json()
-            if len(candles) >= 35:
-                # candles[0] is current unclosed; candles[1:] are confirmed closed
-                confirmed_candles = list(reversed(candles[1:100]))
-                c = confirmed_candles[-1]
+            now_sec = datetime.now(timezone.utc).timestamp()
+            confirmed_candles = [k for k in candles if (float(k[0]) + 3600.0) <= now_sec]
+            if len(confirmed_candles) == len(candles) and len(candles) > 1:
+                confirmed_candles = candles[1:]
+
+            if len(confirmed_candles) >= 35:
+                selected_candles = list(reversed(confirmed_candles[:100]))
+                c = selected_candles[-1]
                 ts = datetime.fromtimestamp(c[0], tz=timezone.utc)
 
                 candle_records = []
-                for k in confirmed_candles:
+                for k in selected_candles:
                     candle_records.append({
                         "timestamp": pd.to_datetime(k[0], unit="s", utc=True),
                         "low": float(k[1]),
@@ -107,7 +115,7 @@ def fetch_latest_confirmed_candle(symbol: str = "BTCUSDT") -> Dict[str, Any]:
                         "close": float(k[4]),
                         "volume": float(k[5]),
                         "taker_buy_ratio": 0.50,
-                        "number_of_trades": 10000,
+                        "number_of_trades": None,  # Coinbase does not report trade counts; unobserved
                     })
 
                 return {
@@ -118,7 +126,7 @@ def fetch_latest_confirmed_candle(symbol: str = "BTCUSDT") -> Dict[str, Any]:
                     "close": float(c[4]),
                     "volume": float(c[5]),
                     "taker_buy_ratio": 0.50,
-                    "number_of_trades": 10000,
+                    "number_of_trades": None,  # Coinbase does not report trade counts; unobserved
                     "candles": candle_records,
                 }
     except Exception:
@@ -157,7 +165,7 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
             "high": candle["high"],
             "low": candle["low"],
             "volume": candle["volume"],
-            "taker_buy_ratio": candle.get("taker_buy_ratio", 0.5),
+            "taker_buy_ratio": candle.get("taker_buy_ratio"),
             "timestamp": candle["timestamp"],
             "candles": candle.get("candles"),
         })
