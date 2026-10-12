@@ -15,8 +15,11 @@ import sys
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stdout, "reconfigure") and sys.stdout.isatty():
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
