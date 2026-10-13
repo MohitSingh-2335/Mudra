@@ -25,14 +25,37 @@ import requests
 import pandas as pd
 from sqlalchemy import select, desc
 
-from src.database.connection import get_db, test_connection
-from src.database.models import MarketTick, ApiTelemetry, CouncilAudit
+from src.database.connection import get_db, test_connection, has_tick_id_column
+from src.database.models import MarketTick, ApiTelemetry, CouncilAudit, PaperPortfolio
 from src.engine.reconciliation import reconcile_pending_ticks
 from src.engine.paper_portfolio import execute_paper_order, get_portfolio_summary
 from src.agents.trading_graph import run_trading_graph
 from src.agents.tools import calculate_technical_signals, get_model_return_forecast
 
-__all__ = ["sync_hourly_quant_cycle", "fetch_latest_confirmed_candle"]
+__all__ = ["sync_hourly_quant_cycle", "fetch_latest_confirmed_candle", "is_paper_trade_executed_for_tick"]
+
+
+def is_paper_trade_executed_for_tick(session, tick_id: int) -> bool:
+    """
+    Checks if a paper order (BUY, SELL, or HOLD) has already been executed for tick_id.
+    First checks PaperPortfolio.tick_id directly if present in the database schema.
+    As a fallback for historical rows where tick_id was NULL, checks whether an initial
+    CouncilAudit without [FORCED_REANALYSIS] already exists for this tick_id.
+    """
+    if has_tick_id_column(session):
+        trade_id = session.execute(
+            select(PaperPortfolio.id).where(PaperPortfolio.tick_id == tick_id)
+        ).scalar_one_or_none()
+        if trade_id is not None:
+            return True
+
+    audit = session.execute(
+        select(CouncilAudit).where(CouncilAudit.tick_id == tick_id).order_by(CouncilAudit.id.asc())
+    ).scalars().first()
+    if audit is not None and (not audit.execution_notes or "[FORCED_REANALYSIS]" not in audit.execution_notes):
+        return True
+
+    return False
 
 
 def fetch_latest_confirmed_candle(symbol: str = "BTCUSDT") -> Dict[str, Any]:
@@ -155,6 +178,9 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
         if existing and not force:
             return False, f"Candle for {candle['timestamp'].strftime('%H:00 UTC')} already recorded in Neon.", {"tick_id": existing.id}
 
+        is_existing_tick = existing is not None
+        already_executed = is_paper_trade_executed_for_tick(session, existing.id) if is_existing_tick else False
+
         # 1. Compute Signals and XGBoost Return Forecast
         signals_output = calculate_technical_signals.invoke({
             "close": candle["close"],
@@ -176,7 +202,7 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
         regime = "HIGH_VOL_CHOP" if volatility > 3.8 else ("BULL_MOMENTUM" if (clears_hurdle and pred_return > 0) else ("BEAR_DISTRIBUTION" if (clears_hurdle and pred_return < 0) else "SIDEWAYS_RANGE"))
 
         # 2. Record or Update MarketTick
-        if existing:
+        if is_existing_tick:
             current_tick = existing
             if force:
                 current_tick.market_regime = regime
@@ -225,7 +251,12 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
         kelly = float(agent_state.get("kelly_fraction", 0.10))
         veto_reasons = agent_state.get("veto_reasons", [])
 
-        # 5. Record Council Audit
+        # 5. Record Council Audit (Auditable trail of forced reanalysis)
+        if is_existing_tick and already_executed:
+            exec_notes = f"[FORCED_REANALYSIS] {agent_state.get('thesis', '')[:350]} | Paper trade previously executed for tick #{current_tick.id}; financial execution deduplicated."
+        else:
+            exec_notes = agent_state.get("thesis", "")[:500]
+
         audit = CouncilAudit(
             timestamp=datetime.now(timezone.utc),
             tick_id=current_tick.id,
@@ -237,22 +268,28 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
             veto_reasons=veto_reasons,
             kelly_fraction=kelly,
             final_decision=decision,
-            execution_notes=agent_state.get("thesis", "")[:500],
+            execution_notes=exec_notes,
         )
         session.add(audit)
         session.flush()
 
-        # 6. Execute Forward Paper Order
-        order_notes = f"Executed {decision} ({verdict}) at BTC ${candle['close']:,.2f}."
-        execute_paper_order(
-            session=session,
-            action=decision,
-            current_price=candle["close"],
-            kelly_fraction=kelly,
-            notes=order_notes,
-        )
+        # 6. Execute Forward Paper Order (Strict Financial Idempotency Guard)
+        if is_existing_tick and already_executed:
+            print(f"[PAPER] Trade already executed for tick #{current_tick.id}. Financial execution deduplicated (zero fees charged).")
+        else:
+            order_notes = f"Executed {decision} ({verdict}) at BTC ${candle['close']:,.2f}."
+            execute_paper_order(
+                session=session,
+                action=decision,
+                current_price=candle["close"],
+                kelly_fraction=kelly,
+                notes=order_notes,
+                tick_id=current_tick.id,
+            )
 
         summary = get_portfolio_summary(session, candle["close"])
+        if is_existing_tick and already_executed:
+            return True, f"Updated forecast for existing tick #{current_tick.id} at ${candle['close']:,.2f} ({decision} | Trade deduplicated | No fees)", summary
         return True, f"Recorded tick #{current_tick.id} at ${candle['close']:,.2f} ({decision} | Kelly: {kelly*100:.1f}%)", summary
 
 
