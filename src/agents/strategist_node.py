@@ -16,6 +16,11 @@ import json
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 
+from config import (
+    MIN_HURDLE_PCT,
+    TOTAL_FRICTION_PER_SIDE_PCT,
+    ROUND_TRIP_FRICTION_PCT,
+)
 from src.agents.graph_state import AgentState
 from src.agents.tools import (
     get_live_market_data,
@@ -115,7 +120,7 @@ Analyze the following telemetry and return strict JSON:
 - Current Price: ${state['current_price']:,.2f}
 - XGBoost Return Forecast: {pred_return:+.4f}% (${pred_move:+,.2f})
 - Directional Prediction: {direction} ({direction_badge}) | Up Probability: {prob_up:.1f}%
-- Fee Hurdle Status: {'CLEARED (>=0.05%)' if clears_hurdle else 'SUB-HURDLE'}
+- Fee Hurdle Status: {'CLEARED (>=' + f'{MIN_HURDLE_PCT:.2f}%)' if clears_hurdle else 'SUB-HURDLE'}
 - Taker Buy Ratio: {taker_ratio:.4f}
 - Macro RAG Context: {state['rag_context'][:300]}
 
@@ -156,21 +161,21 @@ Respond ONLY with valid JSON with these keys:
         conviction = min(9, int(5 + (pred_return * 20) + (taker_ratio - 0.5) * 10))
         summary = (
             f"Bullish quantitative setup: Expected return of {pred_return:+.4f}% clears the "
-            f"0.05% fee hurdle ({direction_badge}, Up Prob: {prob_up:.1f}%) with favorable taker buying ({taker_ratio:.2%})."
+            f"{MIN_HURDLE_PCT:.2f}% estimated round-trip hurdle ({direction_badge}, Up Prob: {prob_up:.1f}%) with favorable taker buying ({taker_ratio:.2%})."
         )
     elif clears_hurdle and (pred_return < 0 or direction == "DOWN") and taker_ratio < 0.50:
         action = "SELL"
         conviction = min(9, int(5 + abs(pred_return * 20)))
         summary = (
-            f"Bearish momentum: Expected return of {pred_return:+.4f}% clears fee hurdle "
-            f"({direction_badge}) with aggressive taker sell dominance ({taker_ratio:.2%})."
+            f"Bearish momentum: Expected return of {pred_return:+.4f}% clears {MIN_HURDLE_PCT:.2f}% "
+            f"estimated round-trip hurdle ({direction_badge}) with aggressive taker sell dominance ({taker_ratio:.2%})."
         )
     else:
         action = "HOLD"
         conviction = 4
         summary = (
             f"Chop / sub-hurdle regime: Expected move ({pred_return:+.4f}%) does not justify "
-            f"0.30% round-trip exchange friction. Capital preservation recommended."
+            f"estimated {ROUND_TRIP_FRICTION_PCT:.2f}% round-trip exchange friction ({TOTAL_FRICTION_PER_SIDE_PCT:.2f}% per side). Capital preservation recommended."
         )
 
     state["trade_action"] = action
