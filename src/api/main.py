@@ -33,6 +33,7 @@ from config import (
     REGRESSOR_FEATURES,
     CLASSIFIER_FEATURES
 )
+from src.feature_engineering import validate_inference_features, predict_with_validation
 from src.explainability import get_tree_explainer, explain_single_prediction
 from src.api.schemas import (
     HealthResponse,
@@ -117,14 +118,20 @@ async def predict(req: PredictRequest):
             detail=f"Missing required feature fields: {missing_all}"
         )
 
-    # 2. Build aligned DataFrames
-    input_reg = pd.DataFrame([{f: req.features[f] for f in REGRESSOR_FEATURES}], columns=REGRESSOR_FEATURES)
-    input_clf = pd.DataFrame([{f: req.features[f] for f in CLASSIFIER_FEATURES}], columns=CLASSIFIER_FEATURES)
+    # 2. Build aligned DataFrames via centralized inference validation
+    try:
+        input_reg = validate_inference_features(req.features, model_type="regressor")
+        input_clf = validate_inference_features(req.features, model_type="classifier")
+    except ValueError as val_err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Feature validation error: {val_err}"
+        )
 
-    # 3. Model Inference
-    pred_return = float(models["regressor"].predict(input_reg)[0])
+    # 3. Model Inference via validated inference wrappers
+    pred_return = float(predict_with_validation(models["regressor"], input_reg, model_type="regressor")[0])
     pred_price = float(req.current_price * (1.0 + pred_return))
-    move_code = int(models["classifier"].predict(input_clf)[0])
+    move_code = int(predict_with_validation(models["classifier"], input_clf, model_type="classifier")[0])
     move_text = "Upward 📈" if move_code == 1 else "Downward 📉"
 
     return PredictResponse(
@@ -146,7 +153,13 @@ async def explain(req: PredictRequest):
             detail=f"Missing required classifier features for SHAP: {missing_clf}"
         )
 
-    input_clf = pd.DataFrame([{f: req.features[f] for f in CLASSIFIER_FEATURES}], columns=CLASSIFIER_FEATURES)
+    try:
+        input_clf = validate_inference_features(req.features, model_type="classifier")
+    except ValueError as val_err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Feature validation error: {val_err}"
+        )
     base_val, top_pos, top_neg, fig = explain_single_prediction(models["explainer"], input_clf, top_n=4)
 
     # Convert to schema
