@@ -4,7 +4,7 @@ Node 2: Reflexion Risk Critic Agent for Mudra LangGraph System.
 
 Serves as an autonomous risk supervisor with absolute veto authority over
 the Quantitative Strategist's proposed orders. Implements 3 deterministic gates:
-  • Gate 1 (Friction Hurdle): Rejects orders failing to clear the 0.05% fee threshold.
+  • Gate 1 (Friction Hurdle): Rejects orders failing to clear the round-trip break-even hurdle.
   • Gate 2 (Volatility Anomaly): Vetoes orders during high-spread liquidation flushes (>3.8%).
   • Gate 3 (Conviction Floor): Rejects orders with model conviction scores < 4/10.
 
@@ -15,6 +15,11 @@ When approved, dynamically computes:
 """
 
 from typing import Dict, Any, Optional
+from config import (
+    MIN_HURDLE_PCT,
+    TOTAL_FRICTION_PER_SIDE_PCT,
+    ROUND_TRIP_FRICTION_PCT,
+)
 from src.agents.graph_state import AgentState
 from src.agents.market_analyst_agent import _get_gemini_api_key, _clean_json_response
 
@@ -44,7 +49,8 @@ def risk_critic_node(state: AgentState) -> AgentState:
         state["take_profit_price"] = None
         state["risk_critic_critique"] = (
             "RISK CRITIC CONCURS: Capital preservation authorized. "
-            "Market setup lacks sufficient directional momentum to clear 0.30% round-trip friction. "
+            f"Market setup lacks sufficient directional momentum to clear estimated {ROUND_TRIP_FRICTION_PCT:.2f}% "
+            f"round-trip friction ({TOTAL_FRICTION_PER_SIDE_PCT:.2f}% per side). "
             "Recommended allocation: 0.0% (Cash)."
         )
         return state
@@ -52,14 +58,14 @@ def risk_critic_node(state: AgentState) -> AgentState:
     # 2. Gate 1: Transaction Cost Hurdle Audit (For Active BUY/SELL signals)
     if action in ("BUY", "SELL") and not clears_hurdle:
         state["risk_approved"] = False
-        state["veto_reason"] = "Sub-Hurdle Fee Drag: Forecasted return < 0.05% threshold"
+        state["veto_reason"] = f"Sub-Hurdle Fee Drag: Forecasted return < {MIN_HURDLE_PCT:.2f}% break-even threshold"
         state["recommended_position_pct"] = 0.0
         state["stop_loss_price"] = None
         state["take_profit_price"] = None
         state["risk_critic_critique"] = (
             f"VETOED BY RISK CRITIC: The Strategist recommended {action}, but expected return "
-            f"({expected_return:+.4f}%) fails to clear the institutional 0.05% hurdle rate. "
-            f"Executing this trade would incur fee drag without statistical edge. Order aborted."
+            f"({expected_return:+.4f}%) fails to clear the {MIN_HURDLE_PCT:.2f}% estimated round-trip break-even hurdle "
+            f"({TOTAL_FRICTION_PER_SIDE_PCT:.2f}% per side). Executing this trade would incur fee drag without statistical edge. Order aborted."
         )
         return state
 
