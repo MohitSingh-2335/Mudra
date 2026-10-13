@@ -7,28 +7,32 @@ TASK-P1-05.3: Verify External Scheduler Integration, Then Fix Worker Reliability
 
 import json
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from unittest.mock import patch
-from sqlalchemy import create_engine, select
+from unittest.mock import patch, MagicMock
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import IntegrityError
 
 import scripts.run_hourly_worker as worker
-from src.database.models import Base, MarketTick
+import src.engine.sync as sync
+from src.database.models import Base, MarketTick, CouncilAudit, PaperPortfolio
+from src.database.connection import init_db as real_init_db
+from src.engine.paper_portfolio import execute_paper_order
 
 
 @pytest.fixture
 def isolated_db(monkeypatch):
     """Provides an isolated in-memory SQLite database session for worker testing."""
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(bind=engine)
+    real_init_db(engine)
     Session = sessionmaker(bind=engine)
     
     # Patch connection engine and SessionLocal in database.connection and worker
     monkeypatch.setattr("src.database.connection.engine", engine)
     monkeypatch.setattr("src.database.connection.SessionLocal", Session)
     monkeypatch.setattr("src.database.connection.test_connection", lambda: (True, "SQLite 3.x", 1.0))
-    monkeypatch.setattr("src.database.connection.init_db", lambda target_engine=None: Base.metadata.create_all(bind=engine))
+    monkeypatch.setattr("src.database.connection.init_db", lambda target_engine=None: real_init_db(engine))
     
     session = Session()
     yield session, engine
@@ -333,4 +337,487 @@ def test_successful_outbox_flush_default_session_and_timezone_normalization(isol
         select(MarketTick).where(MarketTick.timestamp == expected_utc)
     ).scalars().all()
     assert len(all_ticks) == 1
+
+
+# -----------------------------------------------------------------------------
+# 3. Paper-Trade Deduplication & --force Idempotency Contracts
+# -----------------------------------------------------------------------------
+
+def test_force_sync_deduplicates_paper_trade_and_fees(isolated_db, monkeypatch):
+    """
+    Verifies that running with force=True on an existing candle:
+    1. Recomputes and updates the permitted forecast fields on MarketTick.
+    2. Records an auditable trail of forced reanalysis in CouncilAudit.
+    3. Strictly deduplicates paper trade execution: creates ZERO new PaperPortfolio rows.
+    4. Leaves cash balance, BTC balance, and total fees unchanged (zero duplicate friction).
+    """
+    session, _ = isolated_db
+    t0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    candle_data = {
+        "timestamp": t0,
+        "open": 60000.0,
+        "high": 60200.0,
+        "low": 59800.0,
+        "close": 60100.0,
+        "volume": 75.0,
+    }
+
+    # Setup mocks for quant cycle
+    monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: candle_data)
+    mock_signals = MagicMock()
+    mock_signals.invoke.return_value = {"volatility_range_pct": 1.2, "rsi": 55.0}
+    monkeypatch.setattr(sync, "calculate_technical_signals", mock_signals)
+
+    mock_ml = MagicMock()
+    mock_ml.invoke.return_value = {
+        "expected_return_pct": 0.45,
+        "predicted_target_price": 60370.0,
+        "confidence": 0.80,
+        "clears_hurdle": True,
+    }
+    monkeypatch.setattr(sync, "get_model_return_forecast", mock_ml)
+
+    monkeypatch.setattr(
+        sync,
+        "run_trading_graph",
+        lambda **k: {
+            "final_decision": "BUY",
+            "risk_verdict": "APPROVED",
+            "strategist_action": "BUY",
+            "strategist_conviction": 8,
+            "kelly_fraction": 0.10,
+            "thesis": "Initial bullish momentum",
+        }
+    )
+
+    # 1. First Run (force=False): fresh candle execution
+    ok1, msg1, summ1 = sync.sync_hourly_quant_cycle(force=False)
+    assert ok1 is True
+    assert "Recorded tick #1" in msg1
+
+    tick1 = session.execute(select(MarketTick).where(MarketTick.timestamp == t0)).scalar_one()
+    assert tick1.predicted_return_1h == 0.45
+
+    # Exactly 1 paper trade executed
+    buy_orders_1 = session.execute(
+        select(PaperPortfolio).where(PaperPortfolio.action == "BUY")
+    ).scalars().all()
+    assert len(buy_orders_1) == 1
+    assert buy_orders_1[0].tick_id == tick1.id
+
+    cash_1 = summ1["cash_balance"]
+    btc_1 = summ1["btc_balance"]
+    fees_1 = summ1["total_fees_usd"]
+    assert cash_1 < 10000.0
+    assert btc_1 > 0.0
+    assert fees_1 > 0.0
+
+    # 2. Second Run with force=True and updated forecast values
+    mock_ml.invoke.return_value = {
+        "expected_return_pct": 0.95,
+        "predicted_target_price": 60670.0,
+        "confidence": 0.92,
+        "clears_hurdle": True,
+    }
+    monkeypatch.setattr(
+        sync,
+        "run_trading_graph",
+        lambda **k: {
+            "final_decision": "BUY",
+            "risk_verdict": "APPROVED",
+            "strategist_action": "BUY",
+            "strategist_conviction": 9,
+            "kelly_fraction": 0.10,
+            "thesis": "Reanalyzed higher conviction breakout",
+        }
+    )
+
+    ok2, msg2, summ2 = sync.sync_hourly_quant_cycle(force=True)
+    assert ok2 is True
+    assert "Trade deduplicated | No fees" in msg2
+
+    # Verification 1: Forecast fields updated on existing tick
+    session.expire_all()
+    tick1_updated = session.execute(select(MarketTick).where(MarketTick.timestamp == t0)).scalar_one()
+    assert tick1_updated.id == tick1.id
+    assert tick1_updated.predicted_return_1h == 0.95
+
+    # Verification 2: Auditability preserved (2 audits: initial and reanalysis)
+    audits = session.execute(
+        select(CouncilAudit).where(CouncilAudit.tick_id == tick1.id).order_by(CouncilAudit.id.asc())
+    ).scalars().all()
+    assert len(audits) == 2
+    assert "[FORCED_REANALYSIS]" in audits[1].execution_notes
+
+    # Verification 3: FINANCIAL IDEMPOTENCY INVARIANTS
+    # Strictly 1 BUY order in the ledger
+    buy_orders_2 = session.execute(
+        select(PaperPortfolio).where(PaperPortfolio.action == "BUY")
+    ).scalars().all()
+    assert len(buy_orders_2) == 1
+
+    # Total rows in paper_portfolio (including INITIAL_DEPOSIT if any): exactly 2
+    all_portfolio = session.execute(select(PaperPortfolio)).scalars().all()
+    assert len(all_portfolio) == 2
+
+    # Balances and fees must be 100% IDENTICAL to run 1 (zero duplicate deduction)
+    assert summ2["cash_balance"] == cash_1
+    assert summ2["btc_balance"] == btc_1
+    assert summ2["total_fees_usd"] == fees_1
+
+
+def test_force_false_on_existing_candle_remains_idempotent_noop(isolated_db, monkeypatch):
+    """Verifies that force=False on an already recorded candle returns early without modifying data."""
+    session, _ = isolated_db
+    t0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    candle_data = {"timestamp": t0, "open": 60000.0, "high": 60200.0, "low": 59800.0, "close": 60100.0, "volume": 75.0}
+
+    monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: candle_data)
+    mock_signals = MagicMock()
+    mock_signals.invoke.return_value = {"volatility_range_pct": 1.0}
+    monkeypatch.setattr(sync, "calculate_technical_signals", mock_signals)
+
+    mock_ml = MagicMock()
+    mock_ml.invoke.return_value = {"expected_return_pct": 0.3, "predicted_target_price": 60200.0, "confidence": 0.7, "clears_hurdle": True}
+    monkeypatch.setattr(sync, "get_model_return_forecast", mock_ml)
+    monkeypatch.setattr(sync, "run_trading_graph", lambda **k: {"final_decision": "HOLD", "risk_verdict": "APPROVED", "strategist_action": "HOLD", "strategist_conviction": 5, "kelly_fraction": 0.10})
+
+    # Run 1
+    ok1, _, _ = sync.sync_hourly_quant_cycle(force=False)
+    assert ok1 is True
+
+    # Run 2 with force=False
+    ok2, msg2, summ2 = sync.sync_hourly_quant_cycle(force=False)
+    assert ok2 is False
+    assert "already recorded" in msg2
+    assert "tick_id" in summ2
+
+    # Verify no new rows created
+    assert session.execute(select(MarketTick)).scalars().all().__len__() == 1
+    assert session.execute(select(CouncilAudit)).scalars().all().__len__() == 1
+
+
+def test_force_sync_on_tick_without_paper_trade_executes_once(isolated_db, monkeypatch):
+    """
+    Verifies that if a MarketTick exists in the database without any linked paper order
+    (e.g., ingested via offline outbox sync), calling force=True executes the trade exactly once.
+    """
+    session, _ = isolated_db
+    t0 = datetime(2026, 1, 1, 13, 0, tzinfo=timezone.utc)
+    candle_data = {"timestamp": t0, "open": 61000.0, "high": 61200.0, "low": 60900.0, "close": 61100.0, "volume": 80.0}
+
+    # 1. Pre-insert MarketTick without paper trade or audit
+    offline_tick = MarketTick(
+        timestamp=t0,
+        open=61000.0,
+        high=61200.0,
+        low=60900.0,
+        close=61100.0,
+        volume=80.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
+    )
+    session.add(offline_tick)
+    session.commit()
+    tick_id = offline_tick.id
+
+    # Verify no paper portfolio rows exist
+    assert session.execute(select(PaperPortfolio).where(PaperPortfolio.tick_id == tick_id)).scalar_one_or_none() is None
+
+    # Setup mocks
+    monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: candle_data)
+    mock_signals = MagicMock()
+    mock_signals.invoke.return_value = {"volatility_range_pct": 1.0}
+    monkeypatch.setattr(sync, "calculate_technical_signals", mock_signals)
+    mock_ml = MagicMock()
+    mock_ml.invoke.return_value = {"expected_return_pct": 0.5, "predicted_target_price": 61400.0, "confidence": 0.8, "clears_hurdle": True}
+    monkeypatch.setattr(sync, "get_model_return_forecast", mock_ml)
+    monkeypatch.setattr(sync, "run_trading_graph", lambda **k: {"final_decision": "BUY", "risk_verdict": "APPROVED", "strategist_action": "BUY", "strategist_conviction": 7, "kelly_fraction": 0.10, "thesis": "Catch up execution"})
+
+    # 2. First force run executes the missing paper trade
+    ok1, msg1, summ1 = sync.sync_hourly_quant_cycle(force=True)
+    assert ok1 is True
+    assert "Recorded tick" in msg1
+
+    linked_order = session.execute(
+        select(PaperPortfolio).where(PaperPortfolio.tick_id == tick_id)
+    ).scalar_one_or_none()
+    assert linked_order is not None
+    assert linked_order.action == "BUY"
+
+    # 3. Second force run must now deduplicate
+    ok2, msg2, summ2 = sync.sync_hourly_quant_cycle(force=True)
+    assert ok2 is True
+    assert "Trade deduplicated | No fees" in msg2
+
+    all_orders = session.execute(
+        select(PaperPortfolio).where(PaperPortfolio.tick_id == tick_id)
+    ).scalars().all()
+    assert len(all_orders) == 1
+
+
+def test_new_candle_executes_new_trade_normally(isolated_db, monkeypatch):
+    """Verifies that subsequent hourly candles at T+1 execute new trades normally."""
+    session, _ = isolated_db
+    t0 = datetime(2026, 1, 1, 14, 0, tzinfo=timezone.utc)
+    t1 = datetime(2026, 1, 1, 15, 0, tzinfo=timezone.utc)
+
+    mock_signals = MagicMock()
+    mock_signals.invoke.return_value = {"volatility_range_pct": 1.0}
+    monkeypatch.setattr(sync, "calculate_technical_signals", mock_signals)
+    mock_ml = MagicMock()
+    mock_ml.invoke.return_value = {"expected_return_pct": 0.5, "predicted_target_price": 62300.0, "confidence": 0.8, "clears_hurdle": True}
+    monkeypatch.setattr(sync, "get_model_return_forecast", mock_ml)
+    monkeypatch.setattr(sync, "run_trading_graph", lambda **k: {"final_decision": "BUY", "risk_verdict": "APPROVED", "strategist_action": "BUY", "strategist_conviction": 8, "kelly_fraction": 0.10})
+
+    # Candle 0
+    c0 = {"timestamp": t0, "open": 62000.0, "high": 62200.0, "low": 61900.0, "close": 62100.0, "volume": 70.0}
+    monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: c0)
+    ok0, _, _ = sync.sync_hourly_quant_cycle(force=False)
+    assert ok0 is True
+
+    # Candle 1 (next hour)
+    c1 = {"timestamp": t1, "open": 62100.0, "high": 62400.0, "low": 62000.0, "close": 62300.0, "volume": 75.0}
+    monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: c1)
+    ok1, _, _ = sync.sync_hourly_quant_cycle(force=False)
+    assert ok1 is True
+
+    # Two distinct ticks and two distinct trade executions
+    ticks = session.execute(select(MarketTick).order_by(MarketTick.timestamp.asc())).scalars().all()
+    assert len(ticks) == 2
+
+    trades = session.execute(select(PaperPortfolio).where(PaperPortfolio.action == "BUY")).scalars().all()
+    assert len(trades) == 2
+    assert trades[0].tick_id == ticks[0].id
+    assert trades[1].tick_id == ticks[1].id
+
+
+def test_atomic_rollback_on_failure_leaves_zero_partial_records(isolated_db, monkeypatch):
+    """Verifies that an unhandled exception inside sync rolls back all tables atomically."""
+    session, _ = isolated_db
+    t0 = datetime(2026, 1, 1, 16, 0, tzinfo=timezone.utc)
+    c0 = {"timestamp": t0, "open": 63000.0, "high": 63200.0, "low": 62900.0, "close": 63100.0, "volume": 60.0}
+
+    monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: c0)
+    mock_signals = MagicMock()
+    mock_signals.invoke.return_value = {"volatility_range_pct": 1.0}
+    monkeypatch.setattr(sync, "calculate_technical_signals", mock_signals)
+    mock_ml = MagicMock()
+    mock_ml.invoke.return_value = {"expected_return_pct": 0.5, "predicted_target_price": 63400.0, "confidence": 0.8, "clears_hurdle": True}
+    monkeypatch.setattr(sync, "get_model_return_forecast", mock_ml)
+
+    # Inject failure during Council Deliberation
+    def _crashing_deliberation(**k):
+        raise RuntimeError("LLM rate limit or network partition")
+
+    monkeypatch.setattr(sync, "run_trading_graph", _crashing_deliberation)
+
+    with pytest.raises(RuntimeError, match="LLM rate limit"):
+        sync.sync_hourly_quant_cycle(force=False)
+
+    # Verify atomic rollback: ZERO ticks, ZERO audits, ZERO portfolio changes
+    session.expire_all()
+    assert session.execute(select(MarketTick)).scalars().all().__len__() == 0
+    assert session.execute(select(CouncilAudit)).scalars().all().__len__() == 0
+    assert session.execute(select(PaperPortfolio)).scalars().all().__len__() == 0
+
+
+def test_execute_paper_order_concurrent_idempotency_guard(isolated_db):
+    """
+    Verifies that calling execute_paper_order directly with the same tick_id:
+    1. Returns the existing committed record on duplicate invocation.
+    2. Does not apply double deduction of fees or cash.
+    3. Prevents duplicate database records via the unique tick_id index.
+    """
+    session, _ = isolated_db
+    order1 = execute_paper_order(session, "BUY", 60000.0, kelly_fraction=0.10, tick_id=501)
+    session.commit()
+
+    cash1 = order1.cash_balance
+    btc1 = order1.btc_balance
+    id1 = order1.id
+
+    # Call 2 with identical tick_id
+    order2 = execute_paper_order(session, "BUY", 60000.0, kelly_fraction=0.10, tick_id=501)
+    assert order2.id == id1
+    assert order2.cash_balance == cash1
+    assert order2.btc_balance == btc1
+
+    # Verify only 1 order with tick_id=501 in database
+    records = session.execute(select(PaperPortfolio).where(PaperPortfolio.tick_id == 501)).scalars().all()
+    assert len(records) == 1
+
+
+def test_execute_paper_order_savepoint_conflict_recovery(isolated_db, monkeypatch):
+    """
+    Verifies that when a concurrent race causes Layer 0's pre-check to miss a committed order,
+    the nested transaction savepoint catches IntegrityError on unique tick_id collision,
+    rolls back the savepoint cleanly, and recovers the winning committed order (Finding D-05).
+    """
+    session, _ = isolated_db
+    order1 = execute_paper_order(session, "BUY", 60000.0, kelly_fraction=0.10, tick_id=701)
+    session.commit()
+
+    # Simulate race window where Layer 0 pre-check misses the order (e.g. concurrent execution before commit)
+    real_execute = session.execute
+    call_count = 0
+
+    def _simulated_race_execute(stmt, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # First execute in execute_paper_order is the Layer 0 query: return None
+            mock_res = MagicMock()
+            mock_res.scalar_one_or_none.return_value = None
+            return mock_res
+        return real_execute(stmt, *args, **kwargs)
+
+    monkeypatch.setattr(session, "execute", _simulated_race_execute)
+
+    # Calling execute_paper_order will bypass Layer 0, hit IntegrityError in session.flush(),
+    # roll back the savepoint cleanly, and recover order1 in the except IntegrityError block.
+    order2 = execute_paper_order(session, "BUY", 60000.0, kelly_fraction=0.10, tick_id=701)
+
+    assert order2.id == order1.id
+    assert order2.cash_balance == order1.cash_balance
+    assert order2.btc_balance == order1.btc_balance
+
+    # Ensure transaction is clean and exactly 1 order exists for tick_id=701
+    all_orders = session.execute(select(PaperPortfolio).where(PaperPortfolio.tick_id == 701)).scalars().all()
+    assert len(all_orders) == 1
+
+
+def test_init_db_detects_duplicate_timestamps_and_skips_unique_index():
+    """
+    Verifies that init_db() detects existing duplicate timestamps in market_ticks,
+    skips creating the unique index to prevent crash/corruption, and preserves all existing
+    historical records without deletion or alteration (Finding D-02).
+    """
+    from sqlalchemy import create_engine, inspect, Table, Column, Integer, DateTime, Float, String, MetaData, func
+    from src.database.connection import init_db as run_init_db
+
+    test_engine = create_engine("sqlite:///:memory:")
+    meta = MetaData()
+    ticks_table = Table(
+        "market_ticks",
+        meta,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("timestamp", DateTime(timezone=True), nullable=False),
+        Column("open", Float, nullable=False),
+        Column("high", Float, nullable=False),
+        Column("low", Float, nullable=False),
+        Column("close", Float, nullable=False),
+        Column("volume", Float, nullable=False),
+        Column("model_version", String(32), nullable=False, default="v1"),
+        Column("feature_schema_version", String(16), nullable=False, default="v1"),
+    )
+    meta.create_all(test_engine)
+
+    t_dup = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    with test_engine.connect() as conn:
+        conn.execute(ticks_table.insert(), [
+            {"timestamp": t_dup, "open": 60000.0, "high": 60100.0, "low": 59900.0, "close": 60050.0, "volume": 10.0},
+            {"timestamp": t_dup, "open": 60000.0, "high": 60100.0, "low": 59900.0, "close": 60050.0, "volume": 12.0},
+        ])
+        conn.commit()
+
+    # Run init_db on this engine with duplicate rows
+    run_init_db(test_engine)
+
+    # 1. Verify zero historical records deleted (both duplicate rows preserved)
+    with test_engine.connect() as conn:
+        row_count = conn.execute(select(func.count()).select_from(ticks_table)).scalar()
+        assert row_count == 2
+
+    # 2. Verify uq_market_ticks_timestamp was NOT created
+    inspector = inspect(test_engine)
+    indexes = [idx["name"] for idx in inspector.get_indexes("market_ticks")]
+    assert "uq_market_ticks_timestamp" not in indexes
+
+
+def test_init_db_fails_closed_when_column_addition_fails(monkeypatch):
+    """
+    Verifies that init_db() raises RuntimeError with actionable diagnostics
+    if adding the required tick_id column fails, rather than silently swallowing the error (Finding D-01).
+    """
+    from sqlalchemy import create_engine
+    from src.database.connection import init_db as run_init_db
+
+    test_engine = create_engine("sqlite:///:memory:")
+    real_connect = test_engine.connect
+
+    def _crashing_connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        real_exec = conn.execute
+
+        def _exec_with_failure(stmt, *a, **kw):
+            stmt_str = str(stmt)
+            if "ALTER TABLE paper_portfolio ADD COLUMN" in stmt_str:
+                raise RuntimeError("Simulated disk I/O or permissions failure during ALTER TABLE")
+            return real_exec(stmt, *a, **kw)
+
+        conn.execute = _exec_with_failure
+        return conn
+
+    # First create legacy table without tick_id
+    with test_engine.connect() as conn:
+        conn.execute(text("CREATE TABLE paper_portfolio (id INTEGER PRIMARY KEY AUTOINCREMENT, action VARCHAR(16));"))
+        conn.commit()
+
+    monkeypatch.setattr(test_engine, "connect", _crashing_connect)
+
+    with pytest.raises(RuntimeError, match="Database migration failed: unable to add required column 'tick_id'"):
+        run_init_db(test_engine)
+
+
+def test_has_tick_id_column_and_fallback_on_legacy_schema():
+    """
+    Verifies that has_tick_id_column accurately detects when tick_id is absent from disk,
+    and is_paper_trade_executed_for_tick safely uses the CouncilAudit fallback without crashing (Finding D-04).
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from src.database.connection import has_tick_id_column
+    from src.database.models import CouncilAudit
+    from src.engine.sync import is_paper_trade_executed_for_tick
+
+    test_engine = create_engine("sqlite:///:memory:")
+    with test_engine.connect() as conn:
+        conn.execute(text("CREATE TABLE paper_portfolio (id INTEGER PRIMARY KEY, action VARCHAR(16));"))
+        conn.commit()
+    CouncilAudit.__table__.create(test_engine)
+    with test_engine.connect() as conn:
+        conn.execute(
+            CouncilAudit.__table__.insert(),
+            [{
+                "id": 1,
+                "tick_id": 999,
+                "timestamp": datetime.now(timezone.utc),
+                "strategist_action": "HOLD",
+                "strategist_conviction": 5,
+                "risk_verdict": "APPROVED",
+                "kelly_fraction": 0.1,
+                "final_decision": "HOLD",
+                "execution_notes": "Initial thesis",
+            }],
+        )
+        conn.commit()
+
+    Session = sessionmaker(bind=test_engine)
+    session = Session()
+
+    # 1. has_tick_id_column detects tick_id is absent on disk
+    assert has_tick_id_column(session) is False
+
+    # 2. is_paper_trade_executed_for_tick uses CouncilAudit fallback cleanly without SQL crash
+    executed = is_paper_trade_executed_for_tick(session, 999)
+    assert executed is True
+
+    # 3. For a tick without council audit, returns False
+    not_executed = is_paper_trade_executed_for_tick(session, 888)
+    assert not_executed is False
+
+    session.close()
+
+
 
