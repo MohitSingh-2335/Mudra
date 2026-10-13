@@ -98,6 +98,7 @@ def _parse_execution_cost_rate(
 # - Taker Fee: 0.05% per side (decimal rate: 0.0005)
 # - Slippage:  0.02% per side (decimal rate: 0.0002)
 INITIAL_CAPITAL_USD = float(os.getenv("INITIAL_CAPITAL_USD", 10000.0))
+PORTFOLIO_ADVISORY_LOCK_ID: int = int(os.getenv("PORTFOLIO_ADVISORY_LOCK_ID", "888001"))
 TAKER_FEE_RATE: float = _parse_execution_cost_rate("TAKER_FEE_RATE", "TAKER_FEE_PCT", default_rate=0.0005)
 SLIPPAGE_RATE: float = _parse_execution_cost_rate("SLIPPAGE_RATE", "SLIPPAGE_PCT", default_rate=0.0002)
 
@@ -237,6 +238,7 @@ CLASSIFIER_FEATURES = [
 __all__ = [
     "BASE_DIR",
     "INITIAL_CAPITAL_USD",
+    "PORTFOLIO_ADVISORY_LOCK_ID",
     "TAKER_FEE_RATE",
     "SLIPPAGE_RATE",
     "TOTAL_FRICTION_PER_SIDE_RATE",
