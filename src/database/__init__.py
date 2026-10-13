@@ -7,7 +7,7 @@ from .models import (
     Reconciliation,
     PaperPortfolio,
 )
-from .connection import get_db, init_db, test_connection, engine
+from .connection import get_db, init_db, test_connection, engine, has_tick_id_column
 
 __all__ = [
     "Base",
@@ -20,4 +20,5 @@ __all__ = [
     "init_db",
     "test_connection",
     "engine",
+    "has_tick_id_column",
 ]
