@@ -30,13 +30,16 @@ from config import (
     CLASSIFIER_MODEL_PATH,
     FEATURED_BTC_DATA_PATH,
     REGRESSOR_FEATURES,
-    CLASSIFIER_FEATURES
+    CLASSIFIER_FEATURES,
+    INITIAL_CAPITAL_USD,
+    TAKER_FEE_RATE as CONFIG_TAKER_FEE_RATE,
+    SLIPPAGE_RATE as CONFIG_SLIPPAGE_RATE,
 )
 
-# Realistic Trading Parameters
-INITIAL_CAPITAL = 10000.0  # Starting portfolio cash in USDT
-TAKER_FEE_RATE = 0.001     # 0.10% Binance taker fee per side (0.20% round trip)
-SLIPPAGE_RATE = 0.0005     # 0.05% estimated execution slippage per fill
+# Realistic Trading Parameters (Canonical Defaults from config.py)
+INITIAL_CAPITAL = INITIAL_CAPITAL_USD  # Starting portfolio cash in USDT
+TAKER_FEE_RATE = CONFIG_TAKER_FEE_RATE  # 0.05% Binance VIP-0 taker fee per side (decimal rate: 0.0005)
+SLIPPAGE_RATE = CONFIG_SLIPPAGE_RATE   # 0.02% estimated execution slippage per fill (decimal rate: 0.0002)
 
 
 def load_backtest_data(
@@ -167,7 +170,9 @@ def run_backtest_simulation(
     clf_model: Any,
     reg_model: Optional[Any] = None,
     strategy_mode: str = "fused",
-    return_threshold: float = 0.002
+    return_threshold: float = 0.002,
+    taker_fee_rate: Optional[float] = None,
+    slippage_rate: Optional[float] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Simulates hourly trade execution across the holdout test period.
@@ -186,14 +191,18 @@ def run_backtest_simulation(
     else:
         signals = (clf_preds == 1).astype(int)
 
-    return _simulate_from_signals(test_df, signals)
+    fee = TAKER_FEE_RATE if taker_fee_rate is None else taker_fee_rate
+    slip = SLIPPAGE_RATE if slippage_rate is None else slippage_rate
+    return _simulate_from_signals(test_df, signals, taker_fee_rate=fee, slippage_rate=slip)
 
 
 def run_backtest(
     test_df: pd.DataFrame,
     model: Any,
     scaler: Optional[Any] = None,
-    threshold: float = 0.5
+    threshold: float = 0.5,
+    taker_fee_rate: Optional[float] = None,
+    slippage_rate: Optional[float] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Backwards-compatible interface supporting empirical research scripts
@@ -213,7 +222,9 @@ def run_backtest(
     else:
         signals = model.predict(X_proc)
 
-    return _simulate_from_signals(test_df, signals)
+    fee = TAKER_FEE_RATE if taker_fee_rate is None else taker_fee_rate
+    slip = SLIPPAGE_RATE if slippage_rate is None else slippage_rate
+    return _simulate_from_signals(test_df, signals, taker_fee_rate=fee, slippage_rate=slip)
 
 
 def calculate_quant_metrics(
