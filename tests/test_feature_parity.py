@@ -13,7 +13,13 @@ import joblib
 
 import config
 from src.data_preprocessing import load_and_clean_data
-from src.feature_engineering import create_features, extract_features_for_inference
+from src.feature_engineering import (
+    create_features,
+    extract_features_for_inference,
+    validate_inference_features,
+    predict_with_validation,
+    predict_proba_with_validation,
+)
 from src.agents.tools import (
     calculate_technical_signals,
     get_model_return_forecast,
@@ -1164,6 +1170,154 @@ def test_merge_fear_greed_rolling_mean_consistency():
     # Row 71 (the 72nd candle) should have rolling mean of 40.0 exactly
     assert feat_df["fng_mean_3d"].iloc[71] == pytest.approx(40.0, abs=1e-5)
     assert feat_df["fng_mean_3d"].iloc[-1] == pytest.approx(40.0, abs=1e-5)
+
+
+# =====================================================================
+# TASK-P1-03: Feature Ordering & Schema Validation Tests
+# =====================================================================
+
+def test_validate_inference_features_regressor_valid():
+    """Valid dict and DataFrame for regressor features validate and retain exact order."""
+    valid_dict = {col: float(i + 1) for i, col in enumerate(config.REGRESSOR_FEATURES)}
+    
+    # 1. Dict input
+    df_from_dict = validate_inference_features(valid_dict, model_type="regressor")
+    assert isinstance(df_from_dict, pd.DataFrame)
+    assert list(df_from_dict.columns) == config.REGRESSOR_FEATURES
+    assert len(df_from_dict) == 1
+    assert df_from_dict["volume"].iloc[0] == 1.0
+
+    # 2. DataFrame input
+    df_from_df = validate_inference_features(df_from_dict, model_type="regressor")
+    assert list(df_from_df.columns) == config.REGRESSOR_FEATURES
+    assert len(df_from_df) == 1
+
+
+def test_validate_inference_features_classifier_valid():
+    """Valid dict and DataFrame for classifier features validate and retain exact order."""
+    valid_dict = {col: float(i + 1) for i, col in enumerate(config.CLASSIFIER_FEATURES)}
+    
+    # 1. Dict input
+    df_from_dict = validate_inference_features(valid_dict, model_type="classifier")
+    assert isinstance(df_from_dict, pd.DataFrame)
+    assert list(df_from_dict.columns) == config.CLASSIFIER_FEATURES
+    assert len(df_from_dict) == 1
+
+    # 2. DataFrame input
+    df_from_df = validate_inference_features(df_from_dict, model_type="classifier")
+    assert list(df_from_df.columns) == config.CLASSIFIER_FEATURES
+    assert len(df_from_df) == 1
+
+
+def test_validate_inference_features_missing_column_raises():
+    """Missing feature in dict or DataFrame raises explicit ValueError."""
+    # Dict missing one regressor feature
+    incomplete_dict = {col: 1.0 for col in config.REGRESSOR_FEATURES[:-1]}
+    with pytest.raises(ValueError, match="missing required regressor features"):
+        validate_inference_features(incomplete_dict, model_type="regressor")
+
+    # DataFrame missing one classifier feature
+    incomplete_df = pd.DataFrame([{col: 1.0 for col in config.CLASSIFIER_FEATURES[1:]}])
+    with pytest.raises(ValueError, match="missing required classifier features"):
+        validate_inference_features(incomplete_df, model_type="classifier")
+
+
+def test_validate_inference_features_shuffled_order_raises():
+    """Shuffled/transposed columns in input DataFrame raise explicit ValueError."""
+    # Swap first two regressor columns: ['Price Change', 'volume', ...]
+    shuffled_cols = list(config.REGRESSOR_FEATURES)
+    shuffled_cols[0], shuffled_cols[1] = shuffled_cols[1], shuffled_cols[0]
+    shuffled_df = pd.DataFrame([{col: 1.0 for col in shuffled_cols}], columns=shuffled_cols)
+
+    with pytest.raises(ValueError, match="Feature ordering contract violation for regressor"):
+        validate_inference_features(shuffled_df, model_type="regressor")
+
+    # Swap first two classifier columns
+    shuffled_clf_cols = list(config.CLASSIFIER_FEATURES)
+    shuffled_clf_cols[0], shuffled_clf_cols[1] = shuffled_clf_cols[1], shuffled_clf_cols[0]
+    shuffled_clf_df = pd.DataFrame([{col: 1.0 for col in shuffled_clf_cols}], columns=shuffled_clf_cols)
+
+    with pytest.raises(ValueError, match="Feature ordering contract violation for classifier"):
+        validate_inference_features(shuffled_clf_df, model_type="classifier")
+
+
+def test_validate_inference_features_extra_columns_raises():
+    """Extra unexpected columns in DataFrame raise explicit ValueError."""
+    extra_cols = list(config.REGRESSOR_FEATURES) + ["unexpected_column"]
+    df_extra = pd.DataFrame([{col: 1.0 for col in extra_cols}], columns=extra_cols)
+
+    with pytest.raises(ValueError, match="Input DataFrame contains unexpected extra columns"):
+        validate_inference_features(df_extra, model_type="regressor")
+
+
+def test_validate_inference_features_nan_and_inf_detection():
+    """NaN and Infinite values fail closed with explicit ValueError."""
+    # NaN in dict
+    nan_dict = {col: 1.0 for col in config.REGRESSOR_FEATURES}
+    nan_dict["rsi"] = float("nan")
+    with pytest.raises(ValueError, match="NaNs encountered in regressor input features"):
+        validate_inference_features(nan_dict, model_type="regressor")
+
+    # Inf in DataFrame
+    inf_dict = {col: 1.0 for col in config.CLASSIFIER_FEATURES}
+    inf_dict["macd"] = float("inf")
+    df_inf = pd.DataFrame([inf_dict], columns=config.CLASSIFIER_FEATURES)
+    with pytest.raises(ValueError, match="Infinite values encountered in classifier input features"):
+        validate_inference_features(df_inf, model_type="classifier")
+
+
+def test_validate_inference_features_unsupported_model_type():
+    """Unsupported model type raises ValueError."""
+    valid_dict = {col: 1.0 for col in config.REGRESSOR_FEATURES}
+    with pytest.raises(ValueError, match="Unsupported model_type 'transformer'"):
+        validate_inference_features(valid_dict, model_type="transformer")
+
+
+def test_predict_with_validation_success_and_shuffled_defense():
+    """predict_with_validation executes on valid data and intercepts shuffled data."""
+    class DummyModel:
+        def predict(self, X):
+            assert list(X.columns) == config.REGRESSOR_FEATURES
+            return np.array([0.0042])
+
+    model = DummyModel()
+    valid_dict = {col: 1.0 for col in config.REGRESSOR_FEATURES}
+    
+    # Success on valid dict
+    pred = predict_with_validation(model, valid_dict, model_type="regressor")
+    assert pred[0] == 0.0042
+
+    # Intercepts shuffled DataFrame
+    shuffled_cols = list(config.REGRESSOR_FEATURES)
+    shuffled_cols[0], shuffled_cols[1] = shuffled_cols[1], shuffled_cols[0]
+    shuffled_df = pd.DataFrame([{col: 1.0 for col in shuffled_cols}], columns=shuffled_cols)
+    
+    with pytest.raises(ValueError, match="Feature ordering contract violation"):
+        predict_with_validation(model, shuffled_df, model_type="regressor")
+
+
+def test_predict_proba_with_validation_success_and_shuffled_defense():
+    """predict_proba_with_validation executes on valid data and intercepts shuffled data."""
+    class DummyClassifier:
+        def predict_proba(self, X):
+            assert list(X.columns) == config.CLASSIFIER_FEATURES
+            return np.array([[0.35, 0.65]])
+
+    clf = DummyClassifier()
+    valid_dict = {col: 1.0 for col in config.CLASSIFIER_FEATURES}
+
+    # Success on valid dict
+    probs = predict_proba_with_validation(clf, valid_dict)
+    assert probs[0, 1] == 0.65
+
+    # Intercepts shuffled DataFrame
+    shuffled_cols = list(config.CLASSIFIER_FEATURES)
+    shuffled_cols[0], shuffled_cols[1] = shuffled_cols[1], shuffled_cols[0]
+    shuffled_df = pd.DataFrame([{col: 1.0 for col in shuffled_cols}], columns=shuffled_cols)
+
+    with pytest.raises(ValueError, match="Feature ordering contract violation"):
+        predict_proba_with_validation(clf, shuffled_df)
+
 
 
 
