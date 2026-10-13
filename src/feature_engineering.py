@@ -269,7 +269,7 @@ def validate_inference_features(
         missing = [col for col in expected_features if col not in features]
         if missing:
             raise ValueError(
-                f"Feature contract violation: Input dictionary missing required {model_type_normalized} features: {missing}"
+                f"Feature parity violation: missing required {model_type_normalized} features: {missing}"
             )
         # Build DataFrame with exact expected order
         df = pd.DataFrame([{col: features[col] for col in expected_features}], columns=expected_features)
@@ -280,7 +280,7 @@ def validate_inference_features(
         missing = [col for col in expected_features if col not in features.columns]
         if missing:
             raise ValueError(
-                f"Feature contract violation: Input DataFrame missing required {model_type_normalized} features: {missing}"
+                f"Feature parity violation: missing required {model_type_normalized} features: {missing}"
             )
 
         # Enforce exact column order on the first len(expected_features) columns
@@ -306,6 +306,28 @@ def validate_inference_features(
             f"Unsupported input type for features: {type(features).__name__}. Expected dict or pd.DataFrame."
         )
 
+    # Enforce real numeric types and convert valid numbers stored in object-typed columns
+    for col in expected_features:
+        if pd.api.types.is_bool_dtype(df[col]) or (df[col].dtype == object and df[col].map(lambda v: isinstance(v, (bool, np.bool_))).any()):
+            raise ValueError(
+                f"Feature integrity violation: Boolean values not permitted in {model_type_normalized} input feature '{col}'."
+            )
+        if pd.api.types.is_complex_dtype(df[col]) or (df[col].dtype == object and df[col].map(lambda v: isinstance(v, (complex, np.complexfloating))).any()):
+            raise ValueError(
+                f"Feature integrity violation: Complex values not permitted in {model_type_normalized} input feature '{col}'."
+            )
+        if not (pd.api.types.is_float_dtype(df[col]) or pd.api.types.is_integer_dtype(df[col])):
+            try:
+                df[col] = pd.to_numeric(df[col], errors="raise")
+            except (ValueError, TypeError):
+                raise ValueError(
+                    f"Feature integrity violation: Non-numeric values encountered in {model_type_normalized} input feature '{col}'."
+                )
+            if not (pd.api.types.is_float_dtype(df[col]) or pd.api.types.is_integer_dtype(df[col])):
+                raise ValueError(
+                    f"Feature integrity violation: Non-numeric values encountered in {model_type_normalized} input feature '{col}'."
+                )
+
     # Validate NaN values
     if df.isna().any().any():
         nan_cols = [c for c in expected_features if df[c].isna().any()]
@@ -313,10 +335,9 @@ def validate_inference_features(
             f"Feature integrity violation: NaNs encountered in {model_type_normalized} input features: {nan_cols}"
         )
 
-    # Validate Infinite values
-    numeric_df = df.select_dtypes(include=[np.number])
-    if np.isinf(numeric_df).any().any():
-        inf_cols = [c for c in numeric_df.columns if np.isinf(numeric_df[c]).any()]
+    # Validate Infinite values across all required features
+    if np.isinf(df[expected_features]).any().any():
+        inf_cols = [c for c in expected_features if np.isinf(df[c]).any()]
         raise ValueError(
             f"Feature integrity violation: Infinite values encountered in {model_type_normalized} input features: {inf_cols}"
         )
