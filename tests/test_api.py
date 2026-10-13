@@ -106,6 +106,48 @@ def test_explain_endpoint(client, sample_features_payload):
     assert len(data["top_bearish_drivers"]) <= 4
 
 
+def test_predict_nan_feature_rejected(client, sample_features_payload):
+    """Verify that /predict rejects payloads containing NaNs with HTTP 400."""
+    bad_payload = {
+        "current_price": sample_features_payload["current_price"],
+        "features": dict(sample_features_payload["features"])
+    }
+    bad_payload["features"]["rsi"] = float("nan")
+
+    response = client.post("/predict", json=bad_payload)
+    assert response.status_code == 400
+    assert "Feature validation error" in response.json()["detail"]
+    assert "NaNs encountered" in response.json()["detail"]
+
+
+def test_predict_inf_feature_rejected(client, sample_features_payload):
+    """Verify that /predict rejects payloads containing infinite values with HTTP 400."""
+    bad_payload = {
+        "current_price": sample_features_payload["current_price"],
+        "features": dict(sample_features_payload["features"])
+    }
+    bad_payload["features"]["rsi"] = float("inf")
+
+    response = client.post("/predict", json=bad_payload)
+    assert response.status_code == 400
+    assert "Feature validation error" in response.json()["detail"]
+    assert "Infinite values encountered" in response.json()["detail"]
+
+
+def test_explain_nan_feature_rejected(client, sample_features_payload):
+    """Verify that /explain rejects payloads containing NaNs with HTTP 400."""
+    bad_payload = {
+        "current_price": sample_features_payload["current_price"],
+        "features": dict(sample_features_payload["features"])
+    }
+    bad_payload["features"]["rsi"] = float("nan")
+
+    response = client.post("/explain", json=bad_payload)
+    assert response.status_code == 400
+    assert "Feature validation error" in response.json()["detail"]
+    assert "NaNs encountered" in response.json()["detail"]
+
+
 def test_agents_trade_endpoint(client):
     """Verify that /agents/trade runs the LangGraph 2-node pipeline and returns valid decision schema."""
     payload = {
