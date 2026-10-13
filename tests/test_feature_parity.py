@@ -1319,6 +1319,272 @@ def test_predict_proba_with_validation_success_and_shuffled_defense():
         predict_proba_with_validation(clf, shuffled_df)
 
 
+def test_get_model_return_forecast_nan_inf_defense():
+    """Verify get_model_return_forecast intercepts NaNs and Infinities via centralized validation."""
+    all_features = sorted(list(set(config.REGRESSOR_FEATURES + config.CLASSIFIER_FEATURES)))
+    valid_features = {col: 1.0 for col in all_features}
+    valid_features["close"] = 65000.0
+
+    # NaN defense
+    nan_features = valid_features.copy()
+    nan_features["rsi"] = float("nan")
+    with pytest.raises(ValueError, match="NaNs encountered in regressor input features"):
+        get_model_return_forecast.invoke({"features": nan_features})
+
+    # Inf defense
+    inf_features = valid_features.copy()
+    inf_features["rsi"] = float("inf")
+    with pytest.raises(ValueError, match="Infinite values encountered in regressor input features"):
+        get_model_return_forecast.invoke({"features": inf_features})
+
+
+def test_generate_live_forecast_nan_defense_falls_back_safely(sample_historical_candles):
+    """
+    Verify generate_live_forecast catches NaN/Inf validation failure and gracefully
+    falls back to neutral defaults without raising an unhandled exception.
+    """
+    from unittest.mock import MagicMock, patch
+    from app import generate_live_forecast
+
+    mock_reg = MagicMock()
+    mock_clf = MagicMock()
+
+    live_df = sample_historical_candles.copy()
+
+    # Patch extract_features_for_inference to return a dict containing a NaN
+    all_features = sorted(list(set(config.REGRESSOR_FEATURES + config.CLASSIFIER_FEATURES)))
+    corrupted_features = {f: 1.0 for f in all_features}
+    corrupted_features["rsi"] = float("nan")
+
+    with patch("src.feature_engineering.extract_features_for_inference", return_value=corrupted_features):
+        forecast = generate_live_forecast(
+            live_df=live_df,
+            reg_model=mock_reg,
+            clf_model=mock_clf,
+            is_stale=False,
+        )
+
+    assert forecast is not None
+    assert forecast["pred_ret_pct"] == 0.0
+    assert forecast["direction_badge"] == "SIDEWAYS (CHOP)"
+    assert forecast["prob_up"] == 50.0
+    assert forecast["prob_down"] == 50.0
+
+
+def test_validate_inference_features_string_rejected():
+    """String values such as 'invalid' in dict or DataFrame fail with explicit ValueError."""
+    valid_features = {col: 1.0 for col in config.REGRESSOR_FEATURES}
+
+    # In dict
+    str_dict = valid_features.copy()
+    str_dict["rsi"] = "invalid"
+    with pytest.raises(ValueError, match="Non-numeric values encountered in regressor input feature 'rsi'"):
+        validate_inference_features(str_dict, model_type="regressor")
+
+    # In DataFrame
+    df_str = pd.DataFrame([str_dict])
+    with pytest.raises(ValueError, match="Non-numeric values encountered in regressor input feature 'rsi'"):
+        validate_inference_features(df_str, model_type="regressor")
+
+
+def test_validate_inference_features_boolean_rejected():
+    """Booleans fail closed with explicit ValueError rather than being cast silently to 1.0/0.0."""
+    valid_features = {col: 1.0 for col in config.CLASSIFIER_FEATURES}
+
+    bool_dict = valid_features.copy()
+    bool_dict["rsi"] = True
+    with pytest.raises(ValueError, match="Boolean values not permitted in classifier input feature 'rsi'"):
+        validate_inference_features(bool_dict, model_type="classifier")
+
+    df_bool = pd.DataFrame([bool_dict])
+    with pytest.raises(ValueError, match="Boolean values not permitted in classifier input feature 'rsi'"):
+        validate_inference_features(df_bool, model_type="classifier")
+
+    # In object-typed Series
+    df_obj_bool = pd.DataFrame([valid_features])
+    df_obj_bool["rsi"] = pd.Series([True], dtype=object)
+    with pytest.raises(ValueError, match="Boolean values not permitted in classifier input feature 'rsi'"):
+        validate_inference_features(df_obj_bool, model_type="classifier")
+
+
+def test_validate_inference_features_none_rejected():
+    """None values in dict or object-typed DataFrame fail with explicit ValueError."""
+    valid_features = {col: 1.0 for col in config.REGRESSOR_FEATURES}
+
+    # In dict
+    none_dict = valid_features.copy()
+    none_dict["rsi"] = None
+    with pytest.raises(ValueError, match="NaNs encountered in regressor input features"):
+        validate_inference_features(none_dict, model_type="regressor")
+
+    # In object-typed DataFrame
+    df_none = pd.DataFrame([valid_features])
+    df_none["rsi"] = pd.Series([None], dtype=object)
+    with pytest.raises(ValueError, match="NaNs encountered in regressor input features"):
+        validate_inference_features(df_none, model_type="regressor")
+
+
+def test_validate_inference_features_complex_rejected():
+    """Complex numbers in dict, complex-typed DataFrame, or object-typed DataFrame fail explicitly."""
+    valid_features = {col: 1.0 for col in config.REGRESSOR_FEATURES}
+
+    # Dict with complex
+    c_dict = valid_features.copy()
+    c_dict["rsi"] = 1 + 2j
+    with pytest.raises(ValueError, match="Complex values not permitted in regressor input feature 'rsi'"):
+        validate_inference_features(c_dict, model_type="regressor")
+
+    # DataFrame with complex dtype
+    df_complex = pd.DataFrame([valid_features])
+    df_complex["rsi"] = pd.Series([1 + 2j], dtype=complex)
+    with pytest.raises(ValueError, match="Complex values not permitted in regressor input feature 'rsi'"):
+        validate_inference_features(df_complex, model_type="regressor")
+
+    # DataFrame with object-wrapped complex
+    df_obj_complex = pd.DataFrame([valid_features])
+    df_obj_complex["rsi"] = pd.Series([1 + 2j], dtype=object)
+    with pytest.raises(ValueError, match="Complex values not permitted in regressor input feature 'rsi'"):
+        validate_inference_features(df_obj_complex, model_type="regressor")
+
+
+def test_validate_inference_features_nullable_extension_dtypes():
+    """Verify behavior of pandas nullable extension dtypes (boolean, Int64, Float64)."""
+    valid_features = {col: 1.0 for col in config.REGRESSOR_FEATURES}
+
+    # 1. Nullable boolean: must be explicitly rejected
+    df_bool_ext = pd.DataFrame([valid_features])
+    df_bool_ext["rsi"] = pd.Series([True], dtype="boolean")
+    with pytest.raises(ValueError, match="Boolean values not permitted in regressor input feature 'rsi'"):
+        validate_inference_features(df_bool_ext, model_type="regressor")
+
+    df_bool_ext_na = pd.DataFrame([valid_features])
+    df_bool_ext_na["rsi"] = pd.Series([pd.NA], dtype="boolean")
+    with pytest.raises(ValueError, match="Boolean values not permitted in regressor input feature 'rsi'"):
+        validate_inference_features(df_bool_ext_na, model_type="regressor")
+
+    # 2. Nullable integer: valid value accepted, pd.NA rejected fail-closed
+    df_int_ext = pd.DataFrame([valid_features])
+    df_int_ext["vol_1h"] = pd.Series([100], dtype="Int64")
+    res_int = validate_inference_features(df_int_ext, model_type="regressor")
+    assert res_int["vol_1h"].iloc[0] == 100
+
+    df_int_na = pd.DataFrame([valid_features])
+    df_int_na["vol_1h"] = pd.Series([pd.NA], dtype="Int64")
+    with pytest.raises(ValueError, match="NaNs encountered in regressor input features"):
+        validate_inference_features(df_int_na, model_type="regressor")
+
+    # 3. Nullable float: valid value accepted, pd.NA and infinities rejected fail-closed
+    df_flt_ext = pd.DataFrame([valid_features])
+    df_flt_ext["rsi"] = pd.Series([42.5], dtype="Float64")
+    res_flt = validate_inference_features(df_flt_ext, model_type="regressor")
+    assert res_flt["rsi"].iloc[0] == 42.5
+
+    df_flt_na = pd.DataFrame([valid_features])
+    df_flt_na["rsi"] = pd.Series([pd.NA], dtype="Float64")
+    with pytest.raises(ValueError, match="NaNs encountered in regressor input features"):
+        validate_inference_features(df_flt_na, model_type="regressor")
+
+    df_flt_inf = pd.DataFrame([valid_features])
+    df_flt_inf["rsi"] = pd.Series([float("inf")], dtype="Float64")
+    with pytest.raises(ValueError, match="Infinite values encountered in regressor input features"):
+        validate_inference_features(df_flt_inf, model_type="regressor")
+
+    df_flt_neginf = pd.DataFrame([valid_features])
+    df_flt_neginf["rsi"] = pd.Series([float("-inf")], dtype="Float64")
+    with pytest.raises(ValueError, match="Infinite values encountered in regressor input features"):
+        validate_inference_features(df_flt_neginf, model_type="regressor")
+
+
+def test_validate_inference_features_object_mixed_invalid_rejected():
+    """Object columns containing valid numbers mixed with invalid entries fail closed."""
+    valid_features = {col: 1.0 for col in config.REGRESSOR_FEATURES}
+    base_2rows = pd.DataFrame([valid_features, valid_features])
+
+    # Mixed float + string
+    df_mixed_str = base_2rows.copy()
+    df_mixed_str["rsi"] = pd.Series([42.5, "invalid"], dtype=object)
+    with pytest.raises(ValueError, match="Non-numeric values encountered in regressor input feature 'rsi'"):
+        validate_inference_features(df_mixed_str, model_type="regressor")
+
+    # Mixed float + boolean
+    df_mixed_bool = base_2rows.copy()
+    df_mixed_bool["rsi"] = pd.Series([42.5, True], dtype=object)
+    with pytest.raises(ValueError, match="Boolean values not permitted in regressor input feature 'rsi'"):
+        validate_inference_features(df_mixed_bool, model_type="regressor")
+
+    # Mixed float + complex
+    df_mixed_c = base_2rows.copy()
+    df_mixed_c["rsi"] = pd.Series([42.5, 1 + 2j], dtype=object)
+    with pytest.raises(ValueError, match="Complex values not permitted in regressor input feature 'rsi'"):
+        validate_inference_features(df_mixed_c, model_type="regressor")
+
+    # Mixed float + None
+    df_mixed_none = base_2rows.copy()
+    df_mixed_none["rsi"] = pd.Series([42.5, None], dtype=object)
+    with pytest.raises(ValueError, match="NaNs encountered in regressor input features"):
+        validate_inference_features(df_mixed_none, model_type="regressor")
+
+    # Mixed float + inf
+    df_mixed_inf = base_2rows.copy()
+    df_mixed_inf["rsi"] = pd.Series([42.5, float("inf")], dtype=object)
+    with pytest.raises(ValueError, match="Infinite values encountered in regressor input features"):
+        validate_inference_features(df_mixed_inf, model_type="regressor")
+
+
+def test_validate_inference_features_missing_and_infinities_across_dtypes():
+    """Consistent detection of missing values and infinities across native, extension, and object types."""
+    valid_features = {col: 1.0 for col in config.REGRESSOR_FEATURES}
+
+    # Native float64 NaN & Inf
+    df_nan = pd.DataFrame([valid_features])
+    df_nan["rsi"] = np.nan
+    with pytest.raises(ValueError, match="NaNs encountered in regressor input features"):
+        validate_inference_features(df_nan, model_type="regressor")
+
+    df_inf = pd.DataFrame([valid_features])
+    df_inf["rsi"] = float("inf")
+    with pytest.raises(ValueError, match="Infinite values encountered in regressor input features"):
+        validate_inference_features(df_inf, model_type="regressor")
+
+    df_neginf = pd.DataFrame([valid_features])
+    df_neginf["rsi"] = float("-inf")
+    with pytest.raises(ValueError, match="Infinite values encountered in regressor input features"):
+        validate_inference_features(df_neginf, model_type="regressor")
+
+
+def test_validate_inference_features_object_numeric_coerced():
+    """Numeric values stored in pandas object-typed columns are safely coerced to float/int."""
+    valid_features = {col: 1.0 for col in config.REGRESSOR_FEATURES}
+    base_2rows = pd.DataFrame([valid_features, valid_features])
+    df_obj = base_2rows.copy()
+    df_obj["rsi"] = pd.Series(["42.5", "10.0"], dtype=object)
+    df_obj["vol_1h"] = pd.Series([100, 200], dtype=object)
+
+    validated = validate_inference_features(df_obj, model_type="regressor")
+    assert pd.api.types.is_numeric_dtype(validated["rsi"])
+    assert pd.api.types.is_numeric_dtype(validated["vol_1h"])
+    assert validated["rsi"].tolist() == [42.5, 10.0]
+    assert validated["vol_1h"].tolist() == [100, 200]
+
+
+def test_validate_inference_features_object_inf_rejected():
+    """Infinities inside object-typed columns are caught and rejected fail-closed."""
+    valid_features = {col: 1.0 for col in config.REGRESSOR_FEATURES}
+    df_obj_inf = pd.DataFrame([valid_features])
+    df_obj_inf["rsi"] = pd.Series([float("inf")], dtype=object)
+
+    with pytest.raises(ValueError, match="Infinite values encountered in regressor input features"):
+        validate_inference_features(df_obj_inf, model_type="regressor")
+
+    df_obj_neginf = pd.DataFrame([valid_features])
+    df_obj_neginf["rsi"] = pd.Series([float("-inf")], dtype=object)
+
+    with pytest.raises(ValueError, match="Infinite values encountered in regressor input features"):
+        validate_inference_features(df_obj_neginf, model_type="regressor")
+
+
+
+
 
 
 
