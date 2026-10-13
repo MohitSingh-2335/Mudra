@@ -9,6 +9,7 @@ are strictly serialized without lost updates, stale balance reads, or duplicate 
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 import pytest
 from sqlalchemy import create_engine, select, text
@@ -145,13 +146,13 @@ def test_postgresql_concurrent_multi_tick_paper_orders_serializes(isolated_pg_en
     with PgSessionLocal() as session:
         t1 = MarketTick(
             id=101,
-            timestamp="2026-01-01 12:00:00+00",
+            timestamp=datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc),
             open=60000.0, high=60100.0, low=59900.0, close=60000.0, volume=10.0,
             model_version="v1", feature_schema_version="v1"
         )
         t2 = MarketTick(
             id=102,
-            timestamp="2026-01-01 13:00:00+00",
+            timestamp=datetime(2026, 1, 1, 13, 0, tzinfo=timezone.utc),
             open=60000.0, high=60100.0, low=59900.0, close=60000.0, volume=10.0,
             model_version="v1", feature_schema_version="v1"
         )
@@ -260,6 +261,33 @@ def test_postgresql_concurrent_initial_deposit_race(isolated_pg_engine):
     is created, and both trades execute sequentially.
     """
     PgSessionLocal = sessionmaker(bind=isolated_pg_engine, autocommit=False, autoflush=False)
+
+    # Seed prerequisite MarketTick foreign key records
+    with PgSessionLocal() as session:
+        t1 = MarketTick(
+            id=201,
+            timestamp=datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc),
+            open=60000.0,
+            high=60100.0,
+            low=59900.0,
+            close=60000.0,
+            volume=10.0,
+            model_version="v1",
+            feature_schema_version="v1",
+        )
+        t2 = MarketTick(
+            id=202,
+            timestamp=datetime(2026, 1, 1, 13, 0, tzinfo=timezone.utc),
+            open=60000.0,
+            high=60100.0,
+            low=59900.0,
+            close=60000.0,
+            volume=10.0,
+            model_version="v1",
+            feature_schema_version="v1",
+        )
+        session.add_all([t1, t2])
+        session.commit()
 
     start_barrier = threading.Barrier(2)
     thread_errors: Dict[str, Exception] = {}
