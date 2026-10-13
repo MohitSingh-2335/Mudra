@@ -2,7 +2,7 @@
 """
 Decision Threshold Sweeper for Directional Trading Models.
 Evaluates classification probability thresholds t in [0.50, 0.70] for entering long positions.
-Applies realistic transaction friction (0.10% taker fee per fill) on chronological holdout
+Applies realistic transaction friction (0.05% taker fee + 0.02% slippage = 0.07% per fill) on chronological holdout
 data to determine the optimal risk-adjusted Sharpe ratio and drawdown profile, saving results
 to data/results/threshold_sweep.csv.
 """
@@ -25,14 +25,20 @@ from config import (
     CLASSIFIER_FEATURES,
     FEATURED_BTC_DATA_PATH,
     THRESHOLD_SWEEP,
+    INITIAL_CAPITAL_USD,
+    TAKER_FEE_RATE,
+    SLIPPAGE_RATE,
+    TOTAL_FRICTION_PER_SIDE_RATE,
 )
 from src.agents.fear_greed_agent import merge_fear_greed
 from src.agents.onchain_agent import merge_onchain
 from src.data_preprocessing import load_and_clean_data
 from src.feature_engineering import create_features
 
-INITIAL_CAPITAL = 10000.0
-FEE_RATE = 0.001  # 0.10% Binance taker fee per side (0.20% round trip)
+INITIAL_CAPITAL = INITIAL_CAPITAL_USD
+FEE_RATE = TAKER_FEE_RATE  # 0.05% Binance VIP-0 taker fee per side
+SLIPPAGE = SLIPPAGE_RATE   # 0.02% estimated execution slippage per fill
+TOTAL_FRICTION = TOTAL_FRICTION_PER_SIDE_RATE  # 0.07% per execution (0.14% round trip)
 
 
 def train_classifier(
@@ -69,7 +75,7 @@ def run_backtest_threshold(
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Simulates a long/flat strategy using predicted probabilities above a given threshold.
-    Applies 0.10% fee per entry and exit.
+    Applies canonical transaction friction (0.05% taker fee + 0.02% slippage = 0.07% per fill).
 
     Args:
         test_df (pd.DataFrame): Chronological holdout test DataFrame.
@@ -99,7 +105,7 @@ def run_backtest_threshold(
 
         # Enter Long from Cash
         if position == 0 and signal == 1:
-            entry_equity = equity * (1.0 - FEE_RATE)
+            entry_equity = equity * (1.0 - TOTAL_FRICTION)
             entry_price = price
             entry_time = time
             position = 1
@@ -107,8 +113,8 @@ def run_backtest_threshold(
         # Exit Long to Cash
         elif position == 1 and signal == 0:
             gross_return = (price / entry_price) - 1.0
-            equity = entry_equity * (1.0 + gross_return) * (1.0 - FEE_RATE)
-            net_return = (equity / (entry_equity / (1.0 - FEE_RATE))) - 1.0
+            equity = entry_equity * (1.0 + gross_return) * (1.0 - TOTAL_FRICTION)
+            net_return = (equity / (entry_equity / (1.0 - TOTAL_FRICTION))) - 1.0
             trade_log.append({
                 "entry_time": entry_time,
                 "exit_time": time,
@@ -127,8 +133,8 @@ def run_backtest_threshold(
     if position == 1:
         last_price = float(test_df["close"].iloc[-1])
         gross_return = (last_price / entry_price) - 1.0
-        equity = entry_equity * (1.0 + gross_return) * (1.0 - FEE_RATE)
-        net_return = (equity / (entry_equity / (1.0 - FEE_RATE))) - 1.0
+        equity = entry_equity * (1.0 + gross_return) * (1.0 - TOTAL_FRICTION)
+        net_return = (equity / (entry_equity / (1.0 - TOTAL_FRICTION))) - 1.0
         trade_log.append({
             "entry_time": entry_time,
             "exit_time": test_df["timestamp"].iloc[-1],
