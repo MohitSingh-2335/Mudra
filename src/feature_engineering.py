@@ -5,7 +5,7 @@ Transforms raw OHLCV and market microstructure into 39 technical features
 and generates continuous return and binary movement target variables.
 """
 
-from typing import Optional
+from typing import Optional, Union, Any, List, Dict
 import numpy as np
 import pandas as pd
 import ta
@@ -229,3 +229,138 @@ def extract_features_for_inference(df: pd.DataFrame) -> dict:
     out["volume_usd"] = round(float(latest["volume"]), 2)
 
     return out
+
+
+def validate_inference_features(
+    features: Union[pd.DataFrame, dict],
+    model_type: str = "regressor"
+) -> pd.DataFrame:
+    """
+    Validates feature contracts and enforces strict canonical column ordering
+    prior to model inference. Prevents silent feature transposition, missing
+    columns, NaN/infinite propagation, and schema mismatch.
+
+    Args:
+        features: Input feature mapping (dict) or DataFrame.
+        model_type: "regressor" (26 features) or "classifier" (39 features).
+
+    Returns:
+        pd.DataFrame: A validated DataFrame with columns strictly ordered
+                      according to config.REGRESSOR_FEATURES or config.CLASSIFIER_FEATURES.
+
+    Raises:
+        ValueError: If model_type is unsupported, if required features are missing,
+                    if input DataFrame columns are shuffled or out of order,
+                    or if feature values contain NaNs or infinite values.
+    """
+    from config import REGRESSOR_FEATURES, CLASSIFIER_FEATURES
+
+    model_type_normalized = model_type.strip().lower()
+    if model_type_normalized == "regressor":
+        expected_features = REGRESSOR_FEATURES
+    elif model_type_normalized == "classifier":
+        expected_features = CLASSIFIER_FEATURES
+    else:
+        raise ValueError(
+            f"Unsupported model_type '{model_type}'. Expected 'regressor' or 'classifier'."
+        )
+
+    if isinstance(features, dict):
+        missing = [col for col in expected_features if col not in features]
+        if missing:
+            raise ValueError(
+                f"Feature contract violation: Input dictionary missing required {model_type_normalized} features: {missing}"
+            )
+        # Build DataFrame with exact expected order
+        df = pd.DataFrame([{col: features[col] for col in expected_features}], columns=expected_features)
+    elif isinstance(features, pd.DataFrame):
+        if features.empty:
+            raise ValueError(f"Input DataFrame for {model_type_normalized} inference cannot be empty.")
+
+        missing = [col for col in expected_features if col not in features.columns]
+        if missing:
+            raise ValueError(
+                f"Feature contract violation: Input DataFrame missing required {model_type_normalized} features: {missing}"
+            )
+
+        # Enforce exact column order on the first len(expected_features) columns
+        actual_cols = list(features.columns)
+        if actual_cols[:len(expected_features)] != expected_features:
+            raise ValueError(
+                f"Feature ordering contract violation for {model_type_normalized}: "
+                f"Input columns are shuffled or out of order. "
+                f"Expected canonical order: {expected_features}, "
+                f"got: {actual_cols[:len(expected_features)]}"
+            )
+
+        extra_cols = [c for c in actual_cols if c not in expected_features]
+        if extra_cols:
+            raise ValueError(
+                f"Feature schema violation for {model_type_normalized}: "
+                f"Input DataFrame contains unexpected extra columns: {extra_cols}"
+            )
+
+        df = features[expected_features].copy()
+    else:
+        raise ValueError(
+            f"Unsupported input type for features: {type(features).__name__}. Expected dict or pd.DataFrame."
+        )
+
+    # Validate NaN values
+    if df.isna().any().any():
+        nan_cols = [c for c in expected_features if df[c].isna().any()]
+        raise ValueError(
+            f"Feature integrity violation: NaNs encountered in {model_type_normalized} input features: {nan_cols}"
+        )
+
+    # Validate Infinite values
+    numeric_df = df.select_dtypes(include=[np.number])
+    if np.isinf(numeric_df).any().any():
+        inf_cols = [c for c in numeric_df.columns if np.isinf(numeric_df[c]).any()]
+        raise ValueError(
+            f"Feature integrity violation: Infinite values encountered in {model_type_normalized} input features: {inf_cols}"
+        )
+
+    return df
+
+
+def predict_with_validation(
+    model: Any,
+    features: Union[pd.DataFrame, dict],
+    model_type: str = "regressor"
+) -> np.ndarray:
+    """
+    Validates feature contracts and executes model.predict() on strictly ordered columns.
+
+    Args:
+        model: Trained model artifact with a .predict() method.
+        features: Input feature mapping (dict) or DataFrame.
+        model_type: "regressor" or "classifier".
+
+    Returns:
+        np.ndarray: Model predictions.
+    """
+    if model is None or not hasattr(model, "predict"):
+        raise ValueError("Invalid model provided: must implement .predict().")
+    validated_df = validate_inference_features(features, model_type=model_type)
+    return model.predict(validated_df)
+
+
+def predict_proba_with_validation(
+    model: Any,
+    features: Union[pd.DataFrame, dict]
+) -> np.ndarray:
+    """
+    Validates classifier feature contracts and executes model.predict_proba().
+
+    Args:
+        model: Trained classifier artifact with a .predict_proba() method.
+        features: Input feature mapping (dict) or DataFrame.
+
+    Returns:
+        np.ndarray: Predicted class probabilities.
+    """
+    if model is None or not hasattr(model, "predict_proba"):
+        raise ValueError("Invalid classifier provided: must implement .predict_proba().")
+    validated_df = validate_inference_features(features, model_type="classifier")
+    return model.predict_proba(validated_df)
