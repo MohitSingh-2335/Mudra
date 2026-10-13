@@ -5,15 +5,154 @@ Central source of truth for file paths, feature schemas, model artifacts,
 and trading parameters.
 """
 import os
+import math
+from decimal import Decimal
 from pathlib import Path
+from typing import Optional
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# Institutional Paper Portfolio & Execution Invariants
+def _parse_execution_cost_rate(
+    rate_var: str,
+    pct_var: str,
+    default_rate: Optional[float] = None,
+    max_rate: float = 0.01,
+    max_pct: float = 5.0,
+) -> float:
+    """
+    Parses execution cost rate with explicit units and backward compatibility.
+    - rate_var: Expects a decimal rate (e.g. '0.0005' for 0.05%). Must satisfy 0.0 <= rate <= max_rate.
+    - pct_var: Expects a percentage number (e.g. '0.05' for 0.05%). Converted to decimal rate via / 100.0.
+    Fails closed with ValueError if inputs are non-finite, negative, exceed maximum thresholds, or conflict.
+    """
+    rate_str = os.getenv(rate_var)
+    pct_str = os.getenv(pct_var)
+
+    rate_val: Optional[float] = None
+    if rate_str is not None and rate_str.strip() != "":
+        try:
+            rate_val = float(rate_str)
+        except ValueError as err:
+            raise ValueError(
+                f"Invalid non-numeric value for environment variable {rate_var}='{rate_str}'. "
+                "Expected decimal rate (e.g. '0.0005' for 0.05%)."
+            ) from err
+        if not math.isfinite(rate_val):
+            raise ValueError(
+                f"Invalid non-finite value for environment variable {rate_var}='{rate_str}'. "
+                "Expected a finite decimal rate."
+            )
+        if rate_val < 0.0:
+            raise ValueError(f"Environment variable {rate_var}='{rate_str}' cannot be negative.")
+        if rate_val > max_rate:
+            raise ValueError(
+                f"Environment variable {rate_var}='{rate_str}' exceeds maximum allowed rate of {max_rate}. "
+                f"If you intended a percentage (e.g. {rate_val}%), specify decimal rate {rate_val / 100.0:.6f} "
+                f"or use {pct_var}."
+            )
+
+    pct_val: Optional[float] = None
+    if pct_str is not None and pct_str.strip() != "":
+        try:
+            pct_val = float(pct_str)
+        except ValueError as err:
+            raise ValueError(
+                f"Invalid non-numeric value for environment variable {pct_var}='{pct_str}'. "
+                "Expected percentage number (e.g. '0.05' for 0.05%)."
+            ) from err
+        if not math.isfinite(pct_val):
+            raise ValueError(
+                f"Invalid non-finite value for environment variable {pct_var}='{pct_str}'. "
+                "Expected a finite percentage."
+            )
+        if pct_val < 0.0:
+            raise ValueError(f"Environment variable {pct_var}='{pct_str}' cannot be negative.")
+        if pct_val > max_pct:
+            raise ValueError(
+                f"Environment variable {pct_var}='{pct_str}' exceeds maximum allowed percentage of {max_pct}%."
+            )
+
+    if rate_val is not None and pct_val is not None:
+        derived_from_pct = pct_val / 100.0
+        if abs(rate_val - derived_from_pct) > 1e-7:
+            raise ValueError(
+                f"Conflicting environment configuration: {rate_var}='{rate_str}' ({rate_val}) and "
+                f"{pct_var}='{pct_str}' ({derived_from_pct}) specify conflicting values."
+            )
+        return rate_val
+
+    if rate_val is not None:
+        return rate_val
+
+    if pct_val is not None:
+        return pct_val / 100.0
+
+    if default_rate is not None:
+        return default_rate
+
+    raise ValueError(f"Neither {rate_var} nor {pct_var} was provided and no default was specified.")
+
+
+# Institutional Paper Portfolio & Execution Invariants (Canonical Decimal Rates)
+# Approved Initial Simulation Assumptions:
+# - Taker Fee: 0.05% per side (decimal rate: 0.0005)
+# - Slippage:  0.02% per side (decimal rate: 0.0002)
 INITIAL_CAPITAL_USD = float(os.getenv("INITIAL_CAPITAL_USD", 10000.0))
-TAKER_FEE_PCT = float(os.getenv("TAKER_FEE_PCT", 0.0005))        # 0.05% Binance VIP-0 Taker Fee
-SLIPPAGE_PCT = float(os.getenv("SLIPPAGE_PCT", 0.0002))          # 0.02% Conservative Execution Slippage
-MIN_HURDLE_PCT = float(os.getenv("MIN_HURDLE_PCT", 0.05))        # 0.05% Hurdle Rate for Directional Signals
+TAKER_FEE_RATE: float = _parse_execution_cost_rate("TAKER_FEE_RATE", "TAKER_FEE_PCT", default_rate=0.0005)
+SLIPPAGE_RATE: float = _parse_execution_cost_rate("SLIPPAGE_RATE", "SLIPPAGE_PCT", default_rate=0.0002)
+
+# Derived Programmatic Execution Friction
+TOTAL_FRICTION_PER_SIDE_RATE: float = TAKER_FEE_RATE + SLIPPAGE_RATE
+ROUND_TRIP_FRICTION_RATE: float = 1.0 - (1.0 - TOTAL_FRICTION_PER_SIDE_RATE) ** 2
+
+# Initial Minimum Expected-Return Hurdle (At least estimated round-trip friction break-even floor)
+# Default Hurdle: Defined by reusing ROUND_TRIP_FRICTION_RATE directly.
+# Explicit Environment Overrides: Evaluated under a strict decimal comparison contract.
+# Base-10 trading rates (e.g. 0.05% fee + 0.02% slippage -> 0.07% per side -> 0.139951% round trip)
+# are exact decimals in financial accounting. In IEEE 754 floating-point, 1 - (1 - 0.0007)^2
+# incurs binary representation noise (0.0013995100000000482). The configuration contract
+# evaluates explicitly configured values using exact Decimal comparison:
+# - Equality with floor (e.g. '0.00139951' or '0.139951%') is accepted.
+# - Values above floor are accepted up to max_rate.
+# - Any genuinely sub-floor value (e.g. '0.00139950' or '0.05%') is strictly rejected.
+# - Zero arbitrary floating-point tolerance is permitted.
+_hurdle_rate_env = os.getenv("MIN_HURDLE_RATE")
+_hurdle_pct_env = os.getenv("MIN_HURDLE_PCT")
+_has_explicit_hurdle = (
+    (_hurdle_rate_env is not None and _hurdle_rate_env.strip() != "")
+    or (_hurdle_pct_env is not None and _hurdle_pct_env.strip() != "")
+)
+
+if _has_explicit_hurdle:
+    MIN_HURDLE_RATE: float = _parse_execution_cost_rate(
+        "MIN_HURDLE_RATE",
+        "MIN_HURDLE_PCT",
+        default_rate=ROUND_TRIP_FRICTION_RATE,
+        max_rate=0.05,
+    )
+    _f_dec = Decimal(str(TAKER_FEE_RATE)) + Decimal(str(SLIPPAGE_RATE))
+    _floor_dec = Decimal("1") - (Decimal("1") - _f_dec) ** 2
+
+    if _hurdle_rate_env is not None and _hurdle_rate_env.strip() != "":
+        _configured_dec = Decimal(_hurdle_rate_env.strip())
+    else:
+        _configured_dec = Decimal(_hurdle_pct_env.strip()) / Decimal("100")
+
+    if _configured_dec < _floor_dec:
+        raise ValueError(
+            f"Configured MIN_HURDLE_RATE ({MIN_HURDLE_RATE:.8f}) cannot be less than estimated "
+            f"ROUND_TRIP_FRICTION_RATE ({ROUND_TRIP_FRICTION_RATE:.8f}). "
+            "The minimum hurdle must be at least the round-trip friction break-even floor."
+        )
+else:
+    MIN_HURDLE_RATE: float = ROUND_TRIP_FRICTION_RATE
+
+# Derived Display & Legacy Percentage Aliases (% points, e.g. 0.05 for 0.05%)
+TAKER_FEE_PCT: float = TAKER_FEE_RATE * 100.0
+SLIPPAGE_PCT: float = SLIPPAGE_RATE * 100.0
+TOTAL_FRICTION_PER_SIDE_PCT: float = TOTAL_FRICTION_PER_SIDE_RATE * 100.0
+ROUND_TRIP_FRICTION_PCT: float = ROUND_TRIP_FRICTION_RATE * 100.0
+MIN_HURDLE_PCT: float = MIN_HURDLE_RATE * 100.0
 
 # Active Model Artifact Paths
 MODELS_DIR = str(BASE_DIR / "artifacts" / "models")
@@ -98,9 +237,17 @@ CLASSIFIER_FEATURES = [
 __all__ = [
     "BASE_DIR",
     "INITIAL_CAPITAL_USD",
+    "TAKER_FEE_RATE",
+    "SLIPPAGE_RATE",
+    "TOTAL_FRICTION_PER_SIDE_RATE",
+    "ROUND_TRIP_FRICTION_RATE",
+    "MIN_HURDLE_RATE",
     "TAKER_FEE_PCT",
     "SLIPPAGE_PCT",
+    "TOTAL_FRICTION_PER_SIDE_PCT",
+    "ROUND_TRIP_FRICTION_PCT",
     "MIN_HURDLE_PCT",
+    "_parse_execution_cost_rate",
     "MODELS_DIR",
     "REGRESSOR_MODEL_PATH",
     "CLASSIFIER_MODEL_PATH",
