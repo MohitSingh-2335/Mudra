@@ -4,16 +4,21 @@ Verifies data loading, terminal target verification, chronological splitting,
 path safety, metric calculations, and manifest building without fitting any models.
 """
 import json
-import pytest
+import sys
+from pathlib import Path
+import joblib
 import numpy as np
 import pandas as pd
-from pathlib import Path
+import pytest
+from xgboost import XGBClassifier, XGBRegressor
 
-from config import CLASSIFIER_FEATURES, REGRESSOR_FEATURES
+from config import BASE_DIR, CLASSIFIER_FEATURES, MODELS_DIR, REGRESSOR_FEATURES
 from scripts.experiments.train_controlled_candidate import (
     REUSED_HOLDOUT_WARNING,
     DEFAULT_TARGET_HORIZON_HOURS,
     RANDOM_SEED,
+    DEFAULT_REGRESSOR_PARAMS,
+    DEFAULT_CLASSIFIER_PARAMS,
     validate_output_directory,
     verify_terminal_row_target,
     load_and_filter_candidate_dataset,
@@ -23,6 +28,10 @@ from scripts.experiments.train_controlled_candidate import (
     compute_feature_schema_hash,
     compute_file_sha256,
     build_experiment_manifest,
+    fit_candidate_models,
+    evaluate_and_compare,
+    save_experiment_artifacts,
+    run_controlled_training_pipeline,
 )
 
 
@@ -526,3 +535,235 @@ def test_build_experiment_manifest_pure_dict(tmp_path):
     assert manifest["feature_contracts"]["regressor_features_count"] == len(REGRESSOR_FEATURES)
     assert "fear_and_greed_latency" in manifest["external_data_limitations"]
     assert "onchain_metrics_latency" in manifest["external_data_limitations"]
+
+
+# =========================================================================
+# 7. Candidate Model Fitting, Evaluation, and Serialization Tests
+# =========================================================================
+
+def test_fit_candidate_models_synthetic():
+    df = _generate_synthetic_df(n_rows=40)
+    # Fit micro estimators with minimal depth and trees to run in milliseconds
+    reg_params = {"n_estimators": 2, "max_depth": 2, "random_state": 42}
+    clf_params = {"n_estimators": 2, "max_depth": 2, "random_state": 42}
+    reg_model, clf_model = fit_candidate_models(
+        train_df=df,
+        regressor_params=reg_params,
+        classifier_params=clf_params,
+    )
+    assert hasattr(reg_model, "predict")
+    assert hasattr(clf_model, "predict")
+
+    # Verify predictions
+    pred_reg = reg_model.predict(df[REGRESSOR_FEATURES])
+    pred_clf = clf_model.predict(df[CLASSIFIER_FEATURES])
+    assert len(pred_reg) == 40
+    assert len(pred_clf) == 40
+
+
+def test_fit_candidate_models_validation_failures():
+    df = _generate_synthetic_df(n_rows=30)
+
+    # 1. Empty dataframe
+    with pytest.raises(ValueError, match="Cannot fit models on an empty training DataFrame"):
+        fit_candidate_models(pd.DataFrame())
+
+    # 2. Missing target column
+    df_missing_target = df.drop(columns=["Target_Return"])
+    with pytest.raises(ValueError, match="missing required target column: 'Target_Return'"):
+        fit_candidate_models(df_missing_target)
+
+    # 3. Missing regressor feature
+    df_missing_reg_feat = df.drop(columns=["rsi"])
+    with pytest.raises(ValueError, match="missing regressor features"):
+        fit_candidate_models(df_missing_reg_feat)
+
+    # 4. Missing classifier feature (macd is unique to classifier)
+    df_missing_clf_feat = df.drop(columns=["macd"])
+    with pytest.raises(ValueError, match="missing classifier features"):
+        fit_candidate_models(df_missing_clf_feat)
+
+    # 5. NaN in features
+    df_nan = df.copy()
+    df_nan.loc[0, "rsi"] = np.nan
+    with pytest.raises(ValueError, match="Regressor input data contains NaN values"):
+        fit_candidate_models(df_nan)
+
+    # 6. Infinite in features
+    df_inf = df.copy()
+    df_inf.loc[0, "rsi"] = np.inf
+    with pytest.raises(ValueError, match="Regressor input data contains infinite values"):
+        fit_candidate_models(df_inf)
+
+
+def test_evaluate_and_compare_synthetic(tmp_path):
+    train_df = _generate_synthetic_df(n_rows=30, start_ts="2023-01-01 00:00:00")
+    test_df = _generate_synthetic_df(n_rows=20, start_ts="2023-01-03 00:00:00")
+
+    cand_reg, cand_clf = fit_candidate_models(
+        train_df,
+        regressor_params={"n_estimators": 2, "max_depth": 2},
+        classifier_params={"n_estimators": 2, "max_depth": 2},
+    )
+
+    # Create mock baseline production models saved to tmp_path
+    mock_prod_reg, mock_prod_clf = fit_candidate_models(
+        train_df,
+        regressor_params={"n_estimators": 2, "max_depth": 2, "learning_rate": 0.05},
+        classifier_params={"n_estimators": 2, "max_depth": 2, "learning_rate": 0.05},
+    )
+    prod_reg_path = tmp_path / "mock_prod_reg.pkl"
+    prod_clf_path = tmp_path / "mock_prod_clf.pkl"
+    joblib.dump(mock_prod_reg, prod_reg_path)
+    joblib.dump(mock_prod_clf, prod_clf_path)
+
+    results = evaluate_and_compare(
+        test_df=test_df,
+        candidate_regressor=cand_reg,
+        candidate_classifier=cand_clf,
+        production_regressor_path=prod_reg_path,
+        production_classifier_path=prod_clf_path,
+    )
+
+    assert results["benchmark_governance_warning"] == REUSED_HOLDOUT_WARNING
+    assert results["test_samples_count"] == 20
+    assert "candidate_metrics" in results
+    assert "regressor" in results["candidate_metrics"]
+    assert "classifier" in results["candidate_metrics"]
+    assert "return_mae" in results["candidate_metrics"]["regressor"]
+    assert "price_rmse" in results["candidate_metrics"]["regressor"]
+    assert "accuracy" in results["candidate_metrics"]["classifier"]
+
+    assert "production_baseline_metrics" in results
+    assert results["production_baseline_metrics"] is not None
+    assert "comparison_deltas_candidate_minus_production" in results
+    deltas = results["comparison_deltas_candidate_minus_production"]
+    assert "regressor" in deltas
+    assert "classifier" in deltas
+    assert "return_mae" in deltas["regressor"]
+
+
+def test_evaluate_and_compare_validation_failures():
+    test_df = _generate_synthetic_df(n_rows=20)
+    cand_reg, cand_clf = fit_candidate_models(
+        test_df,
+        regressor_params={"n_estimators": 2, "max_depth": 2},
+        classifier_params={"n_estimators": 2, "max_depth": 2},
+    )
+
+    with pytest.raises(ValueError, match="Cannot evaluate models on an empty test DataFrame"):
+        evaluate_and_compare(pd.DataFrame(), cand_reg, cand_clf)
+
+    test_missing_col = test_df.drop(columns=["Target_Close"])
+    with pytest.raises(ValueError, match="missing required evaluation column: 'Target_Close'"):
+        evaluate_and_compare(test_missing_col, cand_reg, cand_clf)
+
+
+def test_save_experiment_artifacts_isolation(tmp_path):
+    df = _generate_synthetic_df(n_rows=25)
+    cand_reg, cand_clf = fit_candidate_models(
+        df,
+        regressor_params={"n_estimators": 2, "max_depth": 2},
+        classifier_params={"n_estimators": 2, "max_depth": 2},
+    )
+    eval_res = {"candidate_metrics": {"test": 123}}
+    manifest = {"manifest_test": True}
+
+    exp_dir = tmp_path / "candidate_run_1"
+    artifacts = save_experiment_artifacts(
+        output_dir=exp_dir,
+        candidate_regressor=cand_reg,
+        candidate_classifier=cand_clf,
+        evaluation_results=eval_res,
+        manifest=manifest,
+    )
+
+    assert (exp_dir / "candidate_regressor.pkl").exists()
+    assert (exp_dir / "candidate_classifier.pkl").exists()
+    assert (exp_dir / "evaluation_results.json").exists()
+    assert (exp_dir / "manifest.json").exists()
+
+    assert len(artifacts["candidate_regressor_sha256"]) == 64
+    assert len(artifacts["candidate_classifier_sha256"]) == 64
+    assert len(artifacts["evaluation_results_sha256"]) == 64
+    assert len(artifacts["manifest_sha256"]) == 64
+
+    # Prevent accidental overwrites when allow_non_empty is False
+    with pytest.raises(FileExistsError, match="already contains 4 files"):
+        save_experiment_artifacts(
+            output_dir=exp_dir,
+            candidate_regressor=cand_reg,
+            candidate_classifier=cand_clf,
+            evaluation_results=eval_res,
+            manifest=manifest,
+            allow_non_empty=False,
+        )
+
+
+def test_save_experiment_artifacts_rejects_protected_paths():
+    cand_reg = XGBRegressor(n_estimators=2)
+    cand_clf = XGBClassifier(n_estimators=2)
+    eval_res = {}
+    manifest = {}
+
+    with pytest.raises(ValueError, match="Path safety violation"):
+        save_experiment_artifacts(
+            output_dir=MODELS_DIR,
+            candidate_regressor=cand_reg,
+            candidate_classifier=cand_clf,
+            evaluation_results=eval_res,
+            manifest=manifest,
+        )
+
+
+def test_run_controlled_training_pipeline_synthetic(tmp_path):
+    # Create synthetic dataset CSVs (300 rows to satisfy min_samples_per_split=50 in both train and test)
+    df_raw = _generate_synthetic_df(n_rows=300, start_ts="2023-01-01 00:00:00")
+    # For terminal target verification, raw candlestick needs the 1-hour ahead candle for the terminal row
+    terminal_ts = df_raw["timestamp"].iloc[-1]
+    extra_row = df_raw.iloc[[-1]].copy()
+    extra_row["timestamp"] = terminal_ts + pd.Timedelta(hours=1)
+    extra_row["close"] = df_raw["Target_Close"].iloc[-1]
+    df_raw_extended = pd.concat([df_raw, extra_row], ignore_index=True)
+
+    raw_path = tmp_path / "raw_candlesticks.csv"
+    cand_path = tmp_path / "candidate_dataset.csv"
+    df_raw_extended.to_csv(raw_path, index=False)
+    df_raw.to_csv(cand_path, index=False)
+
+    exp_dir = tmp_path / "synthetic_pipeline_out"
+
+    pipeline_result = run_controlled_training_pipeline(
+        candidate_data_path=cand_path,
+        raw_candlestick_path=raw_path,
+        output_dir=exp_dir,
+        split_ratio=0.8,
+        regressor_params={"n_estimators": 2, "max_depth": 2},
+        classifier_params={"n_estimators": 2, "max_depth": 2},
+    )
+
+    assert pipeline_result["status"] == "EXPERIMENT_COMPLETE"
+    assert (exp_dir / "candidate_regressor.pkl").exists()
+    assert (exp_dir / "candidate_classifier.pkl").exists()
+    assert (exp_dir / "evaluation_results.json").exists()
+    assert (exp_dir / "manifest.json").exists()
+    assert pipeline_result["split_summary"]["apply_purge"] is True
+
+
+def test_dry_run_validation_cli_never_trains_or_writes(tmp_path, monkeypatch):
+    empty_out_dir = tmp_path / "dry_run_empty_dir"
+    test_args = [
+        "train_controlled_candidate.py",
+        "--output-dir",
+        str(empty_out_dir),
+        "--dry-run-validation",
+    ]
+    monkeypatch.setattr(sys, "argv", test_args)
+
+    from scripts.experiments.train_controlled_candidate import main
+    main()
+
+    # Confirm directory was not created or has 0 files
+    if empty_out_dir.exists():
+        assert len(list(empty_out_dir.iterdir())) == 0
+

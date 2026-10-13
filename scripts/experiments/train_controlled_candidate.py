@@ -23,9 +23,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import joblib
 import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, log_loss, mean_absolute_error, mean_squared_error, precision_score, recall_score
+from xgboost import XGBClassifier, XGBRegressor
 
 # Ensure repository root is on sys.path
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
@@ -36,9 +38,11 @@ from config import (
     BASE_DIR,
     BTCUSDT_1H_CSV,
     CLASSIFIER_FEATURES,
+    CLASSIFIER_MODEL_PATH,
     FEATURED_BTC_DATA_PATH,
     MODELS_DIR,
     REGRESSOR_FEATURES,
+    REGRESSOR_MODEL_PATH,
 )
 
 # Explicit Governance Constants
@@ -46,10 +50,41 @@ REUSED_HOLDOUT_WARNING = "REUSED HISTORICAL BENCHMARK — PRIOR MODEL SELECTION 
 DEFAULT_TARGET_HORIZON_HOURS = 1
 RANDOM_SEED = 42
 
+# Production Hyperparameter Contracts (exact match to active production models)
+DEFAULT_REGRESSOR_PARAMS: Dict[str, Any] = {
+    "n_estimators": 400,
+    "max_depth": 3,
+    "learning_rate": 0.19634474142122724,
+    "subsample": 0.6452606057786048,
+    "colsample_bytree": 0.8048930981029866,
+    "reg_alpha": 1.1010159811262765,
+    "reg_lambda": 1.1513700542359893,
+    "min_child_weight": 6,
+    "random_state": 42,
+    "tree_method": "hist",
+    "device": "cpu",
+}
+
+DEFAULT_CLASSIFIER_PARAMS: Dict[str, Any] = {
+    "n_estimators": 200,
+    "max_depth": 5,
+    "learning_rate": 0.01407393832046312,
+    "subsample": 0.9206852002086758,
+    "colsample_bytree": 0.7590188844722824,
+    "reg_alpha": 7.570557808401857,
+    "reg_lambda": 7.3354138708545e-06,
+    "min_child_weight": 8,
+    "random_state": 42,
+    "tree_method": "hist",
+    "device": "cpu",
+}
+
 __all__ = [
     "REUSED_HOLDOUT_WARNING",
     "DEFAULT_TARGET_HORIZON_HOURS",
     "RANDOM_SEED",
+    "DEFAULT_REGRESSOR_PARAMS",
+    "DEFAULT_CLASSIFIER_PARAMS",
     "validate_output_directory",
     "verify_terminal_row_target",
     "load_and_filter_candidate_dataset",
@@ -59,6 +94,10 @@ __all__ = [
     "compute_feature_schema_hash",
     "compute_file_sha256",
     "build_experiment_manifest",
+    "fit_candidate_models",
+    "evaluate_and_compare",
+    "save_experiment_artifacts",
+    "run_controlled_training_pipeline",
 ]
 
 
@@ -728,13 +767,348 @@ def build_experiment_manifest(
 
 
 # =========================================================================
-# 6. CLI Entrypoint (Validation & Dry-Run Only)
+# 6. Candidate Model Training & Comparative Evaluation
+# =========================================================================
+
+def fit_candidate_models(
+    train_df: pd.DataFrame,
+    regressor_params: Optional[Dict[str, Any]] = None,
+    classifier_params: Optional[Dict[str, Any]] = None,
+) -> Tuple[XGBRegressor, XGBClassifier]:
+    """
+    Fits candidate XGBRegressor and XGBClassifier on the causally clean training partition.
+    Validates feature contracts and targets prior to fitting.
+    Does NOT fit any preprocessing on test data.
+
+    Args:
+        train_df: Chronological training partition.
+        regressor_params: Optional hyperparameter overrides for XGBRegressor.
+        classifier_params: Optional hyperparameter overrides for XGBClassifier.
+
+    Returns:
+        Tuple[XGBRegressor, XGBClassifier]: Fitted candidate models.
+
+    Raises:
+        ValueError: If train_df is empty, missing target columns, missing features,
+                    or contains NaNs or infinities.
+    """
+    if train_df.empty:
+        raise ValueError("Cannot fit models on an empty training DataFrame.")
+
+    # Validate target columns
+    required_targets = ["Target_Return", "Target_Movement"]
+    for t in required_targets:
+        if t not in train_df.columns:
+            raise ValueError(f"Training DataFrame missing required target column: '{t}'.")
+
+    # Validate feature contracts
+    missing_reg = [f for f in REGRESSOR_FEATURES if f not in train_df.columns]
+    missing_clf = [f for f in CLASSIFIER_FEATURES if f not in train_df.columns]
+    if missing_reg:
+        raise ValueError(f"Training DataFrame missing regressor features: {missing_reg}.")
+    if missing_clf:
+        raise ValueError(f"Training DataFrame missing classifier features: {missing_clf}.")
+
+    # Align feature matrices in exact configured column order
+    X_reg = train_df[REGRESSOR_FEATURES].copy()
+    y_reg = train_df["Target_Return"].copy().astype(float)
+    X_clf = train_df[CLASSIFIER_FEATURES].copy()
+    y_clf = train_df["Target_Movement"].copy().astype(int)
+
+    # Check for NaN / Infs
+    if X_reg.isna().any().any() or y_reg.isna().any():
+        raise ValueError("Regressor input data contains NaN values.")
+    if np.isinf(X_reg.select_dtypes(include=[np.number])).any().any() or np.isinf(y_reg).any():
+        raise ValueError("Regressor input data contains infinite values.")
+    if X_clf.isna().any().any() or y_clf.isna().any():
+        raise ValueError("Classifier input data contains NaN values.")
+    if np.isinf(X_clf.select_dtypes(include=[np.number])).any().any():
+        raise ValueError("Classifier input data contains infinite values.")
+
+    # Configure hyperparameters
+    reg_kwargs = {**DEFAULT_REGRESSOR_PARAMS, **(regressor_params or {})}
+    clf_kwargs = {**DEFAULT_CLASSIFIER_PARAMS, **(classifier_params or {})}
+
+    reg_model = XGBRegressor(**reg_kwargs)
+    reg_model.fit(X_reg, y_reg)
+
+    clf_model = XGBClassifier(**clf_kwargs)
+    clf_model.fit(X_clf, y_clf)
+
+    return reg_model, clf_model
+
+
+def evaluate_and_compare(
+    test_df: pd.DataFrame,
+    candidate_regressor: Any,
+    candidate_classifier: Any,
+    production_regressor_path: Optional[Union[str, Path]] = None,
+    production_classifier_path: Optional[Union[str, Path]] = None,
+) -> Dict[str, Any]:
+    """
+    Evaluates candidate models against the benchmark test set and compares metrics
+    against active production models if available.
+
+    Args:
+        test_df: Test partition with verified 1-hour targets and features.
+        candidate_regressor: Fitted candidate XGBRegressor.
+        candidate_classifier: Fitted candidate XGBClassifier.
+        production_regressor_path: Optional path to production regressor artifact.
+        production_classifier_path: Optional path to production classifier artifact.
+
+    Returns:
+        Dict[str, Any]: Comprehensive evaluation and comparative delta dictionary.
+    """
+    if test_df.empty:
+        raise ValueError("Cannot evaluate models on an empty test DataFrame.")
+
+    required_cols = ["close", "Target_Close", "Target_Return", "Target_Movement"]
+    for c in required_cols:
+        if c not in test_df.columns:
+            raise ValueError(f"Test DataFrame missing required evaluation column: '{c}'.")
+
+    # Evaluate Candidate Regressor
+    X_reg = test_df[REGRESSOR_FEATURES]
+    cand_pred_return = candidate_regressor.predict(X_reg)
+    cand_reg_metrics = compute_regression_metrics(
+        y_true_return=test_df["Target_Return"].values,
+        y_pred_return=cand_pred_return,
+        current_close=test_df["close"].values,
+        actual_next_close=test_df["Target_Close"].values,
+    )
+
+    # Evaluate Candidate Classifier
+    X_clf = test_df[CLASSIFIER_FEATURES]
+    cand_pred_move = candidate_classifier.predict(X_clf)
+    cand_pred_proba = (
+        candidate_classifier.predict_proba(X_clf)
+        if hasattr(candidate_classifier, "predict_proba")
+        else None
+    )
+    cand_clf_metrics = compute_classification_metrics(
+        y_true=test_df["Target_Movement"].values,
+        y_pred=cand_pred_move,
+        y_proba=cand_pred_proba,
+    )
+
+    # Load and evaluate production baseline models if available
+    prod_reg_path = Path(production_regressor_path or REGRESSOR_MODEL_PATH)
+    prod_clf_path = Path(production_classifier_path or CLASSIFIER_MODEL_PATH)
+    prod_reg_metrics = None
+    prod_clf_metrics = None
+    deltas: Dict[str, Any] = {}
+
+    if prod_reg_path.exists() and prod_clf_path.exists():
+        try:
+            prod_reg = joblib.load(prod_reg_path)
+            prod_clf = joblib.load(prod_clf_path)
+            # Ensure CPU evaluation for stability
+            if hasattr(prod_reg, "set_params"):
+                prod_reg.set_params(device="cpu")
+            if hasattr(prod_clf, "set_params"):
+                prod_clf.set_params(device="cpu")
+
+            prod_pred_return = prod_reg.predict(X_reg)
+            prod_reg_metrics = compute_regression_metrics(
+                y_true_return=test_df["Target_Return"].values,
+                y_pred_return=prod_pred_return,
+                current_close=test_df["close"].values,
+                actual_next_close=test_df["Target_Close"].values,
+            )
+
+            prod_pred_move = prod_clf.predict(X_clf)
+            prod_pred_proba = (
+                prod_clf.predict_proba(X_clf)
+                if hasattr(prod_clf, "predict_proba")
+                else None
+            )
+            prod_clf_metrics = compute_classification_metrics(
+                y_true=test_df["Target_Movement"].values,
+                y_pred=prod_pred_move,
+                y_proba=prod_pred_proba,
+            )
+
+            # Compute deltas: candidate - production
+            deltas["regressor"] = {
+                k: float(cand_reg_metrics[k] - prod_reg_metrics[k])
+                for k in cand_reg_metrics
+            }
+            deltas["classifier"] = {
+                k: float(cand_clf_metrics[k] - prod_clf_metrics[k])
+                for k in cand_clf_metrics
+                if not np.isnan(cand_clf_metrics[k]) and not np.isnan(prod_clf_metrics[k])
+            }
+        except Exception as e:
+            print(f"[WARNING] Could not evaluate production baseline models: {e}", file=sys.stderr)
+
+    return {
+        "benchmark_governance_warning": REUSED_HOLDOUT_WARNING,
+        "test_samples_count": len(test_df),
+        "candidate_metrics": {
+            "regressor": cand_reg_metrics,
+            "classifier": cand_clf_metrics,
+        },
+        "production_baseline_metrics": {
+            "regressor": prod_reg_metrics,
+            "classifier": prod_clf_metrics,
+        } if prod_reg_metrics else None,
+        "comparison_deltas_candidate_minus_production": deltas if deltas else None,
+    }
+
+
+def save_experiment_artifacts(
+    output_dir: Union[str, Path],
+    candidate_regressor: Any,
+    candidate_classifier: Any,
+    evaluation_results: Dict[str, Any],
+    manifest: Dict[str, Any],
+    allow_non_empty: bool = False,
+) -> Dict[str, Any]:
+    """
+    Serializes candidate models, evaluation metrics, and reproducibility manifest
+    exclusively to the validated experiment output directory.
+
+    Args:
+        output_dir: Destination directory.
+        candidate_regressor: Fitted candidate regressor.
+        candidate_classifier: Fitted candidate classifier.
+        evaluation_results: Evaluation metrics dictionary.
+        manifest: Reproducibility manifest dictionary.
+        allow_non_empty: Whether to permit saving to a directory that contains files.
+
+    Returns:
+        Dict[str, Any]: Dictionary of written file paths and their SHA-256 digests.
+    """
+    out_path = validate_output_directory(output_dir, allow_non_empty=allow_non_empty)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    reg_file = out_path / "candidate_regressor.pkl"
+    clf_file = out_path / "candidate_classifier.pkl"
+    eval_file = out_path / "evaluation_results.json"
+    manifest_file = out_path / "manifest.json"
+
+    # Serialize estimators
+    joblib.dump(candidate_regressor, reg_file)
+    joblib.dump(candidate_classifier, clf_file)
+
+    # Serialize evaluation metrics and manifest
+    with open(eval_file, "w", encoding="utf-8") as f:
+        json.dump(evaluation_results, f, indent=2)
+
+    with open(manifest_file, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
+    artifacts = {
+        "candidate_regressor_path": str(reg_file),
+        "candidate_regressor_sha256": compute_file_sha256(reg_file),
+        "candidate_classifier_path": str(clf_file),
+        "candidate_classifier_sha256": compute_file_sha256(clf_file),
+        "evaluation_results_path": str(eval_file),
+        "evaluation_results_sha256": compute_file_sha256(eval_file),
+        "manifest_path": str(manifest_file),
+        "manifest_sha256": compute_file_sha256(manifest_file),
+    }
+
+    return artifacts
+
+
+def run_controlled_training_pipeline(
+    candidate_data_path: Union[str, Path] = str(BASE_DIR / "data" / "processed" / "featured_btc_data_candidate.csv"),
+    raw_candlestick_path: Union[str, Path] = str(BTCUSDT_1H_CSV),
+    output_dir: Union[str, Path] = str(BASE_DIR / "artifacts" / "experiments" / "p1_controlled_retrain"),
+    split_ratio: float = 0.8,
+    regressor_params: Optional[Dict[str, Any]] = None,
+    classifier_params: Optional[Dict[str, Any]] = None,
+    allow_non_empty: bool = False,
+) -> Dict[str, Any]:
+    """
+    Executes the full controlled retraining experiment pipeline:
+    1. Validates output directory isolation.
+    2. Loads and causally filters candidate dataset (excludes irregular-horizon gaps, verifies terminal row).
+    3. Partitions data chronologically with 1-sample boundary purge.
+    4. Fits candidate XGBRegressor and XGBClassifier.
+    5. Evaluates candidate models against the benchmark test set and existing production models.
+    6. Builds reproducibility manifest.
+    7. Serializes all experiment artifacts.
+
+    Returns:
+        Dict[str, Any]: Summary of experiment execution, metrics, and generated artifacts.
+    """
+    validated_out = validate_output_directory(output_dir, allow_non_empty=allow_non_empty)
+
+    clean_df, filter_summary = load_and_filter_candidate_dataset(
+        candidate_path=candidate_data_path,
+        raw_candlestick_path=raw_candlestick_path,
+    )
+
+    train_df, purge_row, test_df, split_summary = chronological_split_with_purge(
+        df=clean_df,
+        split_ratio=split_ratio,
+        apply_purge=True,
+    )
+
+    candidate_reg, candidate_clf = fit_candidate_models(
+        train_df=train_df,
+        regressor_params=regressor_params,
+        classifier_params=classifier_params,
+    )
+
+    eval_results = evaluate_and_compare(
+        test_df=test_df,
+        candidate_regressor=candidate_reg,
+        candidate_classifier=candidate_clf,
+    )
+
+    # Detect git info if available
+    git_commit = None
+    git_branch = None
+    try:
+        import subprocess
+        git_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        git_branch = subprocess.check_output(["git", "branch", "--show-current"], text=True).strip()
+    except Exception:
+        pass
+
+    manifest = build_experiment_manifest(
+        experiment_id="p1_controlled_candidate_retrain",
+        candidate_path=candidate_data_path,
+        filter_summary=filter_summary,
+        split_summary=split_summary,
+        output_dir=validated_out,
+        git_commit=git_commit,
+        git_branch=git_branch,
+        extra_metadata={
+            "regressor_params": {**DEFAULT_REGRESSOR_PARAMS, **(regressor_params or {})},
+            "classifier_params": {**DEFAULT_CLASSIFIER_PARAMS, **(classifier_params or {})},
+        },
+    )
+
+    saved_artifacts = save_experiment_artifacts(
+        output_dir=validated_out,
+        candidate_regressor=candidate_reg,
+        candidate_classifier=candidate_clf,
+        evaluation_results=eval_results,
+        manifest=manifest,
+        allow_non_empty=allow_non_empty,
+    )
+
+    return {
+        "status": "EXPERIMENT_COMPLETE",
+        "filter_summary": filter_summary,
+        "split_summary": split_summary,
+        "evaluation_results": eval_results,
+        "saved_artifacts": saved_artifacts,
+    }
+
+
+# =========================================================================
+# 7. CLI Entrypoint (Validation & Training Interface)
 # =========================================================================
 
 def main() -> None:
-    """CLI Entrypoint for validation and pre-flight checks."""
+    """CLI Entrypoint for validation and training interface."""
     parser = argparse.ArgumentParser(
-        description="Mudra Controlled Retraining Runner (Validation Interface)"
+        description="Mudra Controlled Retraining Runner (Validation & Training Interface)"
     )
     parser.add_argument(
         "--candidate-data",
@@ -768,15 +1142,22 @@ def main() -> None:
     parser.add_argument(
         "--execute-training",
         action="store_true",
-        help="Model training execution flag (BLOCKED).",
+        help="Execute controlled candidate model training pipeline.",
     )
 
     args = parser.parse_args()
 
     if args.execute_training:
-        print("[FATAL ERROR] Model training execution is strictly BLOCKED in TASK-P1-09.", file=sys.stderr)
-        print("This runner interface is authorized for validation and unit testing only.", file=sys.stderr)
-        sys.exit(1)
+        print("\n[INFO] Model training execution requested. Starting pipeline...")
+        results = run_controlled_training_pipeline(
+            candidate_data_path=args.candidate_data,
+            raw_candlestick_path=args.raw_data,
+            output_dir=args.output_dir,
+            split_ratio=args.split_ratio,
+        )
+        print("[SUCCESS] Controlled candidate retraining pipeline completed successfully.")
+        print(f"Artifacts saved to: {args.output_dir}")
+        return
 
     print(f"\n{'='*70}")
     print("Mudra Controlled Retraining Runner — Pre-Flight Validation")
