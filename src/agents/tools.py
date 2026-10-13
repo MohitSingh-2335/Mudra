@@ -20,7 +20,8 @@ from config import (
     CLASSIFIER_FEATURES,
     FEATURED_BTC_DATA_PATH,
     BTCUSDT_1H_CSV,
-    LIVE_FETCH_LIMIT
+    LIVE_FETCH_LIMIT,
+    MIN_HURDLE_PCT,
 )
 from src.feature_engineering import (
     extract_features_for_inference,
@@ -264,8 +265,8 @@ def get_model_return_forecast(features: Optional[Dict[str, Any]] = None) -> Dict
     pred_dollar_move = current_close * raw_pred_return
     target_price = current_close + pred_dollar_move
 
-    # 4. Symmetric Fee Hurdle (|Return| >= 0.05% = 5 basis points)
-    clears_hurdle = abs(expected_return_pct) >= 0.05
+    # 4. Symmetric Directional Hurdle (|Return| >= MIN_HURDLE_PCT)
+    clears_hurdle = abs(expected_return_pct) >= MIN_HURDLE_PCT
 
     direction = "UP" if move_code == 1 else "DOWN"
     if not clears_hurdle:
@@ -280,7 +281,7 @@ def get_model_return_forecast(features: Optional[Dict[str, Any]] = None) -> Dict
         "predicted_dollar_move": round(pred_dollar_move, 2),
         "predicted_target_price": round(target_price, 2),
         "clears_hurdle": clears_hurdle,
-        "hurdle_threshold_pct": 0.05,
+        "hurdle_threshold_pct": round(MIN_HURDLE_PCT, 4),
         "direction": direction,
         "direction_badge": direction_badge,
         "direction_probability_up": round(prob_up * 100.0, 2),
