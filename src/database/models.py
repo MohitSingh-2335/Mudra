@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     Text,
     Index,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
 
@@ -237,6 +238,7 @@ class PaperPortfolio(Base):
     __tablename__ = "paper_portfolio"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    tick_id = Column(Integer, ForeignKey("market_ticks.id"), nullable=True)
     timestamp = Column(
         DateTime(timezone=True),
         index=True,
@@ -264,13 +266,24 @@ class PaperPortfolio(Base):
     alpha_pct = Column(Float, nullable=False, default=0.0)
     
     notes = Column(Text, nullable=True)
+    
+    __table_args__ = (
+        Index(
+            "uq_paper_portfolio_tick_id",
+            "tick_id",
+            unique=True,
+            postgresql_where=text("tick_id IS NOT NULL"),
+            sqlite_where=text("tick_id IS NOT NULL"),
+        ),
+    )
 
     def __repr__(self) -> str:
-        return f"<PaperPortfolio(id={self.id}, action='{self.action}', equity=${self.total_equity_usd:.2f}, alpha=${self.alpha_usd:+.2f})>"
+        return f"<PaperPortfolio(id={self.id}, tick_id={self.tick_id}, action='{self.action}', equity=${self.total_equity_usd:.2f}, alpha=${self.alpha_usd:+.2f})>"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
+            "tick_id": self.tick_id,
             "timestamp": self.timestamp.isoformat() if hasattr(self.timestamp, "isoformat") else (str(self.timestamp) if self.timestamp else None),
             "action": self.action,
             "btc_amount": self.btc_amount,
