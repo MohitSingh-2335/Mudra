@@ -10,7 +10,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc, func, text
 from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,7 @@ from src.database.models import PaperPortfolio
 from src.database.connection import has_tick_id_column
 from config import (
     INITIAL_CAPITAL_USD,
+    PORTFOLIO_ADVISORY_LOCK_ID,
     TAKER_FEE_RATE,
     SLIPPAGE_RATE,
     TAKER_FEE_PCT,
@@ -35,6 +36,7 @@ __all__ = [
     "get_latest_portfolio_state",
     "get_average_entry_price",
     "INITIAL_CAPITAL_USD",
+    "PORTFOLIO_ADVISORY_LOCK_ID",
     "TAKER_FEE_RATE",
     "SLIPPAGE_RATE",
     "TAKER_FEE_PCT",
@@ -135,7 +137,16 @@ def execute_paper_order(
     Returns:
         The newly committed (or deduplicated existing) PaperPortfolio record.
     """
-    # 0. Idempotency Guard: prevent duplicate paper executions for the same tick
+    # 0. Concurrency Serialization: Acquire PostgreSQL transaction-scoped advisory lock
+    # to serialize concurrent ledger lookups and mutations across multi-worker executions.
+    bind = session.get_bind()
+    if bind and "postgresql" in bind.dialect.name:
+        session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_id)"),
+            {"lock_id": PORTFOLIO_ADVISORY_LOCK_ID},
+        )
+
+    # 1. Idempotency Guard: prevent duplicate paper executions for the same tick
     if tick_id is not None and has_tick_id_column(session):
         existing_order = session.execute(
             select(PaperPortfolio).where(PaperPortfolio.tick_id == tick_id)
