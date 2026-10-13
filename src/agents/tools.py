@@ -22,7 +22,12 @@ from config import (
     BTCUSDT_1H_CSV,
     LIVE_FETCH_LIMIT
 )
-from src.feature_engineering import extract_features_for_inference
+from src.feature_engineering import (
+    extract_features_for_inference,
+    validate_inference_features,
+    predict_with_validation,
+    predict_proba_with_validation,
+)
 
 
 def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LIMIT) -> pd.DataFrame:
@@ -216,14 +221,9 @@ def get_model_return_forecast(features: Optional[Dict[str, Any]] = None) -> Dict
 
     feature_dict = features
 
-    # Validate that all required model features exist and are non-null
-    missing_reg = [col for col in REGRESSOR_FEATURES if col not in feature_dict or pd.isna(feature_dict[col])]
-    missing_clf = [col for col in CLASSIFIER_FEATURES if col not in feature_dict or pd.isna(feature_dict[col])]
-
-    if missing_reg:
-        raise ValueError(f"Feature parity violation: missing required regressor features: {missing_reg}")
-    if missing_clf:
-        raise ValueError(f"Feature parity violation: missing required classifier features: {missing_clf}")
+    # Centralized feature validation: verifies schemas, order, and non-null/finite values
+    df_reg = validate_inference_features(feature_dict, model_type="regressor")
+    df_clf = validate_inference_features(feature_dict, model_type="classifier")
 
     current_close = float(feature_dict.get("close", feature_dict.get("close_price", feature_dict.get("current_price", 65000.0))))
 
@@ -238,8 +238,7 @@ def get_model_return_forecast(features: Optional[Dict[str, Any]] = None) -> Dict
         except Exception:
             pass
 
-    df_reg = pd.DataFrame([{col: float(feature_dict[col]) for col in REGRESSOR_FEATURES}], columns=REGRESSOR_FEATURES)
-    raw_pred_return = float(model_reg.predict(df_reg)[0])
+    raw_pred_return = float(predict_with_validation(model_reg, df_reg, model_type="regressor")[0])
 
     # 2. Classifier Inference (Directional Movement & Probability)
     if not os.path.exists(CLASSIFIER_MODEL_PATH):
@@ -252,12 +251,11 @@ def get_model_return_forecast(features: Optional[Dict[str, Any]] = None) -> Dict
         except Exception:
             pass
 
-    df_clf = pd.DataFrame([{col: float(feature_dict[col]) for col in CLASSIFIER_FEATURES}], columns=CLASSIFIER_FEATURES)
-    move_code = int(model_clf.predict(df_clf)[0])
+    move_code = int(predict_with_validation(model_clf, df_clf, model_type="classifier")[0])
     prob_up = 0.50
     prob_down = 0.50
     if hasattr(model_clf, "predict_proba"):
-        probs = model_clf.predict_proba(df_clf)[0]
+        probs = predict_proba_with_validation(model_clf, df_clf)[0]
         prob_down = float(probs[0])
         prob_up = float(probs[1])
 
