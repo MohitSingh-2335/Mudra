@@ -4,15 +4,30 @@ name: Mudra CI/CD Pipeline
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, code-cleanup ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, code-cleanup ]
 
 jobs:
   # Job 1: Automated Unit & Integration Testing
   test:
-    name: Run Pytest Suite
+    name: Run Pytest Suite with Isolated PostgreSQL
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: mudra_test_user
+          POSTGRES_PASSWORD: mudra_test_password
+          POSTGRES_DB: mudra_test_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - name: Checkout Source Code
@@ -32,6 +47,7 @@ jobs:
       - name: Execute Automated Test Suite
         env:
           PYTHONPATH: .
+          TEST_DATABASE_URL: postgresql+psycopg2://mudra_test_user:mudra_test_password@localhost:5432/mudra_test_db
         run: |
           python -m pytest tests/ -v
 
