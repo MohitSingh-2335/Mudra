@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import select, desc, func
+from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from src.database.models import PaperPortfolio
+from src.database.connection import has_tick_id_column
 from config import (
     INITIAL_CAPITAL_USD,
     TAKER_FEE_RATE,
@@ -116,6 +118,7 @@ def execute_paper_order(
     current_price: float,
     kelly_fraction: float = 0.10,
     notes: Optional[str] = None,
+    tick_id: Optional[int] = None,
 ) -> PaperPortfolio:
     """
     Executes a virtual trade order, applies execution friction (fee + slippage),
@@ -127,10 +130,20 @@ def execute_paper_order(
         current_price: Latest BTC/USDT price
         kelly_fraction: Fraction of cash to deploy on BUY (0.05 to 0.20)
         notes: Audit notes from Multi-Agent Council
+        tick_id: Optional originating MarketTick foreign key for idempotency
         
     Returns:
-        The newly committed PaperPortfolio record.
+        The newly committed (or deduplicated existing) PaperPortfolio record.
     """
+    # 0. Idempotency Guard: prevent duplicate paper executions for the same tick
+    if tick_id is not None and has_tick_id_column(session):
+        existing_order = session.execute(
+            select(PaperPortfolio).where(PaperPortfolio.tick_id == tick_id)
+        ).scalar_one_or_none()
+        if existing_order is not None:
+            logger.info(f"[PAPER] Trade already executed for tick #{tick_id} ({existing_order.action}). Deduplicating.")
+            return existing_order
+
     current_price = max(1.0, float(current_price))
     latest = get_latest_portfolio_state(session)
     baseline_price = get_baseline_btc_price(session) or current_price
@@ -228,6 +241,7 @@ def execute_paper_order(
 
     # 6. Instantiate and Commit New Record
     record = PaperPortfolio(
+        tick_id=tick_id,
         timestamp=datetime.now(timezone.utc),
         action=action,
         btc_amount=btc_delta,
@@ -246,8 +260,20 @@ def execute_paper_order(
         alpha_pct=alpha_pct,
         notes=notes,
     )
-    session.add(record)
-    session.flush()
+    try:
+        with session.begin_nested():
+            session.add(record)
+            session.flush()
+    except IntegrityError as exc:
+        if tick_id is not None and has_tick_id_column(session):
+            existing_order = session.execute(
+                select(PaperPortfolio).where(PaperPortfolio.tick_id == tick_id)
+            ).scalar_one_or_none()
+            if existing_order is not None:
+                logger.info(f"[PAPER] Concurrent trade detected for tick #{tick_id} ({existing_order.action}). Deduplicating via savepoint recovery.")
+                return existing_order
+        logger.error(f"[PAPER] Order insertion failed with IntegrityError: {exc}")
+        raise
     return record
 
 
