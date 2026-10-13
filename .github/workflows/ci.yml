@@ -44,6 +44,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Prepare Test Datasets
+        run: |
+          mkdir -p data/raw data/processed
+          test -f tests/fixtures/BTCUSDT-1H.csv || { echo "Missing fixture tests/fixtures/BTCUSDT-1H.csv"; exit 1; }
+          test -f tests/fixtures/featured_btc_data_candidate.csv || { echo "Missing fixture tests/fixtures/featured_btc_data_candidate.csv"; exit 1; }
+          cp tests/fixtures/BTCUSDT-1H.csv data/raw/BTCUSDT-1H.csv
+          cp tests/fixtures/featured_btc_data_candidate.csv data/processed/featured_btc_data_candidate.csv
+
       - name: Execute Automated Test Suite
         env:
           PYTHONPATH: .
