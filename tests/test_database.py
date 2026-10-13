@@ -153,8 +153,9 @@ def test_models_to_dict_serialization():
 def test_reconciliation_math_and_accurate_tagging(in_memory_db):
     """Tests delayed reconciliation evaluating T-1 against realized T candle."""
     session, _ = in_memory_db
-    t0 = datetime.now(timezone.utc) - timedelta(hours=1)
-    t1 = datetime.now(timezone.utc)
+    base = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    t0 = base - timedelta(hours=1)
+    t1 = base
 
     # Prior tick: price $60,000, model predicted $60,180 (+0.30% UP)
     prior_tick = MarketTick(
@@ -198,8 +199,9 @@ def test_reconciliation_math_and_accurate_tagging(in_memory_db):
 def test_reconciliation_micro_move_and_sideways_drift(in_memory_db):
     """Tests that micro-moves are binary UP/DOWN (no FLAT) and mismatches in chop tag SIDEWAYS_DRIFT."""
     session, _ = in_memory_db
-    t0 = datetime.now(timezone.utc) - timedelta(hours=1)
-    t1 = datetime.now(timezone.utc)
+    base = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    t0 = base - timedelta(hours=1)
+    t1 = base
 
     # Prior tick: $84,000, model micro-move +0.01% -> $84,008.40
     prior_tick = MarketTick(
@@ -242,8 +244,9 @@ def test_reconciliation_micro_move_and_sideways_drift(in_memory_db):
 def test_reconciliation_black_swan_outlier_isolation(in_memory_db):
     """Tests that extreme flash crashes (>3.8% return) are flagged as black swans."""
     session, _ = in_memory_db
-    t0 = datetime.now(timezone.utc) - timedelta(hours=1)
-    t1 = datetime.now(timezone.utc)
+    base = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    t0 = base - timedelta(hours=1)
+    t1 = base
 
     prior = MarketTick(
         timestamp=t0,
@@ -282,8 +285,9 @@ def test_reconciliation_black_swan_outlier_isolation(in_memory_db):
 def test_veto_attribution_saved_capital_vs_opportunity_cost(in_memory_db):
     """Tests that Risk Critic vetoes are correctly attributed at T+1."""
     session, _ = in_memory_db
-    t0 = datetime.now(timezone.utc) - timedelta(hours=1)
-    t1 = datetime.now(timezone.utc)
+    base = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    t0 = base - timedelta(hours=1)
+    t1 = base
 
     # 1. Critic Vetoed BUY, and Market Fell (SAVED_CAPITAL)
     tick1 = MarketTick(
