@@ -19,10 +19,13 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from src.database.models import PaperPortfolio
-
-INITIAL_CAPITAL_USD = 10000.0
-TAKER_FEE_PCT = 0.05    # 0.05% Binance VIP0 / BNB spot fee
-SLIPPAGE_PCT = 0.02     # 0.02% modeled market order price impact
+from config import (
+    INITIAL_CAPITAL_USD,
+    TAKER_FEE_RATE,
+    SLIPPAGE_RATE,
+    TAKER_FEE_PCT,
+    SLIPPAGE_PCT,
+)
 
 __all__ = [
     "execute_paper_order",
@@ -30,6 +33,8 @@ __all__ = [
     "get_latest_portfolio_state",
     "get_average_entry_price",
     "INITIAL_CAPITAL_USD",
+    "TAKER_FEE_RATE",
+    "SLIPPAGE_RATE",
     "TAKER_FEE_PCT",
     "SLIPPAGE_PCT",
 ]
@@ -172,9 +177,9 @@ def execute_paper_order(
         capital_to_spend = cash * size_frac
         
         # Add slippage to execution price
-        exec_price = current_price * (1.0 + (SLIPPAGE_PCT / 100.0))
-        slippage_usd = capital_to_spend * (SLIPPAGE_PCT / 100.0)
-        fee_usd = capital_to_spend * (TAKER_FEE_PCT / 100.0)
+        exec_price = current_price * (1.0 + SLIPPAGE_RATE)
+        slippage_usd = capital_to_spend * SLIPPAGE_RATE
+        fee_usd = capital_to_spend * TAKER_FEE_RATE
         
         net_capital = capital_to_spend - fee_usd
         btc_bought = net_capital / exec_price
@@ -185,10 +190,10 @@ def execute_paper_order(
 
     elif action == "SELL" and btc > 1e-6:
         # Liquidate all BTC inventory
-        exec_price = current_price * (1.0 - (SLIPPAGE_PCT / 100.0))
+        exec_price = current_price * (1.0 - SLIPPAGE_RATE)
         gross_proceeds = btc * exec_price
-        slippage_usd = (btc * current_price) * (SLIPPAGE_PCT / 100.0)
-        fee_usd = gross_proceeds * (TAKER_FEE_PCT / 100.0)
+        slippage_usd = (btc * current_price) * SLIPPAGE_RATE
+        fee_usd = gross_proceeds * TAKER_FEE_RATE
         
         net_proceeds = gross_proceeds - fee_usd
         
