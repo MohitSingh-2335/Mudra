@@ -132,7 +132,12 @@ def generate_live_forecast(
     if len(live_df) < 35:
         return None
 
-    from src.feature_engineering import extract_features_for_inference
+    from src.feature_engineering import (
+        extract_features_for_inference,
+        validate_inference_features,
+        predict_with_validation,
+        predict_proba_with_validation,
+    )
     try:
         sample_input = extract_features_for_inference(live_df)
     except Exception:
@@ -143,11 +148,9 @@ def generate_live_forecast(
     spread_pct = ((recent_candle["high"] - recent_candle["low"]) / recent_candle["close"]) * 100.0
     taker = float(recent_candle.get("taker_buy_ratio", 0.5))
 
-    input_df = pd.DataFrame([{col: sample_input[col] for col in REGRESSOR_FEATURES}], columns=REGRESSOR_FEATURES)
-
     # 1. Regressor Output (Raw decimal fraction: 0.0035 -> +0.35%)
     try:
-        raw_pred_ret = float(reg_model.predict(input_df)[0])
+        raw_pred_ret = float(predict_with_validation(reg_model, sample_input, model_type="regressor")[0])
     except Exception:
         raw_pred_ret = 0.0
 
@@ -161,12 +164,12 @@ def generate_live_forecast(
     prob_down = 50.0
     direction_label = "UP" if pred_ret_pct >= 0 else "DOWN"
     if clf_model:
-        clf_df = pd.DataFrame([{col: sample_input[col] for col in CLASSIFIER_FEATURES}], columns=CLASSIFIER_FEATURES)
         try:
-            move_code = int(clf_model.predict(clf_df)[0])
+            clf_df = validate_inference_features(sample_input, model_type="classifier")
+            move_code = int(predict_with_validation(clf_model, clf_df, model_type="classifier")[0])
             direction_label = "UP" if move_code == 1 else "DOWN"
             if hasattr(clf_model, "predict_proba"):
-                probs = clf_model.predict_proba(clf_df)[0]
+                probs = predict_proba_with_validation(clf_model, clf_df)[0]
                 prob_down = float(probs[0]) * 100.0
                 prob_up = float(probs[1]) * 100.0
         except Exception:
@@ -210,14 +213,14 @@ def generate_live_shap_attribution(
     if len(live_df) < 35:
         return None
 
-    from src.feature_engineering import extract_features_for_inference
+    from src.feature_engineering import extract_features_for_inference, validate_inference_features
     try:
         sample_input = extract_features_for_inference(live_df)
     except Exception:
         return None
 
-    clf_input_df = pd.DataFrame([{col: sample_input[col] for col in CLASSIFIER_FEATURES}], columns=CLASSIFIER_FEATURES)
     try:
+        clf_input_df = validate_inference_features(sample_input, model_type="classifier")
         return explain_single_prediction(explainer_clf, clf_input_df, top_n=top_n)
     except Exception:
         return None
