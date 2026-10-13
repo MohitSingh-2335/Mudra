@@ -7,8 +7,11 @@ import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator, Tuple, Optional
+from typing import Generator, Tuple, Optional, Dict
 import tomllib
+import logging
+
+logger = logging.getLogger(__name__)
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
@@ -129,10 +132,92 @@ def get_db() -> Generator[Session, None, None]:
         session.close()
 
 
+_TICK_ID_COLUMN_CACHE: Dict[int, bool] = {}
+
+
+def has_tick_id_column(session: Session) -> bool:
+    """
+    Reliably verifies whether the underlying `paper_portfolio` table contains
+    the `tick_id` column on disk, caching the result per engine instance.
+    """
+    try:
+        bind = session.get_bind()
+        bind_id = id(bind)
+        if bind_id in _TICK_ID_COLUMN_CACHE:
+            return _TICK_ID_COLUMN_CACHE[bind_id]
+
+        from sqlalchemy import inspect
+        inspector = inspect(bind)
+        if inspector.has_table("paper_portfolio"):
+            cols = {c["name"] for c in inspector.get_columns("paper_portfolio")}
+            present = "tick_id" in cols
+            _TICK_ID_COLUMN_CACHE[bind_id] = present
+            return present
+    except Exception as exc:
+        logger.warning(f"[DB SCHEMA] Failed to inspect paper_portfolio table columns: {exc}")
+    return False
+
+
 def init_db(target_engine: Optional[Engine] = None) -> None:
-    """Creates all 5 tables in the database if they do not exist."""
+    """
+    Creates all 5 tables in the database if they do not exist and applies non-destructive schema evolutions.
+    Fails closed with actionable diagnostics if required migrations fail.
+    """
     target = target_engine or engine
     Base.metadata.create_all(bind=target)
+
+    from sqlalchemy import inspect
+    with target.connect() as conn:
+        inspector = inspect(conn)
+
+        # 1. Non-destructive migration for paper_portfolio.tick_id
+        if inspector.has_table("paper_portfolio"):
+            cols = {c["name"] for c in inspector.get_columns("paper_portfolio")}
+            if "tick_id" not in cols:
+                try:
+                    if "postgresql" in target.dialect.name:
+                        conn.execute(text("ALTER TABLE paper_portfolio ADD COLUMN IF NOT EXISTS tick_id INTEGER REFERENCES market_ticks(id);"))
+                    elif "sqlite" in target.dialect.name:
+                        conn.execute(text("ALTER TABLE paper_portfolio ADD COLUMN tick_id INTEGER REFERENCES market_ticks(id);"))
+                    conn.commit()
+                    logger.info("[DB MIGRATION] Added 'tick_id' column to paper_portfolio.")
+                except Exception as exc:
+                    logger.error(f"[DB MIGRATION CRITICAL] Failed to add 'tick_id' column to paper_portfolio: {exc}")
+                    raise RuntimeError(f"Database migration failed: unable to add required column 'tick_id' to paper_portfolio: {exc}") from exc
+
+            # Verify index on paper_portfolio.tick_id
+            existing_indexes = {idx["name"] for idx in inspector.get_indexes("paper_portfolio")}
+            if "uq_paper_portfolio_tick_id" not in existing_indexes:
+                try:
+                    conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_paper_portfolio_tick_id ON paper_portfolio(tick_id) WHERE tick_id IS NOT NULL;"))
+                    conn.commit()
+                except Exception as exc:
+                    logger.warning(f"[DB MIGRATION] Could not create partial unique index 'uq_paper_portfolio_tick_id': {exc}")
+
+            # Update cache
+            _TICK_ID_COLUMN_CACHE[id(target)] = True
+
+        # 2. Safe duplicate-detection prior to creating unique index on market_ticks(timestamp)
+        if inspector.has_table("market_ticks"):
+            existing_mt_indexes = {idx["name"] for idx in inspector.get_indexes("market_ticks")}
+            if "uq_market_ticks_timestamp" not in existing_mt_indexes:
+                # Detect duplicate timestamps without modifying or deleting data
+                try:
+                    dup_rows = conn.execute(
+                        text("SELECT timestamp, COUNT(*) as cnt FROM market_ticks GROUP BY timestamp HAVING COUNT(*) > 1")
+                    ).fetchall()
+                    if dup_rows:
+                        dup_summary = [(str(r[0]), r[1]) for r in dup_rows[:5]]
+                        logger.warning(
+                            f"[DB MIGRATION] Cannot create unique index 'uq_market_ticks_timestamp': found {len(dup_rows)} duplicate timestamp group(s) "
+                            f"(examples: {dup_summary}). Preserving all existing records; uniqueness constraint installation skipped."
+                        )
+                    else:
+                        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_market_ticks_timestamp ON market_ticks(timestamp);"))
+                        conn.commit()
+                        logger.info("[DB MIGRATION] Verified 0 duplicate timestamps; created unique index 'uq_market_ticks_timestamp'.")
+                except Exception as exc:
+                    logger.warning(f"[DB MIGRATION] Failed during market_ticks timestamp uniqueness check or index creation: {exc}")
 
 
 def test_connection() -> Tuple[bool, str, float]:
