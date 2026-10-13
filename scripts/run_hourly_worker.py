@@ -52,29 +52,91 @@ def log_telemetry(session, service: str, endpoint: str, latency_ms: float, statu
         print(f"[WARN] Failed to write API telemetry: {e}")
 
 
-def flush_outbox(session) -> int:
-    """Flushes cached records from data/sync_outbox.json if present."""
+def flush_outbox(session: Optional[Any] = None) -> int:
+    """
+    Flushes cached records from data/sync_outbox.json to the database.
+    Durable and idempotent:
+    - Never deletes the outbox file before the database commit succeeds.
+    - Idempotently skips ticks that already exist in market_ticks (matched by UTC timestamp).
+    - Preserves outbox file on parsing, insertion, flush, or database commit failure.
+    - Safe against crashes between commit and file unlink (replay skips duplicates).
+    """
     if not OUTBOX_FILE.exists():
         return 0
+
     try:
-        data = json.loads(OUTBOX_FILE.read_text(encoding="utf-8"))
-        if not isinstance(data, list) or not data:
+        content = OUTBOX_FILE.read_text(encoding="utf-8")
+        if not content.strip():
+            OUTBOX_FILE.unlink(missing_ok=True)
             return 0
-        
+        data = json.loads(content)
+    except Exception as exc:
+        print(f"[WARN] Failed to read/parse outbox file: {exc}")
+        return 0
+
+    if not isinstance(data, list) or not data:
+        if not isinstance(data, list):
+            print("[WARN] Outbox file content is not a list. Preserving file.")
+        return 0
+
+    def _apply_ticks(s) -> int:
+        from sqlalchemy import select
         flushed_count = 0
         for item in data:
+            if not isinstance(item, dict):
+                continue
             if item.get("type") == "tick" and "payload" in item:
-                tick = MarketTick(**item["payload"])
-                session.add(tick)
+                payload = item["payload"]
+                raw_ts = payload.get("timestamp")
+                if not raw_ts:
+                    continue
+                if isinstance(raw_ts, str):
+                    ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+                else:
+                    ts = raw_ts
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                else:
+                    ts = ts.astimezone(timezone.utc)
+
+                existing_id = s.execute(
+                    select(MarketTick.id).where(MarketTick.timestamp == ts)
+                ).scalar_one_or_none()
+
+                if existing_id is not None:
+                    continue
+
+                tick_payload = dict(payload)
+                tick_payload["timestamp"] = ts
+                tick = MarketTick(**tick_payload)
+                s.add(tick)
                 flushed_count += 1
-                
-        session.flush()
-        OUTBOX_FILE.unlink(missing_ok=True)
-        print(f"[OUTBOX] Successfully flushed {flushed_count} cached items to Neon cloud.")
+        s.flush()
         return flushed_count
-    except Exception as exc:
-        print(f"[WARN] Failed to flush outbox: {exc}")
-        return 0
+
+    if session is None:
+        try:
+            with get_db() as local_session:
+                flushed_count = _apply_ticks(local_session)
+            OUTBOX_FILE.unlink(missing_ok=True)
+            if flushed_count > 0:
+                print(f"[OUTBOX] Successfully flushed {flushed_count} cached items to Neon cloud.")
+            return flushed_count
+        except Exception as exc:
+            print(f"[WARN] Failed to flush outbox: {exc}")
+            return 0
+    else:
+        try:
+            flushed_count = _apply_ticks(session)
+            session.commit()
+            OUTBOX_FILE.unlink(missing_ok=True)
+            if flushed_count > 0:
+                print(f"[OUTBOX] Successfully flushed {flushed_count} cached items to Neon cloud.")
+            return flushed_count
+        except Exception as exc:
+            session.rollback()
+            print(f"[WARN] Failed to flush outbox: {exc}")
+            return 0
 
 
 def run_worker(force: bool = False) -> bool:
@@ -84,7 +146,11 @@ def run_worker(force: bool = False) -> bool:
     print(f"{'='*70}")
 
     # 1. Initialize Tables in Neon Cloud
-    init_db()
+    try:
+        init_db()
+    except Exception as exc:
+        print(f"[FATAL] Cannot initialize database schema: {exc}")
+        return False
     
     # 2. Test Connection
     ok, ver, lat = test_connection()
@@ -93,23 +159,38 @@ def run_worker(force: bool = False) -> bool:
         return False
     print(f"[DB] Connected to {ver[:35]}... (Latency: {lat:.1f}ms)")
 
-    with get_db() as session:
-        # 3. Flush any pending offline queue items
-        flush_outbox(session)
+    # 3. Flush any pending offline queue items
+    try:
+        flush_outbox()
+    except Exception as exc:
+        print(f"[WARN] Outbox flush failed: {exc}")
 
-        # 4. Ingest Candle, Reconcile T-1, Council Deliberation, Paper Order
-        print(f"[QUANT] Executing unified hourly quant cycle (force={force})...")
+    # 4. Ingest Candle, Reconcile T-1, Council Deliberation, Paper Order
+    print(f"[QUANT] Executing unified hourly quant cycle (force={force})...")
+    try:
         synced, message, summary = sync_hourly_quant_cycle(force=force)
-        print(f"[STATUS] Synced: {synced} | Message: {message}")
+    except Exception as exc:
+        print(f"[FATAL] Hourly quant cycle crashed with unhandled exception: {exc}")
+        return False
 
-        if summary:
-            if "total_equity_usd" in summary:
-                print(f"[PORTFOLIO] Total Equity: ${summary.get('total_equity_usd', 0.0):,.2f} | Cash: ${summary.get('cash_balance', 0.0):,.2f} | BTC: {summary.get('btc_balance', 0.0):.6f}")
-                print(f"[ALPHA] Strategy Return: {summary.get('cumulative_return_pct', 0.0):+.2f}% | Benchmark: ${summary.get('benchmark_btc_equity', 0.0):,.2f} | Alpha: ${summary.get('alpha_usd', 0.0):+,.2f} ({summary.get('alpha_pct', 0.0):+.2f}%)")
-            elif "tick_id" in summary:
-                print(f"[INFO] Existing Tick ID: #{summary['tick_id']}")
-        print(f"{'='*70}\n")
+    print(f"[STATUS] Synced: {synced} | Message: {message}")
+
+    if summary:
+        if "total_equity_usd" in summary:
+            print(f"[PORTFOLIO] Total Equity: ${summary.get('total_equity_usd', 0.0):,.2f} | Cash: ${summary.get('cash_balance', 0.0):,.2f} | BTC: {summary.get('btc_balance', 0.0):.6f}")
+            print(f"[ALPHA] Strategy Return: {summary.get('cumulative_return_pct', 0.0):+.2f}% | Benchmark: ${summary.get('benchmark_btc_equity', 0.0):,.2f} | Alpha: ${summary.get('alpha_usd', 0.0):+,.2f} ({summary.get('alpha_pct', 0.0):+.2f}%)")
+        elif "tick_id" in summary:
+            print(f"[INFO] Existing Tick ID: #{summary['tick_id']}")
+    print(f"{'='*70}\n")
+
+    # Exit Status Contract:
+    # - True (exit 0): New tick successfully synced OR candle was already recorded (idempotent no-op).
+    # - False (exit 1): Genuine operational failure (database unreachable, market feeds failed, crash).
+    if synced:
         return True
+    if "already recorded" in message or (isinstance(summary, dict) and "tick_id" in summary):
+        return True
+    return False
 
 
 if __name__ == "__main__":
