@@ -39,6 +39,9 @@ from config import (
     REGRESSOR_MODEL_PATH,
     CLASSIFIER_MODEL_PATH,
     FEATURED_BTC_DATA_PATH,
+    TAKER_FEE_PCT,
+    SLIPPAGE_PCT,
+    TOTAL_FRICTION_PER_SIDE_PCT,
 )
 from src.explainability import get_tree_explainer, explain_single_prediction
 from src.agents.trading_graph import run_trading_graph
@@ -789,7 +792,7 @@ with tab3:
 # -------------------------------------------------------------------------------------
 with tab4:
     st.subheader("Forward $10,000 Paper Trading Portfolio & Alpha Attribution")
-    st.caption("Live forward execution accounting for 0.05% Binance taker fee and 0.02% slippage. Proves excess Alpha over Bitcoin Buy & Hold benchmark.")
+    st.caption(f"Live forward execution accounting for {TAKER_FEE_PCT:.2f}% taker fee and {SLIPPAGE_PCT:.2f}% slippage ({TOTAL_FRICTION_PER_SIDE_PCT:.2f}% per side). Proves excess Alpha over Bitcoin Buy & Hold benchmark.")
 
     port_df = db_state["port_df"]
     port_kpis = db_state["port_kpis"]
@@ -814,11 +817,11 @@ with tab4:
         st.markdown("### Transaction Execution Ledger")
         with st.expander("📘 How to Read This Transaction Execution Ledger (Plain-English Guide)", expanded=False):
             st.markdown(
-                """
+                f"""
                 * **Order Action (`[BUY]`, `[SELL]`, `[HOLD]`, `[DEPOSIT]`):** The decision executed by the multi-agent council after evaluating market volatility and the fee hurdle.
                 * **Execution Price:** The actual Binance market close price where the order was filled (or `-` when holding).
                 * **Trade Size:** The quantity of Bitcoin bought or sold, along with its approximate dollar value.
-                * **Fees & Friction:** The exchange taker fee (0.05%) and slippage (0.02%) paid to Binance. When holding, this shows `$0.00 (Fees Saved)`.
+                * **Fees & Friction:** The modeled taker fee ({TAKER_FEE_PCT:.2f}%) and slippage ({SLIPPAGE_PCT:.2f}%) per execution ({TOTAL_FRICTION_PER_SIDE_PCT:.2f}% per side). When holding, this shows `$0.00 (Fees Saved)`.
                 * **Portfolio Value:** Total account equity (Cash + Bitcoin inventory marked to market) and cumulative percentage return from the $10,000 start.
                 * **Strategy Rationale:** A plain-English explanation of why the trade was executed or why cash was preserved.
                 """
@@ -874,7 +877,7 @@ with tab4:
             slip = float(row.get("slippage_usd", 0.0) or 0.0)
             tot = fee + slip
             if act in ["BUY", "SELL"] and tot > 0:
-                return f"${tot:,.2f} (0.07%)"
+                return f"${tot:,.2f} ({TOTAL_FRICTION_PER_SIDE_PCT:.2f}%)"
             elif act == "HOLD":
                 return "$0.00 (Fees Saved)"
             return "$0.00"
