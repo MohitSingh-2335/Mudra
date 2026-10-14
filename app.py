@@ -42,6 +42,7 @@ from config import (
     TAKER_FEE_PCT,
     SLIPPAGE_PCT,
     TOTAL_FRICTION_PER_SIDE_PCT,
+    MIN_HURDLE_PCT,
 )
 from src.explainability import get_tree_explainer, explain_single_prediction
 from src.agents.trading_graph import run_trading_graph
@@ -160,7 +161,7 @@ def generate_live_forecast(
     pred_ret_pct = raw_pred_ret * 100.0
     pred_dollar_move = current_price * raw_pred_ret
     pred_target = current_price + pred_dollar_move
-    cleared_hurdle = abs(pred_ret_pct) >= 0.05
+    cleared_hurdle = abs(pred_ret_pct) >= MIN_HURDLE_PCT
 
     # 2. Classifier Output (Direction: 1 = UP, 0 = DOWN)
     prob_up = 50.0
@@ -536,7 +537,7 @@ with tab1:
                 st.metric(
                     "Expected 1h Move",
                     f"{forecast_result['pred_ret_pct']:+.3f}%",
-                    "Cleared 0.05% Hurdle [PASS]" if forecast_result["cleared_hurdle"] else "Below Fee Hurdle [SKIP]",
+                    f"Cleared {MIN_HURDLE_PCT:.2f}% Hurdle [PASS]" if forecast_result["cleared_hurdle"] else "Below Fee Hurdle [SKIP]",
                 )
             with f_col3:
                 st.metric("Target Close Price", f"${forecast_result['pred_target']:,.2f}", f"${forecast_result['pred_dollar_move']:+,.2f}")
