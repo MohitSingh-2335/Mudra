@@ -93,6 +93,32 @@ def _parse_execution_cost_rate(
     raise ValueError(f"Neither {rate_var} nor {pct_var} was provided and no default was specified.")
 
 
+def _parse_positive_int(var_name: str, default_val: int) -> int:
+    val_str = os.getenv(var_name)
+    if val_str is None or val_str.strip() == "":
+        return default_val
+    try:
+        val = int(val_str.strip())
+        if val <= 0:
+            raise ValueError(f"{var_name} must be a positive integer, got {val}")
+        return val
+    except ValueError as err:
+        raise ValueError(f"Invalid integer for {var_name}: {val_str}") from err
+
+
+def _parse_positive_float(var_name: str, default_val: float) -> float:
+    val_str = os.getenv(var_name)
+    if val_str is None or val_str.strip() == "":
+        return default_val
+    try:
+        val = float(val_str.strip())
+        if not math.isfinite(val) or val <= 0.0:
+            raise ValueError(f"{var_name} must be a finite positive float, got {val}")
+        return val
+    except ValueError as err:
+        raise ValueError(f"Invalid float for {var_name}: {val_str}") from err
+
+
 # Institutional Paper Portfolio & Execution Invariants (Canonical Decimal Rates)
 # Approved Initial Simulation Assumptions:
 # - Taker Fee: 0.05% per side (decimal rate: 0.0005)
@@ -205,6 +231,16 @@ FETCH_DAYS = 59
 LIVE_FETCH_LIMIT = 100
 LOOKBACK_WINDOW = 48
 
+# Exchange Ingestion & Bounded Retry Configuration
+EXCHANGE_RETRY_MAX_ATTEMPTS: int = _parse_positive_int("EXCHANGE_RETRY_MAX_ATTEMPTS", 3)
+EXCHANGE_CONNECT_TIMEOUT: float = _parse_positive_float("EXCHANGE_CONNECT_TIMEOUT", 3.5)
+EXCHANGE_READ_TIMEOUT: float = _parse_positive_float("EXCHANGE_READ_TIMEOUT", 7.0)
+EXCHANGE_RETRY_BASE_BACKOFF: float = _parse_positive_float("EXCHANGE_RETRY_BASE_BACKOFF", 1.0)
+EXCHANGE_RETRY_BACKOFF_FACTOR: float = _parse_positive_float("EXCHANGE_RETRY_BACKOFF_FACTOR", 2.0)
+EXCHANGE_RETRY_MAX_BACKOFF: float = _parse_positive_float("EXCHANGE_RETRY_MAX_BACKOFF", 6.0)
+EXCHANGE_MAX_RETRY_AFTER_CAP: float = _parse_positive_float("EXCHANGE_MAX_RETRY_AFTER_CAP", 15.0)
+EXCHANGE_RETRY_TOTAL_DEADLINE: float = _parse_positive_float("EXCHANGE_RETRY_TOTAL_DEADLINE", 25.0)
+
 # Regressor Feature Schema (26 features)
 REGRESSOR_FEATURES = [
     'volume', 'Price Change', 'Rolling_Std_Close',
@@ -271,6 +307,14 @@ __all__ = [
     "FETCH_DAYS",
     "LIVE_FETCH_LIMIT",
     "LOOKBACK_WINDOW",
+    "EXCHANGE_RETRY_MAX_ATTEMPTS",
+    "EXCHANGE_CONNECT_TIMEOUT",
+    "EXCHANGE_READ_TIMEOUT",
+    "EXCHANGE_RETRY_BASE_BACKOFF",
+    "EXCHANGE_RETRY_BACKOFF_FACTOR",
+    "EXCHANGE_RETRY_MAX_BACKOFF",
+    "EXCHANGE_MAX_RETRY_AFTER_CAP",
+    "EXCHANGE_RETRY_TOTAL_DEADLINE",
     "REGRESSOR_FEATURES",
     "CLASSIFIER_FEATURES",
 ]
