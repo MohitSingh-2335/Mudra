@@ -19,12 +19,27 @@ except ImportError:
     pass
 
 import time
+import random
+import math
+import json
 from datetime import datetime, timezone
-from typing import Dict, Any, Tuple
+from decimal import Decimal, InvalidOperation
+from email.utils import parsedate_to_datetime
+from typing import Dict, Any, Tuple, Optional, Callable, List, Sequence
 import requests
 import pandas as pd
 from sqlalchemy import select, desc
 
+from config import (
+    EXCHANGE_RETRY_MAX_ATTEMPTS,
+    EXCHANGE_CONNECT_TIMEOUT,
+    EXCHANGE_READ_TIMEOUT,
+    EXCHANGE_RETRY_BASE_BACKOFF,
+    EXCHANGE_RETRY_BACKOFF_FACTOR,
+    EXCHANGE_RETRY_MAX_BACKOFF,
+    EXCHANGE_MAX_RETRY_AFTER_CAP,
+    EXCHANGE_RETRY_TOTAL_DEADLINE,
+)
 from src.database.connection import get_db, test_connection, has_tick_id_column
 from src.database.models import MarketTick, ApiTelemetry, CouncilAudit, PaperPortfolio
 from src.engine.reconciliation import reconcile_pending_ticks
@@ -32,7 +47,23 @@ from src.engine.paper_portfolio import execute_paper_order, get_portfolio_summar
 from src.agents.trading_graph import run_trading_graph
 from src.agents.tools import calculate_technical_signals, get_model_return_forecast
 
-__all__ = ["sync_hourly_quant_cycle", "fetch_latest_confirmed_candle", "is_paper_trade_executed_for_tick"]
+BINANCE_MIN_ROW_LEN: int = 10
+COINBASE_MIN_ROW_LEN: int = 6
+
+class MarketFeedExhaustedError(RuntimeError):
+    """Raised when all configured market feeds fail to provide a valid confirmed candle."""
+
+
+__all__ = [
+    "MarketFeedExhaustedError",
+    "sync_hourly_quant_cycle",
+    "fetch_latest_confirmed_candle",
+    "is_paper_trade_executed_for_tick",
+    "parse_retry_after",
+    "_parse_trade_count",
+    "_validate_candle_payload",
+    "_fetch_feed_with_retry",
+]
 
 
 def is_paper_trade_executed_for_tick(session, tick_id: int) -> bool:
@@ -58,101 +89,511 @@ def is_paper_trade_executed_for_tick(session, tick_id: int) -> bool:
     return False
 
 
-def fetch_latest_confirmed_candle(symbol: str = "BTCUSDT") -> Dict[str, Any]:
+def parse_retry_after(
+    retry_after_header: Optional[str],
+    now_dt_fn: Optional[Callable[[], datetime]] = None,
+) -> Optional[float]:
+    """
+    Parses Retry-After header per RFC 7231 Section 7.1.3 and RFC 9110 Section 10.2.3.
+    Accepts either non-negative integer/float seconds, or an RFC 2822 / RFC 822 HTTP-date string.
+    Returns the required delay in seconds as a float, or None if missing, malformed,
+    negative, or non-finite.
+    """
+    if not retry_after_header or not isinstance(retry_after_header, str):
+        return None
+    val = retry_after_header.strip()
+    if not val:
+        return None
+
+    # 1. Direct seconds representation (e.g. "5", "120")
+    try:
+        sec = float(val)
+        if math.isfinite(sec) and sec >= 0.0:
+            return sec
+        return None
+    except ValueError:
+        pass
+
+    # 2. HTTP-date representation (e.g. "Wed, 21 Oct 2026 07:28:00 GMT")
+    try:
+        parsed_dt = parsedate_to_datetime(val)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+
+    if parsed_dt is not None:
+        now_dt = now_dt_fn() if now_dt_fn is not None else datetime.now(timezone.utc)
+        if parsed_dt.tzinfo is None:
+            parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
+        delta = (parsed_dt - now_dt).total_seconds()
+        return max(0.0, delta) if math.isfinite(delta) else None
+
+    return None
+
+
+def _get_retry_after_header(headers: Any) -> Optional[str]:
+    """Extracts Retry-After header case-insensitively from a response headers mapping."""
+    if not headers or not hasattr(headers, "get"):
+        return None
+    direct = headers.get("Retry-After")
+    if direct is not None:
+        return direct if isinstance(direct, str) else str(direct)
+    if hasattr(headers, "items"):
+        for k, v in headers.items():
+            if isinstance(k, str) and k.lower() == "retry-after" and v is not None:
+                return v if isinstance(v, str) else str(v)
+    return None
+
+
+def _parse_trade_count(raw_trades: Any) -> Optional[int]:
+    """
+    Validates and converts a candle trade count into a non-negative integer.
+    - Returns None when `raw_trades` is None (unobserved).
+    - Accepts non-negative integers (e.g. 1500, 0), non-negative integral finite
+      floats (e.g. 1500.0), and non-negative integral numeric strings (e.g. "1500", "1500.0").
+    - Rejects booleans, negative values, fractional values (e.g. 1.5, "1.5"),
+      non-finite values (NaN, inf, -inf), and non-numeric types by raising ValueError.
+    """
+    if raw_trades is None:
+        return None
+    if isinstance(raw_trades, bool):
+        raise ValueError("Boolean value not permitted for trade count")
+    if isinstance(raw_trades, int):
+        if raw_trades < 0:
+            raise ValueError(f"Negative trade count not permitted: {raw_trades}")
+        return int(raw_trades)
+    if isinstance(raw_trades, float):
+        if not math.isfinite(raw_trades) or raw_trades < 0.0 or not raw_trades.is_integer():
+            raise ValueError(f"Non-integral, negative, or non-finite float trade count: {raw_trades}")
+        return int(raw_trades)
+    if isinstance(raw_trades, str):
+        s = raw_trades.strip()
+        if not s or s.startswith("-"):
+            raise ValueError(f"Invalid or negative string trade count: {raw_trades!r}")
+        try:
+            dec = Decimal(s)
+        except InvalidOperation as exc:
+            raise ValueError(f"Non-numeric string trade count: {raw_trades!r}") from exc
+        if not dec.is_finite() or dec < 0 or dec != int(dec):
+            raise ValueError(f"Non-integral, negative, or non-finite string trade count: {raw_trades!r}")
+        return int(dec)
+    raise ValueError(f"Unsupported trade count type: {type(raw_trades).__name__}")
+
+
+def _validate_candle_payload(
+    payload: Any,
+    min_row_len: int = COINBASE_MIN_ROW_LEN,
+    feed_name: str = "Feed",
+) -> bool:
+    """
+    Validates that a decoded JSON payload is a non-empty list of candle sequences,
+    where every row has at least `min_row_len` elements, all required OHLCV/timestamp
+    fields parse as finite floats, and Binance trade counts parse as non-negative
+    integral values (rejecting fractional, negative, non-finite, boolean, and string noise).
+    """
+    if not isinstance(payload, list):
+        print(f"[FEED] {feed_name} returned non-list JSON payload (type: {type(payload).__name__}). Failing over.")
+        return False
+    if not payload:
+        print(f"[FEED] {feed_name} returned empty list. Failing over.")
+        return False
+
+    float_indices: Tuple[int, ...] = (
+        (0, 1, 2, 3, 4, 5, 6, 9)
+        if min_row_len >= BINANCE_MIN_ROW_LEN
+        else (0, 1, 2, 3, 4, 5)
+    )
+
+    for idx, row in enumerate(payload):
+        if not isinstance(row, (list, tuple)):
+            print(f"[FEED] {feed_name} row #{idx} has unexpected record type ({type(row).__name__}). Failing over.")
+            return False
+        if len(row) < min_row_len:
+            print(
+                f"[FEED] {feed_name} row #{idx} has insufficient length "
+                f"({len(row)} < {min_row_len}). Failing over."
+            )
+            return False
+
+        for col_idx in float_indices:
+            if col_idx >= len(row):
+                print(f"[FEED] {feed_name} row #{idx} missing required column index {col_idx}. Failing over.")
+                return False
+            raw_val = row[col_idx]
+            if isinstance(raw_val, bool):
+                print(f"[FEED] {feed_name} row #{idx} column {col_idx} contains boolean value. Failing over.")
+                return False
+            try:
+                num_val = float(raw_val)
+            except (TypeError, ValueError):
+                print(f"[FEED] {feed_name} row #{idx} column {col_idx} is non-numeric. Failing over.")
+                return False
+            if not math.isfinite(num_val):
+                print(f"[FEED] {feed_name} row #{idx} column {col_idx} is non-finite ({raw_val}). Failing over.")
+                return False
+
+        if min_row_len >= BINANCE_MIN_ROW_LEN:
+            try:
+                _parse_trade_count(row[8])
+            except ValueError as exc:
+                print(f"[FEED] {feed_name} row #{idx} trade count column 8 is invalid ({exc}). Failing over.")
+                return False
+
+    return True
+
+
+def _fetch_feed_with_retry(
+    url: str,
+    headers: Optional[Dict[str, str]] = None,
+    feed_name: str = "Binance Vision",
+    deadline_ts: Optional[float] = None,
+    max_attempts: int = EXCHANGE_RETRY_MAX_ATTEMPTS,
+    connect_timeout: float = EXCHANGE_CONNECT_TIMEOUT,
+    read_timeout: float = EXCHANGE_READ_TIMEOUT,
+    base_backoff: float = EXCHANGE_RETRY_BASE_BACKOFF,
+    backoff_factor: float = EXCHANGE_RETRY_BACKOFF_FACTOR,
+    max_backoff: float = EXCHANGE_RETRY_MAX_BACKOFF,
+    max_retry_after: float = EXCHANGE_MAX_RETRY_AFTER_CAP,
+    total_deadline: float = EXCHANGE_RETRY_TOTAL_DEADLINE,
+    min_row_len: Optional[int] = None,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    jitter_fn: Callable[[float, float], float] = random.uniform,
+    clock_fn: Callable[[], float] = time.perf_counter,
+    now_dt_fn: Optional[Callable[[], datetime]] = None,
+) -> Optional[List[Any]]:
+    """
+    Executes an HTTP GET request with bounded retries, exponential backoff, and jitter.
+
+    Error Classification & Retry Policy:
+    - Transient Network: requests.exceptions.Timeout (ConnectTimeout, ReadTimeout),
+      requests.exceptions.ConnectionError, and ChunkedEncodingError are retried with
+      exponential backoff + jitter.
+    - Transient HTTP Status: 500, 502, 503, 504 are retried with exponential backoff + jitter.
+    - Transient Rate Limits: 429 and Binance 418 inspect Retry-After. If Retry-After <= max_retry_after,
+      the scheduled delay is clamped to min(max_retry_after, retry_after_val + jitter) so it never
+      exceeds max_retry_after. If that delay fits within deadline_ts, sleeps and retries. If Retry-After
+      exceeds max_retry_after, is missing/malformed, or exceeds deadline_ts, fails over promptly.
+    - Malformed JSON: json.JSONDecodeError / ValueError under HTTP 200 is retried with backoff if
+      attempts and budget remain.
+    - Invalid Payload Structure / Non-Finite Fields: Validated via _validate_candle_payload before
+      returning; invalid payloads fail over cleanly without crashing the caller.
+    - Permanent HTTP Status: 400, 401, 403, 404, 405 (and other non-429/418 4xx) and non-retryable
+      requests.exceptions.RequestException (e.g. InvalidURL, MissingSchema) fail fast without retry.
+    - Unexpected Programming Errors: Non-RequestException errors (e.g. TypeError, AttributeError)
+      are NOT swallowed and propagate immediately as diagnosable failures.
+
+    Retry-Scheduling Budget & Timeout Semantics:
+    - `deadline_ts` (initialized from `clock_fn() + total_deadline` when not supplied) is a
+      cooperative retry-scheduling budget for this provider call, NOT a guaranteed hard wall-clock
+      timeout.
+    - Before each request and before each sleep, remaining budget (`deadline_ts - clock_fn()`) is
+      checked. If remaining budget < 0.5s before an attempt, or if a scheduled sleep would exceed
+      `deadline_ts`, the attempt or sleep is refused and the helper returns None.
+    - Per-attempt socket timeouts are passed as `(min(connect_timeout, remaining_budget),
+      min(read_timeout, remaining_budget))`. In Requests/urllib3, connect and read timeouts are
+      separate socket-phase limits (and read timeouts apply per socket read operation rather than
+      as a single total transfer timer). Consequently, an in-flight request can exceed `deadline_ts`
+      before returning control to Python, and this implementation does not establish a strict
+      wall-clock overshoot bound on an in-flight socket call.
+    - However, once control returns from `requests.get()` (and after `resp.json()`), if
+      `clock_fn() > deadline_ts`, the late response is explicitly rejected (`return None`) rather
+      than accepted.
+    """
+    if deadline_ts is None:
+        deadline_ts = clock_fn() + total_deadline
+
+    required_row_len = (
+        min_row_len
+        if min_row_len is not None
+        else (BINANCE_MIN_ROW_LEN if "binance" in feed_name.lower() else COINBASE_MIN_ROW_LEN)
+    )
+
+    for attempt in range(1, max_attempts + 1):
+        now = clock_fn()
+        remaining_budget = deadline_ts - now
+
+        if remaining_budget <= 0.0:
+            print(f"[FEED] {feed_name} retry budget exhausted before attempt #{attempt} (deadline elapsed).")
+            return None
+
+        # Do not initiate an HTTP handshake if remaining scheduling budget is insufficient
+        if remaining_budget < 0.5:
+            print(f"[FEED] {feed_name} remaining budget ({remaining_budget:.2f}s) insufficient for attempt #{attempt}. Aborting.")
+            return None
+
+        attempt_connect_timeout = min(connect_timeout, remaining_budget)
+        attempt_read_timeout = min(read_timeout, remaining_budget)
+        timeout_tuple = (attempt_connect_timeout, attempt_read_timeout)
+
+        try:
+            resp = requests.get(url, headers=headers, timeout=timeout_tuple)
+        except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout, requests.exceptions.Timeout) as exc:
+            print(f"[FEED] {feed_name} attempt #{attempt}/{max_attempts} timed out: {type(exc).__name__}.")
+            if attempt >= max_attempts:
+                return None
+            backoff = min(max_backoff, base_backoff * (backoff_factor ** (attempt - 1)))
+            raw_jitter = jitter_fn(0.1, 0.5)
+            jitter = raw_jitter if (math.isfinite(raw_jitter) and raw_jitter >= 0.0) else 0.0
+            delay = backoff + jitter
+            now_after_call = clock_fn()
+            if (now_after_call + delay) > deadline_ts:
+                print(f"[FEED] {feed_name} remaining deadline ({deadline_ts - now_after_call:.2f}s) cannot accommodate backoff delay ({delay:.2f}s). Aborting retries.")
+                return None
+            sleep_fn(delay)
+            continue
+        except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as exc:
+            print(f"[FEED] {feed_name} attempt #{attempt}/{max_attempts} connection error: {exc}.")
+            if attempt >= max_attempts:
+                return None
+            backoff = min(max_backoff, base_backoff * (backoff_factor ** (attempt - 1)))
+            raw_jitter = jitter_fn(0.1, 0.5)
+            jitter = raw_jitter if (math.isfinite(raw_jitter) and raw_jitter >= 0.0) else 0.0
+            delay = backoff + jitter
+            now_after_call = clock_fn()
+            if (now_after_call + delay) > deadline_ts:
+                print(f"[FEED] {feed_name} remaining deadline ({deadline_ts - now_after_call:.2f}s) cannot accommodate backoff delay ({delay:.2f}s). Aborting retries.")
+                return None
+            sleep_fn(delay)
+            continue
+        except (requests.exceptions.InvalidURL, requests.exceptions.MissingSchema, requests.exceptions.InvalidSchema, requests.exceptions.InvalidHeader) as exc:
+            print(f"[FEED] {feed_name} fatal client configuration error: {exc}.")
+            return None
+        except requests.exceptions.RequestException as exc:
+            print(f"[FEED] {feed_name} non-retryable request error: {exc}.")
+            return None
+
+        status = resp.status_code
+        if not isinstance(status, int):
+            raise TypeError(f"{feed_name} response status_code must be int, got {type(status).__name__}")
+
+        # Reject any response that completed after the provider's scheduling deadline elapsed
+        now_after_resp = clock_fn()
+        if now_after_resp > deadline_ts:
+            print(
+                f"[FEED] {feed_name} attempt #{attempt}/{max_attempts} (HTTP {status}) completed "
+                f"after scheduling deadline elapsed ({now_after_resp - deadline_ts:.2f}s late). Rejecting."
+            )
+            return None
+
+        # 1. Permanent client errors (400, 401, 403, 404, 405, and other 4xx except 429/418)
+        if (400 <= status < 500) and status not in (429, 418):
+            print(f"[FEED] {feed_name} returned permanent HTTP {status}. Bailing out without retry.")
+            return None
+
+        # 2. Rate limit and auto-ban (429, 418)
+        if status in (429, 418):
+            retry_after_str = _get_retry_after_header(getattr(resp, "headers", None))
+            retry_after_val = parse_retry_after(retry_after_str, now_dt_fn=now_dt_fn)
+            if retry_after_val is None:
+                print(f"[FEED] {feed_name} rate limit HTTP {status} missing or unparseable Retry-After header. Failing over promptly.")
+                return None
+            if retry_after_val > max_retry_after:
+                print(f"[FEED] {feed_name} rate limit HTTP {status} Retry-After ({retry_after_val:.2f}s) exceeds maximum cap ({max_retry_after:.2f}s). Failing over promptly.")
+                return None
+            if attempt >= max_attempts:
+                return None
+            raw_jitter = jitter_fn(0.1, 0.5)
+            jitter = raw_jitter if (math.isfinite(raw_jitter) and raw_jitter >= 0.0) else 0.0
+            # Clamp scheduled sleep so Retry-After + jitter never exceeds max_retry_after cap
+            delay = min(max_retry_after, retry_after_val + jitter)
+            now_after_call = clock_fn()
+            if (now_after_call + delay) > deadline_ts:
+                print(f"[FEED] {feed_name} rate limit Retry-After delay ({delay:.2f}s) exceeds overall deadline ({deadline_ts - now_after_call:.2f}s). Failing over promptly.")
+                return None
+            print(f"[FEED] {feed_name} rate limit HTTP {status}. Honoring Retry-After delay of {delay:.2f}s before attempt #{attempt + 1}...")
+            sleep_fn(delay)
+            continue
+
+        # 3. Transient server errors (500, 502, 503, 504)
+        if status in (500, 502, 503, 504):
+            print(f"[FEED] {feed_name} attempt #{attempt}/{max_attempts} transient server error HTTP {status}.")
+            if attempt >= max_attempts:
+                return None
+            backoff = min(max_backoff, base_backoff * (backoff_factor ** (attempt - 1)))
+            raw_jitter = jitter_fn(0.1, 0.5)
+            jitter = raw_jitter if (math.isfinite(raw_jitter) and raw_jitter >= 0.0) else 0.0
+            delay = backoff + jitter
+            now_after_call = clock_fn()
+            if (now_after_call + delay) > deadline_ts:
+                print(f"[FEED] {feed_name} remaining deadline ({deadline_ts - now_after_call:.2f}s) cannot accommodate backoff delay ({delay:.2f}s). Aborting retries.")
+                return None
+            sleep_fn(delay)
+            continue
+
+        # 4. Successful response (HTTP 200)
+        if status == 200:
+            try:
+                payload = resp.json()
+            except (json.JSONDecodeError, ValueError) as json_err:
+                print(f"[FEED] {feed_name} attempt #{attempt}/{max_attempts} malformed JSON body: {json_err}.")
+                if attempt >= max_attempts:
+                    return None
+                backoff = min(max_backoff, base_backoff * (backoff_factor ** (attempt - 1)))
+                raw_jitter = jitter_fn(0.1, 0.5)
+                jitter = raw_jitter if (math.isfinite(raw_jitter) and raw_jitter >= 0.0) else 0.0
+                delay = backoff + jitter
+                now_after_call = clock_fn()
+                if (now_after_call + delay) > deadline_ts:
+                    print(f"[FEED] {feed_name} remaining deadline cannot accommodate backoff delay. Aborting.")
+                    return None
+                sleep_fn(delay)
+                continue
+
+            if clock_fn() > deadline_ts:
+                print(f"[FEED] {feed_name} attempt #{attempt}/{max_attempts} JSON decode completed after scheduling deadline. Rejecting.")
+                return None
+
+            if not _validate_candle_payload(payload, min_row_len=required_row_len, feed_name=feed_name):
+                return None
+
+            return payload
+
+        # Any other unhandled HTTP status
+        print(f"[FEED] {feed_name} unexpected HTTP {status}. Bailing out.")
+        return None
+
+    return None
+
+
+def fetch_latest_confirmed_candle(
+    symbol: str = "BTCUSDT",
+    sleep_fn: Optional[Callable[[float], None]] = None,
+    jitter_fn: Optional[Callable[[float, float], float]] = None,
+    clock_fn: Optional[Callable[[], float]] = None,
+    now_dt_fn: Optional[Callable[[], datetime]] = None,
+    total_deadline: Optional[float] = None,
+) -> Dict[str, Any]:
     """
     Fetches the most recently confirmed closed 1-hour candle alongside
     the preceding sequence of historical candles for rolling feature parity.
     Primary: Binance Dedicated Vision. Fallback: Coinbase Institutional.
+
+    Per-Provider Retry-Scheduling Budget Contract:
+    - `total_deadline` (defaulting to `EXCHANGE_RETRY_TOTAL_DEADLINE` = 25.0s) is applied
+      as a separate cooperative retry-scheduling budget for each provider (`Binance Vision`
+      and `Coinbase Institutional`), rather than a combined wall-clock cap across both
+      providers. This ensures that slow Binance retries or timeouts never starve Coinbase
+      of its fallback attempt budget. Consequently, cumulative elapsed time across both
+      providers can exceed `EXCHANGE_RETRY_TOTAL_DEADLINE` when primary failover occurs.
     """
-    # 1. Binance Dedicated Vision
-    try:
-        url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&limit=102"
-        resp = requests.get(url, timeout=10)
-        if resp.status_code == 200:
-            klines = resp.json()
-            now_ms = datetime.now(timezone.utc).timestamp() * 1000.0
-            confirmed_klines = [k for k in klines if float(k[6]) <= now_ms]
+    _sleep_fn = sleep_fn if sleep_fn is not None else time.sleep
+    _jitter_fn = jitter_fn if jitter_fn is not None else random.uniform
+    _clock_fn = clock_fn if clock_fn is not None else time.perf_counter
+    _provider_budget = total_deadline if total_deadline is not None else EXCHANGE_RETRY_TOTAL_DEADLINE
 
-            if len(confirmed_klines) >= 35:
-                selected_klines = confirmed_klines[-100:]
-                c = selected_klines[-1]
-                ts = datetime.fromtimestamp(c[0] / 1000.0, tz=timezone.utc)
-                vol = float(c[5])
-                taker_base = float(c[9])
-                taker_ratio = float(taker_base / vol) if vol > 0 else 0.50
+    # 1. Binance Dedicated Vision (Primary Provider)
+    binance_deadline_ts = _clock_fn() + _provider_budget
+    binance_url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&limit=102"
+    binance_klines = _fetch_feed_with_retry(
+        url=binance_url,
+        headers=None,
+        feed_name="Binance Vision",
+        deadline_ts=binance_deadline_ts,
+        min_row_len=BINANCE_MIN_ROW_LEN,
+        sleep_fn=_sleep_fn,
+        jitter_fn=_jitter_fn,
+        clock_fn=_clock_fn,
+        now_dt_fn=now_dt_fn,
+    )
 
-                candle_records = []
-                for k in selected_klines:
-                    k_vol = float(k[5])
-                    k_taker = float(k[9])
-                    k_ratio = float(k_taker / k_vol) if k_vol > 0 else 0.50
-                    candle_records.append({
-                        "timestamp": pd.to_datetime(k[0], unit="ms", utc=True),
-                        "open": float(k[1]),
-                        "high": float(k[2]),
-                        "low": float(k[3]),
-                        "close": float(k[4]),
-                        "volume": k_vol,
-                        "number_of_trades": int(k[8]),
-                        "taker_buy_ratio": round(k_ratio, 4),
-                    })
+    if binance_klines is not None and _validate_candle_payload(
+        binance_klines, min_row_len=BINANCE_MIN_ROW_LEN, feed_name="Binance Vision"
+    ):
+        now_ms = (now_dt_fn().timestamp() if now_dt_fn else datetime.now(timezone.utc).timestamp()) * 1000.0
+        confirmed_klines = [k for k in binance_klines if float(k[6]) <= now_ms]
 
-                return {
-                    "timestamp": ts,
-                    "open": float(c[1]),
-                    "high": float(c[2]),
-                    "low": float(c[3]),
-                    "close": float(c[4]),
-                    "volume": vol,
-                    "taker_buy_ratio": round(taker_ratio, 4),
-                    "number_of_trades": int(c[8]),
-                    "candles": candle_records,
-                }
-    except Exception:
-        pass
+        if len(confirmed_klines) >= 35:
+            selected_klines = confirmed_klines[-100:]
+            c = selected_klines[-1]
+            ts = datetime.fromtimestamp(float(c[0]) / 1000.0, tz=timezone.utc)
+            vol = float(c[5])
+            taker_base = float(c[9])
+            taker_ratio = float(taker_base / vol) if vol > 0 else 0.50
 
-    # 2. Coinbase Institutional Fallback
-    try:
-        url = "https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=3600"
-        resp = requests.get(url, headers={"User-Agent": "Mudra-Sync/1.0"}, timeout=10)
-        if resp.status_code == 200:
-            candles = resp.json()
-            now_sec = datetime.now(timezone.utc).timestamp()
-            confirmed_candles = [k for k in candles if (float(k[0]) + 3600.0) <= now_sec]
+            candle_records = []
+            for k in selected_klines:
+                k_vol = float(k[5])
+                k_taker = float(k[9])
+                k_ratio = float(k_taker / k_vol) if k_vol > 0 else 0.50
+                candle_records.append({
+                    "timestamp": pd.to_datetime(float(k[0]), unit="ms", utc=True),
+                    "open": float(k[1]),
+                    "high": float(k[2]),
+                    "low": float(k[3]),
+                    "close": float(k[4]),
+                    "volume": k_vol,
+                    "number_of_trades": _parse_trade_count(k[8]),
+                    "taker_buy_ratio": round(k_ratio, 4),
+                })
 
-            if len(confirmed_candles) >= 35:
-                selected_candles = list(reversed(confirmed_candles[:100]))
-                c = selected_candles[-1]
-                ts = datetime.fromtimestamp(c[0], tz=timezone.utc)
+            return {
+                "timestamp": ts,
+                "open": float(c[1]),
+                "high": float(c[2]),
+                "low": float(c[3]),
+                "close": float(c[4]),
+                "volume": vol,
+                "taker_buy_ratio": round(taker_ratio, 4),
+                "number_of_trades": _parse_trade_count(c[8]),
+                "candles": candle_records,
+            }
+        else:
+            print(f"[FEED] Binance Vision returned insufficient confirmed closed candles ({len(confirmed_klines)} < 35). Falling back to Coinbase.")
 
-                candle_records = []
-                for k in selected_candles:
-                    candle_records.append({
-                        "timestamp": pd.to_datetime(k[0], unit="s", utc=True),
-                        "low": float(k[1]),
-                        "high": float(k[2]),
-                        "open": float(k[3]),
-                        "close": float(k[4]),
-                        "volume": float(k[5]),
-                        "taker_buy_ratio": 0.50,
-                        "number_of_trades": None,  # Coinbase does not report trade counts; unobserved
-                    })
+    # 2. Coinbase Institutional Fallback (allocated its own bounded retry-scheduling budget)
+    coinbase_deadline_ts = _clock_fn() + _provider_budget
+    coinbase_url = "https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=3600"
+    coinbase_headers = {"User-Agent": "Mudra-Sync/1.0"}
+    coinbase_candles = _fetch_feed_with_retry(
+        url=coinbase_url,
+        headers=coinbase_headers,
+        feed_name="Coinbase Institutional",
+        deadline_ts=coinbase_deadline_ts,
+        min_row_len=COINBASE_MIN_ROW_LEN,
+        sleep_fn=_sleep_fn,
+        jitter_fn=_jitter_fn,
+        clock_fn=_clock_fn,
+        now_dt_fn=now_dt_fn,
+    )
 
-                return {
-                    "timestamp": ts,
-                    "open": float(c[3]),
-                    "high": float(c[2]),
-                    "low": float(c[1]),
-                    "close": float(c[4]),
-                    "volume": float(c[5]),
+    if coinbase_candles is not None and _validate_candle_payload(
+        coinbase_candles, min_row_len=COINBASE_MIN_ROW_LEN, feed_name="Coinbase Institutional"
+    ):
+        now_sec = (now_dt_fn().timestamp() if now_dt_fn else datetime.now(timezone.utc).timestamp())
+        confirmed_candles = [k for k in coinbase_candles if (float(k[0]) + 3600.0) <= now_sec]
+
+        if len(confirmed_candles) >= 35:
+            selected_candles = list(reversed(confirmed_candles[:100]))
+            c = selected_candles[-1]
+            ts = datetime.fromtimestamp(float(c[0]), tz=timezone.utc)
+
+            candle_records = []
+            for k in selected_candles:
+                candle_records.append({
+                    "timestamp": pd.to_datetime(float(k[0]), unit="s", utc=True),
+                    "low": float(k[1]),
+                    "high": float(k[2]),
+                    "open": float(k[3]),
+                    "close": float(k[4]),
+                    "volume": float(k[5]),
                     "taker_buy_ratio": 0.50,
                     "number_of_trades": None,  # Coinbase does not report trade counts; unobserved
-                    "candles": candle_records,
-                }
-    except Exception:
-        pass
+                })
 
-    raise RuntimeError("Failed to fetch confirmed 1-hour candle from all market feeds.")
+            return {
+                "timestamp": ts,
+                "open": float(c[3]),
+                "high": float(c[2]),
+                "low": float(c[1]),
+                "close": float(c[4]),
+                "volume": float(c[5]),
+                "taker_buy_ratio": 0.50,
+                "number_of_trades": None,  # Coinbase does not report trade counts; unobserved
+                "candles": candle_records,
+            }
+        else:
+            print(f"[FEED] Coinbase Institutional returned insufficient confirmed closed candles ({len(confirmed_candles)} < 35).")
+
+    raise MarketFeedExhaustedError("Failed to fetch confirmed 1-hour candle from all market feeds.")
 
 
 def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, Any]]:
@@ -167,7 +608,7 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
 
     try:
         candle = fetch_latest_confirmed_candle()
-    except Exception as exc:
+    except MarketFeedExhaustedError as exc:
         return False, f"Market feed error: {exc}", {}
 
     with get_db() as session:
