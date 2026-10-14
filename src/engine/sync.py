@@ -22,6 +22,7 @@ import time
 import random
 import math
 import json
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
@@ -29,6 +30,7 @@ from typing import Dict, Any, Tuple, Optional, Callable, List, Sequence
 import requests
 import pandas as pd
 from sqlalchemy import select, desc
+from sqlalchemy.exc import IntegrityError
 
 from config import (
     EXCHANGE_RETRY_MAX_ATTEMPTS,
@@ -47,8 +49,12 @@ from src.engine.paper_portfolio import execute_paper_order, get_portfolio_summar
 from src.agents.trading_graph import run_trading_graph
 from src.agents.tools import calculate_technical_signals, get_model_return_forecast
 
+logger = logging.getLogger("mudra.sync")
+
 BINANCE_MIN_ROW_LEN: int = 10
 COINBASE_MIN_ROW_LEN: int = 6
+BACKFILL_LARGE_GAP_WARNING_HOURS: float = 24.0
+
 
 class MarketFeedExhaustedError(RuntimeError):
     """Raised when all configured market feeds fail to provide a valid confirmed candle."""
@@ -58,12 +64,226 @@ __all__ = [
     "MarketFeedExhaustedError",
     "sync_hourly_quant_cycle",
     "fetch_latest_confirmed_candle",
+    "backfill_missing_candles",
+    "_normalize_utc_timestamp",
     "is_paper_trade_executed_for_tick",
     "parse_retry_after",
     "_parse_trade_count",
     "_validate_candle_payload",
     "_fetch_feed_with_retry",
 ]
+
+
+def _normalize_utc_timestamp(ts: Any) -> datetime:
+    """
+    Normalizes a datetime, pandas Timestamp, or ISO-8601 timestamp string
+    to a standard Python timezone-aware UTC datetime object.
+    """
+    if ts is None or isinstance(ts, bool) or (isinstance(ts, float) and math.isnan(ts)):
+        raise ValueError("Timestamp cannot be None, boolean, or NaN.")
+    if hasattr(ts, "to_pydatetime"):
+        if pd.isna(ts):
+            raise ValueError("Timestamp cannot be NaT.")
+        dt = ts.to_pydatetime()
+    elif isinstance(ts, datetime):
+        dt = ts
+    elif isinstance(ts, str):
+        raw = ts.strip()
+        if not raw:
+            raise ValueError("Timestamp string cannot be empty.")
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    else:
+        raise TypeError(f"Unsupported timestamp type: {type(ts).__name__}")
+
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _validate_historical_candle_dict(raw_c: Any) -> Optional[Dict[str, Any]]:
+    """
+    Validates a single historical candle dictionary from candle['candles'].
+    Returns a normalized dictionary with a UTC-aware Python datetime 'timestamp'
+    and finite float OHLCV values, or None if malformed.
+    """
+    if not isinstance(raw_c, dict):
+        return None
+    required_keys = ("timestamp", "open", "high", "low", "close", "volume")
+    if any(k not in raw_c for k in required_keys):
+        return None
+    try:
+        c_ts = _normalize_utc_timestamp(raw_c["timestamp"])
+    except (ValueError, TypeError):
+        return None
+
+    ohlcv: Dict[str, float] = {}
+    for field in ("open", "high", "low", "close", "volume"):
+        val = raw_c[field]
+        if isinstance(val, bool) or val is None:
+            return None
+        try:
+            f_val = float(val)
+        except (ValueError, TypeError):
+            return None
+        if not math.isfinite(f_val):
+            return None
+        ohlcv[field] = f_val
+
+    if (
+        ohlcv["open"] <= 0.0
+        or ohlcv["high"] <= 0.0
+        or ohlcv["low"] <= 0.0
+        or ohlcv["close"] <= 0.0
+        or ohlcv["volume"] < 0.0
+    ):
+        return None
+
+    if (
+        ohlcv["high"] < ohlcv["low"]
+        or ohlcv["high"] < ohlcv["open"]
+        or ohlcv["high"] < ohlcv["close"]
+        or ohlcv["low"] > ohlcv["open"]
+        or ohlcv["low"] > ohlcv["close"]
+    ):
+        return None
+
+    return {
+        "timestamp": c_ts,
+        "open": ohlcv["open"],
+        "high": ohlcv["high"],
+        "low": ohlcv["low"],
+        "close": ohlcv["close"],
+        "volume": ohlcv["volume"],
+    }
+
+
+def backfill_missing_candles(session, candle: Dict[str, Any]) -> int:
+    """
+    Detects and backfills missing historical confirmed 1-hour candles into `market_ticks`
+    using the `candle["candles"]` history already fetched from the exchange.
+
+    Contract & Invariants:
+    - If `candle["candles"]` is absent/empty or the database has zero existing ticks prior
+      to `candle["timestamp"]` (initial empty-DB bootstrap), returns 0 without inserting
+      historical bars.
+    - Backfills missing timestamps strictly after the earliest prior database tick and
+      before `latest_ts` (`anchor_ts < c_ts < latest_ts`), even if a later timestamp
+      already exists inside the fetched window.
+    - Populates OHLCV and schema version fields while setting `market_regime`,
+      `predicted_return_1h`, `predicted_price_1h`, `model_confidence`, and `features` to None.
+    - Never fabricates retrospective predictions, CouncilAudit records, or PaperPortfolio trades.
+    - Wraps each insert in a nested transaction (SAVEPOINT) catching `IntegrityError` so
+      duplicate timestamps are skipped safely without aborting the outer transaction.
+    """
+    if not isinstance(candle, dict) or "timestamp" not in candle:
+        return 0
+
+    raw_history = candle.get("candles")
+    if not raw_history or not isinstance(raw_history, Sequence) or isinstance(raw_history, (str, bytes)):
+        return 0
+
+    try:
+        latest_ts = _normalize_utc_timestamp(candle["timestamp"])
+    except (ValueError, TypeError):
+        return 0
+
+    candidates_by_ts: Dict[datetime, Dict[str, Any]] = {}
+    for raw_c in raw_history:
+        validated = _validate_historical_candle_dict(raw_c)
+        if validated is None:
+            logger.warning("[BACKFILL] Skipping malformed historical candle entry: %r", raw_c)
+            continue
+        c_ts = validated["timestamp"]
+        if c_ts < latest_ts:
+            candidates_by_ts[c_ts] = validated
+
+    if not candidates_by_ts:
+        return 0
+
+    sorted_candidates = [candidates_by_ts[ts] for ts in sorted(candidates_by_ts.keys())]
+    window_start_ts = sorted_candidates[0]["timestamp"]
+
+    prior_latest_tick = session.execute(
+        select(MarketTick)
+        .where(MarketTick.timestamp < latest_ts)
+        .order_by(MarketTick.timestamp.desc())
+        .limit(1)
+    ).scalars().first()
+
+    if prior_latest_tick is None:
+        return 0
+
+    prior_latest_ts = _normalize_utc_timestamp(prior_latest_tick.timestamp)
+    gap_hours = (latest_ts - prior_latest_ts).total_seconds() / 3600.0
+
+    if prior_latest_ts < window_start_ts:
+        logger.warning(
+            "[BACKFILL] Outage gap of %.1f hours (last tick %s, current %s) exceeds exchange "
+            "history window starting at %s. Backfilling available window candles only.",
+            gap_hours,
+            prior_latest_ts.isoformat(),
+            latest_ts.isoformat(),
+            window_start_ts.isoformat(),
+        )
+    elif gap_hours > BACKFILL_LARGE_GAP_WARNING_HOURS:
+        logger.warning(
+            "[BACKFILL] Detected large candle gap of %.1f hours (> %.1fh threshold) between %s and %s.",
+            gap_hours,
+            BACKFILL_LARGE_GAP_WARNING_HOURS,
+            prior_latest_ts.isoformat(),
+            latest_ts.isoformat(),
+        )
+
+    existing_rows = session.execute(
+        select(MarketTick.timestamp).where(
+            MarketTick.timestamp < latest_ts,
+        )
+    ).scalars().all()
+    existing_timestamps = {_normalize_utc_timestamp(r) for r in existing_rows if r is not None}
+
+    anchor_ts = min(existing_timestamps | {prior_latest_ts})
+
+    inserted_count = 0
+    for c_data in sorted_candidates:
+        c_ts = c_data["timestamp"]
+        if c_ts <= anchor_ts or c_ts in existing_timestamps:
+            continue
+
+        backfilled_tick = MarketTick(
+            timestamp=c_ts,
+            open=c_data["open"],
+            high=c_data["high"],
+            low=c_data["low"],
+            close=c_data["close"],
+            volume=c_data["volume"],
+            model_version="xgb_onnx_v1.0.0",
+            feature_schema_version="v1_39features",
+            market_regime=None,
+            predicted_return_1h=None,
+            predicted_price_1h=None,
+            model_confidence=None,
+            features=None,
+        )
+        try:
+            with session.begin_nested():
+                session.add(backfilled_tick)
+                session.flush()
+            existing_timestamps.add(c_ts)
+            inserted_count += 1
+        except IntegrityError:
+            logger.info(
+                "[BACKFILL] Duplicate candle timestamp %s skipped via savepoint.",
+                c_ts.isoformat(),
+            )
+
+    if inserted_count > 0:
+        logger.info(
+            "[BACKFILL] Inserted %d missing historical candle(s) prior to %s.",
+            inserted_count,
+            latest_ts.isoformat(),
+        )
+
+    return inserted_count
 
 
 def is_paper_trade_executed_for_tick(session, tick_id: int) -> bool:
@@ -612,12 +832,16 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
         return False, f"Market feed error: {exc}", {}
 
     with get_db() as session:
+        latest_ts = _normalize_utc_timestamp(candle["timestamp"])
+        backfill_missing_candles(session, candle)
+
         existing = session.execute(
-            select(MarketTick).where(MarketTick.timestamp == candle["timestamp"]).order_by(MarketTick.id.desc())
+            select(MarketTick).where(MarketTick.timestamp == latest_ts).order_by(MarketTick.id.desc())
         ).scalars().first()
 
         if existing and not force:
-            return False, f"Candle for {candle['timestamp'].strftime('%H:00 UTC')} already recorded in Neon.", {"tick_id": existing.id}
+            reconcile_pending_ticks(session, existing)
+            return False, f"Candle for {latest_ts.strftime('%H:00 UTC')} already recorded in Neon.", {"tick_id": existing.id}
 
         is_existing_tick = existing is not None
         already_executed = is_paper_trade_executed_for_tick(session, existing.id) if is_existing_tick else False
@@ -630,7 +854,7 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
             "low": candle["low"],
             "volume": candle["volume"],
             "taker_buy_ratio": candle.get("taker_buy_ratio"),
-            "timestamp": candle["timestamp"],
+            "timestamp": latest_ts,
             "candles": candle.get("candles"),
         })
         ml_output = get_model_return_forecast.invoke({"features": signals_output})
@@ -654,7 +878,7 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
                 session.flush()
         else:
             current_tick = MarketTick(
-                timestamp=candle["timestamp"],
+                timestamp=latest_ts,
                 open=candle["open"],
                 high=candle["high"],
                 low=candle["low"],
