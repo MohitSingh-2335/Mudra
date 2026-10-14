@@ -532,3 +532,226 @@ def test_strategist_heuristic_text_reflects_canonical_config():
     assert out["trade_action"] == "BUY"
     assert f"{MIN_HURDLE_PCT:.2f}% estimated round-trip hurdle" in out["executive_summary"]
     assert "0.05% fee hurdle" not in out["executive_summary"]
+
+
+# -----------------------------------------------------------------------------
+# 8. Streamlit UI Live Forecast Hurdle Alignment (TASK-P1-04.5)
+# -----------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "raw_pred_ret,clf_code,expected_cleared,expected_badge",
+    [
+        (0.0010, 1, False, "SIDEWAYS (CHOP)"),   # +0.10% > legacy 0.05%, but < MIN_HURDLE_PCT (0.139951%)
+        (-0.0010, 0, False, "SIDEWAYS (CHOP)"),  # |-0.10%| > legacy 0.05%, but < MIN_HURDLE_PCT (0.139951%)
+        (0.0015, 1, True, "BULLISH (UP)"),       # +0.15% >= MIN_HURDLE_PCT
+        (-0.0015, 0, True, "BEARISH (DOWN)"),    # |-0.15%| >= MIN_HURDLE_PCT
+    ],
+)
+def test_ui_generate_live_forecast_enforces_canonical_min_hurdle_pct(
+    monkeypatch, raw_pred_ret, clf_code, expected_cleared, expected_badge
+):
+    """
+    Verifies that app.generate_live_forecast evaluates cleared_hurdle against
+    canonical MIN_HURDLE_PCT (0.139951%) rather than the legacy 0.05% constant.
+    Specifically proves that +0.10% and -0.10% moves do NOT clear the hurdle.
+    """
+    from unittest.mock import MagicMock
+    import app
+    import src.feature_engineering as fe
+
+    live_df = pd.DataFrame({
+        "timestamp": pd.date_range("2026-07-01", periods=40, freq="1h", tz="UTC"),
+        "open": [65000.0] * 40,
+        "high": [65200.0] * 40,
+        "low": [64800.0] * 40,
+        "close": [65000.0] * 40,
+        "volume": [100.0] * 40,
+        "taker_buy_ratio": [0.55] * 40,
+    })
+
+    dummy_features = {col: 1.0 for col in config.CLASSIFIER_FEATURES}
+    dummy_features["vol_1h"] = 1.0
+    monkeypatch.setattr(fe, "extract_features_for_inference", lambda df: dummy_features)
+    monkeypatch.setattr(
+        fe,
+        "validate_inference_features",
+        lambda features, model_type="classifier": pd.DataFrame([dummy_features]),
+    )
+    monkeypatch.setattr(
+        fe,
+        "predict_with_validation",
+        lambda model, df_in, model_type="regressor": (
+            np.array([raw_pred_ret]) if model_type == "regressor" else np.array([clf_code])
+        ),
+    )
+    monkeypatch.setattr(
+        fe,
+        "predict_proba_with_validation",
+        lambda model, df_in: np.array([[0.25, 0.75]]) if clf_code == 1 else np.array([[0.75, 0.25]]),
+    )
+
+    res = app.generate_live_forecast(
+        live_df=live_df,
+        reg_model=MagicMock(),
+        clf_model=MagicMock(),
+        is_stale=False,
+    )
+    assert res is not None
+    assert res["pred_ret_pct"] == pytest.approx(raw_pred_ret * 100.0, abs=1e-6)
+    assert res["cleared_hurdle"] is expected_cleared
+    assert res["direction_badge"] == expected_badge
+
+
+@pytest.mark.parametrize(
+    "raw_pred_ret,clf_code,expected_pct,expected_rel,expected_cleared,expected_badge",
+    [
+        (
+            math.nextafter(MIN_HURDLE_RATE, 0.0),
+            1,
+            math.nextafter(MIN_HURDLE_PCT, 0.0),
+            "below",
+            False,
+            "SIDEWAYS (CHOP)",
+        ),
+        (
+            MIN_HURDLE_RATE,
+            1,
+            MIN_HURDLE_PCT,
+            "exact",
+            True,
+            "BULLISH (UP)",
+        ),
+        (
+            math.nextafter(MIN_HURDLE_RATE, math.inf),
+            1,
+            math.nextafter(MIN_HURDLE_PCT, math.inf),
+            "above",
+            True,
+            "BULLISH (UP)",
+        ),
+        (
+            math.nextafter(-MIN_HURDLE_RATE, 0.0),
+            0,
+            -math.nextafter(MIN_HURDLE_PCT, 0.0),
+            "below",
+            False,
+            "SIDEWAYS (CHOP)",
+        ),
+        (
+            -MIN_HURDLE_RATE,
+            0,
+            -MIN_HURDLE_PCT,
+            "exact",
+            True,
+            "BEARISH (DOWN)",
+        ),
+        (
+            math.nextafter(-MIN_HURDLE_RATE, -math.inf),
+            0,
+            -math.nextafter(MIN_HURDLE_PCT, math.inf),
+            "above",
+            True,
+            "BEARISH (DOWN)",
+        ),
+    ],
+)
+def test_ui_generate_live_forecast_exact_min_hurdle_pct_boundary(
+    monkeypatch,
+    raw_pred_ret,
+    clf_code,
+    expected_pct,
+    expected_rel,
+    expected_cleared,
+    expected_badge,
+):
+    """
+    Exercises the exact IEEE-754 float64 hurdle boundary in app.generate_live_forecast()
+    accounting for pred_ret_pct = raw_pred_ret * 100.0:
+      - At raw_pred_ret = ±MIN_HURDLE_RATE, abs(pred_ret_pct) == MIN_HURDLE_PCT and cleared_hurdle is True.
+      - At the immediately lower representable magnitude math.nextafter(±MIN_HURDLE_RATE, 0.0),
+        abs(pred_ret_pct) == math.nextafter(MIN_HURDLE_PCT, 0.0) < MIN_HURDLE_PCT and cleared_hurdle is False.
+      - At the immediately higher representable magnitude math.nextafter(±MIN_HURDLE_RATE, ±math.inf),
+        abs(pred_ret_pct) == math.nextafter(MIN_HURDLE_PCT, math.inf) > MIN_HURDLE_PCT and cleared_hurdle is True.
+    """
+    from unittest.mock import MagicMock
+    import app
+    import src.feature_engineering as fe
+
+    # Pre-verify that the chosen raw_pred_ret input genuinely maps to the exact target boundary
+    # after app.generate_live_forecast()'s pred_ret_pct = raw_pred_ret * 100.0 conversion.
+    computed_pct = raw_pred_ret * 100.0
+    assert computed_pct == expected_pct
+    if expected_rel == "exact":
+        assert abs(computed_pct) == MIN_HURDLE_PCT
+    elif expected_rel == "below":
+        assert abs(computed_pct) == math.nextafter(MIN_HURDLE_PCT, 0.0)
+        assert abs(computed_pct) < MIN_HURDLE_PCT
+    elif expected_rel == "above":
+        assert abs(computed_pct) == math.nextafter(MIN_HURDLE_PCT, math.inf)
+        assert abs(computed_pct) > MIN_HURDLE_PCT
+
+    live_df = pd.DataFrame({
+        "timestamp": pd.date_range("2026-07-01", periods=40, freq="1h", tz="UTC"),
+        "open": [65000.0] * 40,
+        "high": [65200.0] * 40,
+        "low": [64800.0] * 40,
+        "close": [65000.0] * 40,
+        "volume": [100.0] * 40,
+        "taker_buy_ratio": [0.55] * 40,
+    })
+
+    dummy_features = {col: 1.0 for col in config.CLASSIFIER_FEATURES}
+    dummy_features["vol_1h"] = 1.0
+    monkeypatch.setattr(fe, "extract_features_for_inference", lambda df: dummy_features)
+    monkeypatch.setattr(
+        fe,
+        "validate_inference_features",
+        lambda features, model_type="classifier": pd.DataFrame([dummy_features]),
+    )
+    monkeypatch.setattr(
+        fe,
+        "predict_with_validation",
+        lambda model, df_in, model_type="regressor": (
+            np.array([raw_pred_ret], dtype=np.float64)
+            if model_type == "regressor"
+            else np.array([clf_code], dtype=np.int64)
+        ),
+    )
+    monkeypatch.setattr(
+        fe,
+        "predict_proba_with_validation",
+        lambda model, df_in: (
+            np.array([[0.25, 0.75]], dtype=np.float64)
+            if clf_code == 1
+            else np.array([[0.75, 0.25]], dtype=np.float64)
+        ),
+    )
+
+    res = app.generate_live_forecast(
+        live_df=live_df,
+        reg_model=MagicMock(),
+        clf_model=MagicMock(),
+        is_stale=False,
+    )
+    assert res is not None
+    assert res["pred_ret_pct"] == expected_pct
+    assert res["cleared_hurdle"] is expected_cleared
+    assert res["direction_badge"] == expected_badge
+
+
+def test_app_ui_imports_min_hurdle_pct_and_eliminates_hardcoded_005_hurdle():
+    """
+    Verifies that app.py imports MIN_HURDLE_PCT from config and contains no hardcoded
+    'Cleared 0.05% Hurdle' or '>= 0.05' hurdle check in generate_live_forecast / Tab 1.
+    """
+    from pathlib import Path
+    import app
+
+    assert hasattr(app, "MIN_HURDLE_PCT")
+    assert app.MIN_HURDLE_PCT == pytest.approx(config.MIN_HURDLE_PCT, abs=1e-8)
+
+    app_source = Path(app.__file__).read_text(encoding="utf-8")
+    assert "Cleared 0.05% Hurdle" not in app_source
+    assert "abs(pred_ret_pct) >= 0.05" not in app_source
+    assert "abs(pred_ret_pct) >= MIN_HURDLE_PCT" in app_source
+    assert 'f"Cleared {MIN_HURDLE_PCT:.2f}% Hurdle [PASS]"' in app_source
