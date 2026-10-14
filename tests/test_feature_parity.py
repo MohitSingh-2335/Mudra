@@ -324,6 +324,10 @@ def test_sync_fetch_latest_confirmed_candle_binance_and_coinbase(monkeypatch):
     now_ms = now_dt.timestamp() * 1000.0
     now_sec = now_dt.timestamp()
 
+    # Suppress real sleep and jitter for deterministic tests
+    _noop_sleep = lambda s: None
+    _fixed_jitter = lambda lo, hi: 0.25
+
     # 1. Test Binance Path
     mock_binance_klines = []
     for i in range(102):
@@ -336,12 +340,13 @@ def test_sync_fetch_latest_confirmed_candle_binance_and_coinbase(monkeypatch):
 
     class MockBinanceResponse:
         status_code = 200
+        headers = {}
         def json(self):
             return mock_binance_klines
 
     monkeypatch.setattr(requests, "get", lambda *args, **kwargs: MockBinanceResponse())
 
-    res_binance = fetch_latest_confirmed_candle("BTCUSDT")
+    res_binance = fetch_latest_confirmed_candle("BTCUSDT", sleep_fn=_noop_sleep, jitter_fn=_fixed_jitter)
     assert res_binance["close"] == 60200.0
     assert isinstance(res_binance["timestamp"], datetime)
     assert len(res_binance["candles"]) == 100
@@ -363,6 +368,7 @@ def test_sync_fetch_latest_confirmed_candle_binance_and_coinbase(monkeypatch):
         class MockResp:
             def __init__(self, code, data):
                 self.status_code = code
+                self.headers = {}
                 self._data = data
             def json(self):
                 return self._data
@@ -373,7 +379,7 @@ def test_sync_fetch_latest_confirmed_candle_binance_and_coinbase(monkeypatch):
 
     monkeypatch.setattr(requests, "get", mock_get_dispatcher)
 
-    res_cb = fetch_latest_confirmed_candle("BTCUSDT")
+    res_cb = fetch_latest_confirmed_candle("BTCUSDT", sleep_fn=_noop_sleep, jitter_fn=_fixed_jitter)
     assert res_cb["close"] == 60250.0
     assert isinstance(res_cb["timestamp"], datetime)
     assert len(res_cb["candles"]) == 100
