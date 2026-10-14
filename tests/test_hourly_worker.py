@@ -820,4 +820,945 @@ def test_has_tick_id_column_and_fallback_on_legacy_schema():
     session.close()
 
 
+# -----------------------------------------------------------------------------
+# 4. Candle Gap Detection & Historical Backfill Contracts (TASK-P1-05.7)
+# -----------------------------------------------------------------------------
+
+def test_backfill_empty_database_bootstrap_inserts_zero_historical_candles(isolated_db, monkeypatch):
+    """
+    Verifies that on an empty database (initial bootstrap with zero prior MarketTick rows),
+    sync_hourly_quant_cycle records ONLY the latest confirmed candle and does NOT dump
+    the 99 preceding historical candles from candle['candles'] into market_ticks.
+    """
+    import pandas as pd
+    session, _ = isolated_db
+    t_latest = datetime(2026, 2, 1, 12, 0, tzinfo=timezone.utc)
+
+    history = []
+    for i in range(50, -1, -1):
+        ts_i = t_latest - timedelta(hours=i)
+        history.append({
+            "timestamp": pd.Timestamp(ts_i),
+            "open": 60000.0 + i,
+            "high": 60200.0 + i,
+            "low": 59900.0 + i,
+            "close": 60100.0 + i,
+            "volume": 50.0 + i,
+            "taker_buy_ratio": 0.52,
+            "number_of_trades": 1000 + i,
+        })
+
+    candle_data = {
+        "timestamp": t_latest,
+        "open": 60000.0,
+        "high": 60200.0,
+        "low": 59900.0,
+        "close": 60100.0,
+        "volume": 50.0,
+        "taker_buy_ratio": 0.52,
+        "number_of_trades": 1000,
+        "candles": history,
+    }
+
+    monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: candle_data)
+    mock_signals = MagicMock()
+    mock_signals.invoke.return_value = {"volatility_range_pct": 1.1}
+    monkeypatch.setattr(sync, "calculate_technical_signals", mock_signals)
+    mock_ml = MagicMock()
+    mock_ml.invoke.return_value = {
+        "expected_return_pct": 0.35,
+        "predicted_target_price": 60310.35,
+        "confidence": 0.75,
+        "clears_hurdle": True,
+    }
+    monkeypatch.setattr(sync, "get_model_return_forecast", mock_ml)
+    monkeypatch.setattr(
+        sync,
+        "run_trading_graph",
+        lambda **k: {
+            "final_decision": "HOLD",
+            "risk_verdict": "APPROVED",
+            "strategist_action": "HOLD",
+            "strategist_conviction": 5,
+            "kelly_fraction": 0.10,
+            "thesis": "Bootstrap hold",
+        },
+    )
+
+    ok, msg, _ = sync.sync_hourly_quant_cycle(force=False)
+    assert ok is True
+    assert "Recorded tick" in msg
+
+    all_ticks = session.execute(select(MarketTick).order_by(MarketTick.timestamp.asc())).scalars().all()
+    assert len(all_ticks) == 1
+    assert sync._normalize_utc_timestamp(all_ticks[0].timestamp) == t_latest
+    assert all_ticks[0].predicted_price_1h == pytest.approx(60310.35)
+
+
+def test_single_missing_hour_gap_backfills_and_reconciles_prior_prediction(isolated_db, monkeypatch):
+    """
+    Verifies that when a single hourly worker cycle is missed (e.g. t0=10:00 recorded,
+    t1=11:00 missed, worker runs at t2=12:00):
+    1. t1 (11:00 UTC) is backfilled into market_ticks with OHLCV and NULL prediction/feature fields.
+    2. t0 (10:00 UTC) is reconciled against t1's realized close ($60,240.00), NOT t2's ($60,900.00).
+    3. Backfilled tick t1 receives zero Reconciliation rows, zero CouncilAudit rows, and zero PaperPortfolio trades.
+    """
+    import pandas as pd
+    from src.database.models import Reconciliation
+
+    session, _ = isolated_db
+    t0 = datetime(2026, 2, 2, 10, 0, tzinfo=timezone.utc)
+    t1 = datetime(2026, 2, 2, 11, 0, tzinfo=timezone.utc)
+    t2 = datetime(2026, 2, 2, 12, 0, tzinfo=timezone.utc)
+
+    mock_signals = MagicMock()
+    mock_signals.invoke.return_value = {"volatility_range_pct": 1.0}
+    monkeypatch.setattr(sync, "calculate_technical_signals", mock_signals)
+
+    mock_ml = MagicMock()
+    mock_ml.invoke.return_value = {
+        "expected_return_pct": 0.50,
+        "predicted_target_price": 60300.0,
+        "confidence": 0.80,
+        "clears_hurdle": True,
+    }
+    monkeypatch.setattr(sync, "get_model_return_forecast", mock_ml)
+    monkeypatch.setattr(
+        sync,
+        "run_trading_graph",
+        lambda **k: {
+            "final_decision": "BUY",
+            "risk_verdict": "APPROVED",
+            "strategist_action": "BUY",
+            "strategist_conviction": 8,
+            "kelly_fraction": 0.10,
+            "thesis": "Bullish setup",
+        },
+    )
+
+    # 1. Run at t0 (10:00 UTC)
+    c0 = {
+        "timestamp": t0,
+        "open": 59900.0,
+        "high": 60100.0,
+        "low": 59800.0,
+        "close": 60000.0,
+        "volume": 80.0,
+        "candles": [
+            {"timestamp": pd.Timestamp(t0), "open": 59900.0, "high": 60100.0, "low": 59800.0, "close": 60000.0, "volume": 80.0}
+        ],
+    }
+    monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: c0)
+    ok0, _, _ = sync.sync_hourly_quant_cycle(force=False)
+    assert ok0 is True
+
+    # 2. Worker misses t1 (11:00 UTC) and runs at t2 (12:00 UTC)
+    mock_ml.invoke.return_value = {
+        "expected_return_pct": 0.40,
+        "predicted_target_price": 61143.60,
+        "confidence": 0.78,
+        "clears_hurdle": True,
+    }
+    c2 = {
+        "timestamp": t2,
+        "open": 60240.0,
+        "high": 61000.0,
+        "low": 60200.0,
+        "close": 60900.0,
+        "volume": 110.0,
+        "candles": [
+            {"timestamp": pd.Timestamp(t0), "open": 59900.0, "high": 60100.0, "low": 59800.0, "close": 60000.0, "volume": 80.0},
+            {"timestamp": pd.Timestamp(t1), "open": 60000.0, "high": 60350.0, "low": 59950.0, "close": 60240.0, "volume": 95.0},
+            {"timestamp": pd.Timestamp(t2), "open": 60240.0, "high": 61000.0, "low": 60200.0, "close": 60900.0, "volume": 110.0},
+        ],
+    }
+    monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: c2)
+    ok2, _, _ = sync.sync_hourly_quant_cycle(force=False)
+    assert ok2 is True
+
+    session.expire_all()
+    ticks = session.execute(select(MarketTick).order_by(MarketTick.timestamp.asc())).scalars().all()
+    assert len(ticks) == 3
+
+    tick_t0, tick_t1, tick_t2 = ticks[0], ticks[1], ticks[2]
+    assert sync._normalize_utc_timestamp(tick_t0.timestamp) == t0
+    assert sync._normalize_utc_timestamp(tick_t1.timestamp) == t1
+    assert sync._normalize_utc_timestamp(tick_t2.timestamp) == t2
+
+    # Backfilled tick t1 has exact OHLCV and NULL forecast/feature fields
+    assert tick_t1.open == 60000.0
+    assert tick_t1.high == 60350.0
+    assert tick_t1.low == 59950.0
+    assert tick_t1.close == 60240.0
+    assert tick_t1.volume == 95.0
+    assert tick_t1.market_regime is None
+    assert tick_t1.predicted_return_1h is None
+    assert tick_t1.predicted_price_1h is None
+    assert tick_t1.model_confidence is None
+    assert tick_t1.features is None
+
+    # t0 is reconciled strictly against backfilled t1 ($60,240.00), NOT t2 ($60,900.00)
+    recs = session.execute(select(Reconciliation)).scalars().all()
+    assert len(recs) == 1
+    assert recs[0].tick_id == tick_t0.id
+    assert recs[0].actual_price_at_t_plus_1 == pytest.approx(60240.0)
+    assert recs[0].direction_correct is True
+
+    # Zero CouncilAudit or PaperPortfolio records for backfilled tick_t1
+    audits = session.execute(select(CouncilAudit).order_by(CouncilAudit.id.asc())).scalars().all()
+    assert [a.tick_id for a in audits] == [tick_t0.id, tick_t2.id]
+
+    orders = session.execute(select(PaperPortfolio).where(PaperPortfolio.tick_id.isnot(None))).scalars().all()
+    assert [o.tick_id for o in orders] == [tick_t0.id, tick_t2.id]
+
+
+def test_multi_hour_outage_backfills_chronologically_and_reconciles_without_retrospective_trades(isolated_db, monkeypatch):
+    """
+    Verifies a multi-hour outage (t0=10:00 recorded, t1=11:00, t2=12:00, t3=13:00 missed,
+    worker runs at t4=14:00):
+    1. t1, t2, t3 are inserted in ascending chronological order even if candle['candles'] is unsorted.
+    2. t0's prediction and VETOED CouncilAudit are reconciled against t1 ($59,400.00 -> SAVED_CAPITAL).
+    3. Backfilled ticks t1, t2, t3 never generate Reconciliation, CouncilAudit, or PaperPortfolio records.
+    """
+    import pandas as pd
+    from src.database.models import Reconciliation
+
+    session, _ = isolated_db
+    t0 = datetime(2026, 2, 3, 10, 0, tzinfo=timezone.utc)
+    t1 = t0 + timedelta(hours=1)
+    t2 = t0 + timedelta(hours=2)
+    t3 = t0 + timedelta(hours=3)
+    t4 = t0 + timedelta(hours=4)
+
+    # Seed t0 with a bullish prediction and a VETOED BUY CouncilAudit
+    tick0 = MarketTick(
+        timestamp=t0,
+        open=59900.0,
+        high=60100.0,
+        low=59800.0,
+        close=60000.0,
+        volume=100.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
+        market_regime="HIGH_VOL_CHOP",
+        predicted_return_1h=1.0,
+        predicted_price_1h=60600.0,
+        model_confidence=0.65,
+        features={"volatility_range_pct": 4.2},
+    )
+    session.add(tick0)
+    session.flush()
+
+    audit0 = CouncilAudit(
+        timestamp=t0,
+        tick_id=tick0.id,
+        deliberation_latency_ms=12.0,
+        strategist_action="BUY",
+        strategist_conviction=6,
+        risk_verdict="VETOED",
+        veto_reasons=["High volatility chop"],
+        kelly_fraction=0.0,
+        final_decision="HOLD",
+        execution_notes="Vetoed entry",
+    )
+    session.add(audit0)
+    session.commit()
+    tick0_id = tick0.id
+
+    # Run quant cycle at t4 with intentionally shuffled history order [t3, t1, t4, t0, t2]
+    c4 = {
+        "timestamp": t4,
+        "open": 59700.0,
+        "high": 60200.0,
+        "low": 59600.0,
+        "close": 60100.0,
+        "volume": 90.0,
+        "candles": [
+            {"timestamp": pd.Timestamp(t3), "open": 59500.0, "high": 59800.0, "low": 59400.0, "close": 59700.0, "volume": 85.0},
+            {"timestamp": pd.Timestamp(t1), "open": 60000.0, "high": 60050.0, "low": 59300.0, "close": 59400.0, "volume": 120.0},
+            {"timestamp": pd.Timestamp(t4), "open": 59700.0, "high": 60200.0, "low": 59600.0, "close": 60100.0, "volume": 90.0},
+            {"timestamp": pd.Timestamp(t0), "open": 59900.0, "high": 60100.0, "low": 59800.0, "close": 60000.0, "volume": 100.0},
+            {"timestamp": pd.Timestamp(t2), "open": 59400.0, "high": 59600.0, "low": 59350.0, "close": 59500.0, "volume": 80.0},
+        ],
+    }
+    monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: c4)
+    mock_signals = MagicMock()
+    mock_signals.invoke.return_value = {"volatility_range_pct": 1.2}
+    monkeypatch.setattr(sync, "calculate_technical_signals", mock_signals)
+    mock_ml = MagicMock()
+    mock_ml.invoke.return_value = {
+        "expected_return_pct": 0.25,
+        "predicted_target_price": 60250.25,
+        "confidence": 0.70,
+        "clears_hurdle": True,
+    }
+    monkeypatch.setattr(sync, "get_model_return_forecast", mock_ml)
+    monkeypatch.setattr(
+        sync,
+        "run_trading_graph",
+        lambda **k: {
+            "final_decision": "HOLD",
+            "risk_verdict": "APPROVED",
+            "strategist_action": "HOLD",
+            "strategist_conviction": 5,
+            "kelly_fraction": 0.10,
+            "thesis": "Post-outage stabilization",
+        },
+    )
+
+    ok4, _, _ = sync.sync_hourly_quant_cycle(force=False)
+    assert ok4 is True
+
+    session.expire_all()
+    ticks = session.execute(select(MarketTick).order_by(MarketTick.id.asc())).scalars().all()
+    assert len(ticks) == 5
+    assert [sync._normalize_utc_timestamp(t.timestamp) for t in ticks] == [t0, t1, t2, t3, t4]
+
+    for bf_tick in ticks[1:4]:
+        assert bf_tick.predicted_price_1h is None
+        assert bf_tick.predicted_return_1h is None
+        assert bf_tick.model_confidence is None
+        assert bf_tick.market_regime is None
+        assert bf_tick.features is None
+
+    # t0 reconciled against t1 ($59,400.00 -> -1.0% drop), attributing VETO as SAVED_CAPITAL
+    recs = session.execute(select(Reconciliation)).scalars().all()
+    assert len(recs) == 1
+    assert recs[0].tick_id == tick0_id
+    assert recs[0].actual_price_at_t_plus_1 == pytest.approx(59400.0)
+    assert recs[0].actual_return_pct == pytest.approx(-1.0)
+
+    updated_audit0 = session.execute(select(CouncilAudit).where(CouncilAudit.tick_id == tick0_id)).scalar_one()
+    assert updated_audit0.veto_attribution == "SAVED_CAPITAL"
+
+
+def test_non_contiguous_intermediate_gaps_healed_and_reconciled(isolated_db, monkeypatch):
+    """
+    Verifies that when market_ticks has non-contiguous gaps within the fetched window
+    (e.g. t0=10:00 and t2=12:00 exist with predictions, while t1=11:00 and t3=13:00 are missing),
+    running at t4=14:00 backfills BOTH t1 and t3 without duplicating t0 or t2, and reconciles
+    both t0 (against t1) and t2 (against t3).
+    """
+    import pandas as pd
+    from src.database.models import Reconciliation
+
+    session, _ = isolated_db
+    t0 = datetime(2026, 2, 4, 10, 0, tzinfo=timezone.utc)
+    t1 = t0 + timedelta(hours=1)
+    t2 = t0 + timedelta(hours=2)
+    t3 = t0 + timedelta(hours=3)
+    t4 = t0 + timedelta(hours=4)
+
+    tick0 = MarketTick(
+        timestamp=t0,
+        open=60000.0,
+        high=60100.0,
+        low=59900.0,
+        close=60000.0,
+        volume=50.0,
+        predicted_return_1h=0.50,
+        predicted_price_1h=60300.0,
+    )
+    tick2 = MarketTick(
+        timestamp=t2,
+        open=60500.0,
+        high=60600.0,
+        low=60400.0,
+        close=60500.0,
+        volume=60.0,
+        predicted_return_1h=0.50,
+        predicted_price_1h=60802.5,
+    )
+    session.add_all([tick0, tick2])
+    session.commit()
+    id0, id2 = tick0.id, tick2.id
+
+    c4 = {
+        "timestamp": t4,
+        "open": 61000.0,
+        "high": 61200.0,
+        "low": 60900.0,
+        "close": 61100.0,
+        "volume": 75.0,
+        "candles": [
+            {"timestamp": pd.Timestamp(t0), "open": 60000.0, "high": 60100.0, "low": 59900.0, "close": 60000.0, "volume": 50.0},
+            {"timestamp": pd.Timestamp(t1), "open": 60000.0, "high": 60350.0, "low": 59950.0, "close": 60300.0, "volume": 55.0},
+            {"timestamp": pd.Timestamp(t2), "open": 60500.0, "high": 60600.0, "low": 60400.0, "close": 60500.0, "volume": 60.0},
+            {"timestamp": pd.Timestamp(t3), "open": 60500.0, "high": 60950.0, "low": 60450.0, "close": 60900.0, "volume": 65.0},
+            {"timestamp": pd.Timestamp(t4), "open": 61000.0, "high": 61200.0, "low": 60900.0, "close": 61100.0, "volume": 75.0},
+        ],
+    }
+    monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: c4)
+    mock_signals = MagicMock()
+    mock_signals.invoke.return_value = {"volatility_range_pct": 1.0}
+    monkeypatch.setattr(sync, "calculate_technical_signals", mock_signals)
+    mock_ml = MagicMock()
+    mock_ml.invoke.return_value = {
+        "expected_return_pct": 0.20,
+        "predicted_target_price": 61222.2,
+        "confidence": 0.68,
+        "clears_hurdle": True,
+    }
+    monkeypatch.setattr(sync, "get_model_return_forecast", mock_ml)
+    monkeypatch.setattr(
+        sync,
+        "run_trading_graph",
+        lambda **k: {
+            "final_decision": "HOLD",
+            "risk_verdict": "APPROVED",
+            "strategist_action": "HOLD",
+            "strategist_conviction": 5,
+            "kelly_fraction": 0.10,
+        },
+    )
+
+    ok4, _, _ = sync.sync_hourly_quant_cycle(force=False)
+    assert ok4 is True
+
+    session.expire_all()
+    all_ticks = session.execute(select(MarketTick).order_by(MarketTick.timestamp.asc())).scalars().all()
+    assert len(all_ticks) == 5
+    assert [sync._normalize_utc_timestamp(t.timestamp) for t in all_ticks] == [t0, t1, t2, t3, t4]
+
+    recs = session.execute(select(Reconciliation).order_by(Reconciliation.tick_id.asc())).scalars().all()
+    assert len(recs) == 2
+    assert recs[0].tick_id == id0
+    assert recs[0].actual_price_at_t_plus_1 == pytest.approx(60300.0)
+    assert recs[1].tick_id == id2
+    assert recs[1].actual_price_at_t_plus_1 == pytest.approx(60900.0)
+
+
+def test_existing_candle_with_force_false_heals_prior_gap_and_reconciles_idempotently(isolated_db, monkeypatch):
+    """
+    Verifies that when the latest candle t2 is ALREADY recorded in market_ticks and force=False,
+    sync_hourly_quant_cycle still backfills any missing prior candle t1 and reconciles t0
+    before returning the idempotent (False, 'Candle ... already recorded in Neon.', {'tick_id': ...}) result.
+    """
+    import pandas as pd
+    from src.database.models import Reconciliation
+
+    session, _ = isolated_db
+    t0 = datetime(2026, 2, 5, 10, 0, tzinfo=timezone.utc)
+    t1 = t0 + timedelta(hours=1)
+    t2 = t0 + timedelta(hours=2)
+
+    tick0 = MarketTick(
+        timestamp=t0,
+        open=60000.0,
+        high=60100.0,
+        low=59900.0,
+        close=60000.0,
+        volume=50.0,
+        predicted_return_1h=0.50,
+        predicted_price_1h=60300.0,
+    )
+    tick2 = MarketTick(
+        timestamp=t2,
+        open=60400.0,
+        high=60600.0,
+        low=60300.0,
+        close=60500.0,
+        volume=60.0,
+        predicted_return_1h=0.25,
+        predicted_price_1h=60651.25,
+    )
+    session.add_all([tick0, tick2])
+    session.commit()
+    id0, id2 = tick0.id, tick2.id
+
+    c2 = {
+        "timestamp": t2,
+        "open": 60400.0,
+        "high": 60600.0,
+        "low": 60300.0,
+        "close": 60500.0,
+        "volume": 60.0,
+        "candles": [
+            {"timestamp": pd.Timestamp(t0), "open": 60000.0, "high": 60100.0, "low": 59900.0, "close": 60000.0, "volume": 50.0},
+            {"timestamp": pd.Timestamp(t1), "open": 60000.0, "high": 60450.0, "low": 59950.0, "close": 60400.0, "volume": 55.0},
+            {"timestamp": pd.Timestamp(t2), "open": 60400.0, "high": 60600.0, "low": 60300.0, "close": 60500.0, "volume": 60.0},
+        ],
+    }
+    monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: c2)
+
+    ok, msg, summ = sync.sync_hourly_quant_cycle(force=False)
+    assert ok is False
+    assert "already recorded in Neon" in msg
+    assert summ == {"tick_id": id2}
+
+    session.expire_all()
+    all_ticks = session.execute(select(MarketTick).order_by(MarketTick.timestamp.asc())).scalars().all()
+    assert len(all_ticks) == 3
+    assert sync._normalize_utc_timestamp(all_ticks[1].timestamp) == t1
+    assert all_ticks[1].close == pytest.approx(60400.0)
+
+    recs = session.execute(select(Reconciliation)).scalars().all()
+    assert len(recs) == 1
+    assert recs[0].tick_id == id0
+    assert recs[0].actual_price_at_t_plus_1 == pytest.approx(60400.0)
+
+
+def test_large_gap_over_24h_and_window_overflow_logs_warning_and_backfills_available(isolated_db, caplog):
+    """
+    Verifies gap warning thresholds and window boundaries:
+    1. A 30-hour gap (> 24h threshold, within 100-candle window) logs a large-gap warning
+       and backfills all 29 missing hourly candles.
+    2. An outage exceeding the exchange window (e.g. prior tick 120 hours before latest_ts,
+       while exchange window only covers the most recent 10 hours) logs a window-exceeded
+       warning and backfills all available historical candles in the window.
+    """
+    import logging
+    import pandas as pd
+
+    session, _ = isolated_db
+    t0 = datetime(2026, 2, 1, 0, 0, tzinfo=timezone.utc)
+    session.add(
+        MarketTick(
+            timestamp=t0,
+            open=60000.0,
+            high=60100.0,
+            low=59900.0,
+            close=60000.0,
+            volume=50.0,
+        )
+    )
+    session.commit()
+
+    # Case 1: 30-hour gap (t0 to t0 + 30h)
+    t_30 = t0 + timedelta(hours=30)
+    candles_30 = [
+        {
+            "timestamp": pd.Timestamp(t0 + timedelta(hours=h)),
+            "open": 60000.0 + h,
+            "high": 60100.0 + h,
+            "low": 59900.0 + h,
+            "close": 60050.0 + h,
+            "volume": 40.0 + h,
+        }
+        for h in range(0, 31)
+    ]
+    with caplog.at_level(logging.WARNING, logger="mudra.sync"):
+        inserted_30 = sync.backfill_missing_candles(session, {"timestamp": t_30, "candles": candles_30})
+        session.commit()
+
+    assert inserted_30 == 29
+    assert "Detected large candle gap of 30.0 hours" in caplog.text
+
+    # Case 2: Outage exceeding available exchange window (last tick is t0+29h, latest is t0+150h, window starts at t0+145h)
+    caplog.clear()
+    t_150 = t0 + timedelta(hours=150)
+    candles_150 = [
+        {
+            "timestamp": pd.Timestamp(t0 + timedelta(hours=h)),
+            "open": 61000.0 + h,
+            "high": 61100.0 + h,
+            "low": 60900.0 + h,
+            "close": 61050.0 + h,
+            "volume": 50.0,
+        }
+        for h in range(145, 151)
+    ]
+    with caplog.at_level(logging.WARNING, logger="mudra.sync"):
+        inserted_150 = sync.backfill_missing_candles(session, {"timestamp": t_150, "candles": candles_150})
+        session.commit()
+
+    assert inserted_150 == 5  # hours 145, 146, 147, 148, 149
+    assert "exceeds exchange history window" in caplog.text
+
+
+def test_backfill_skips_malformed_historical_candles_and_handles_savepoint_integrity_error(isolated_db, monkeypatch, caplog):
+    """
+    Verifies that:
+    1. Malformed historical candle entries (missing keys, NaN/inf, negative price, high < low,
+       boolean values, invalid timestamp) are logged and skipped without aborting valid backfills.
+    2. A concurrent duplicate insert triggering IntegrityError inside begin_nested() is caught
+       and rolled back via savepoint without aborting the outer session transaction.
+    """
+    import logging
+    import pandas as pd
+
+    session, _ = isolated_db
+    t0 = datetime(2026, 2, 6, 10, 0, tzinfo=timezone.utc)
+    t1 = t0 + timedelta(hours=1)
+    t2 = t0 + timedelta(hours=2)
+    t3 = t0 + timedelta(hours=3)
+    t4 = t0 + timedelta(hours=4)
+
+    session.add(
+        MarketTick(
+            timestamp=t0,
+            open=60000.0,
+            high=60100.0,
+            low=59900.0,
+            close=60000.0,
+            volume=50.0,
+        )
+    )
+    session.commit()
+
+    mixed_candles = [
+        "not-a-dict",
+        {"timestamp": pd.Timestamp(t1), "open": 60000.0},  # missing high/low/close/volume
+        {"timestamp": "bad-ts", "open": 60000.0, "high": 60100.0, "low": 59900.0, "close": 60050.0, "volume": 10.0},
+        {"timestamp": pd.Timestamp(t1), "open": float("nan"), "high": 60100.0, "low": 59900.0, "close": 60050.0, "volume": 10.0},
+        {"timestamp": pd.Timestamp(t1), "open": True, "high": 60100.0, "low": 59900.0, "close": 60050.0, "volume": 10.0},
+        {"timestamp": pd.Timestamp(t1), "open": -100.0, "high": 60100.0, "low": 59900.0, "close": 60050.0, "volume": 10.0},
+        {"timestamp": pd.Timestamp(t1), "open": 60000.0, "high": 59000.0, "low": 59900.0, "close": 60050.0, "volume": 10.0},  # high < low
+        # Valid candle at t2:
+        {"timestamp": pd.Timestamp(t2), "open": 60100.0, "high": 60300.0, "low": 60000.0, "close": 60200.0, "volume": 55.0},
+        # Valid candle at t3:
+        {"timestamp": pd.Timestamp(t3), "open": 60200.0, "high": 60400.0, "low": 60100.0, "close": 60300.0, "volume": 65.0},
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="mudra.sync"):
+        inserted = sync.backfill_missing_candles(session, {"timestamp": t4, "candles": mixed_candles})
+        session.commit()
+
+    assert inserted == 2
+    assert "Skipping malformed historical candle entry" in caplog.text
+
+    # Simulate a concurrent worker committing t1 right before our savepoint flush:
+    # 1. Commit t1 into market_ticks so uq_market_ticks_timestamp holds t1.
+    session.add(
+        MarketTick(
+            timestamp=t1,
+            open=60000.0,
+            high=60200.0,
+            low=59900.0,
+            close=60100.0,
+            volume=50.0,
+        )
+    )
+    session.commit()
+
+    # 2. Monkeypatch the existing_rows SELECT inside backfill_missing_candles so it returns
+    #    only [t0, t2, t3] (simulating t1 committed concurrently after the SELECT).
+    t5 = t0 + timedelta(hours=5)
+    real_execute = session.execute
+    exec_count = [0]
+
+    def _simulated_race_execute(stmt, *args, **kwargs):
+        exec_count[0] += 1
+        if exec_count[0] == 2:
+            # Second execute in backfill_missing_candles is existing_rows query: omit t1
+            mock_res = MagicMock()
+            mock_res.scalars.return_value.all.return_value = [t0, t2, t3]
+            return mock_res
+        return real_execute(stmt, *args, **kwargs)
+
+    monkeypatch.setattr(session, "execute", _simulated_race_execute)
+
+    conflict_candles = [
+        {"timestamp": pd.Timestamp(t0), "open": 60000.0, "high": 60100.0, "low": 59900.0, "close": 60000.0, "volume": 50.0},
+        {"timestamp": pd.Timestamp(t1), "open": 60000.0, "high": 60200.0, "low": 59900.0, "close": 60100.0, "volume": 50.0},
+        {"timestamp": pd.Timestamp(t4), "open": 60300.0, "high": 60500.0, "low": 60200.0, "close": 60400.0, "volume": 70.0},
+    ]
+    inserted_after_conflict = sync.backfill_missing_candles(session, {"timestamp": t5, "candles": conflict_candles})
+    monkeypatch.setattr(session, "execute", real_execute)
+    session.commit()
+
+    # t1 hit IntegrityError on uq_market_ticks_timestamp and rolled back its savepoint cleanly;
+    # t4 succeeded in the same outer transaction!
+    assert inserted_after_conflict == 1
+    persisted_ts = [
+        sync._normalize_utc_timestamp(t.timestamp)
+        for t in session.execute(select(MarketTick).order_by(MarketTick.timestamp.asc())).scalars().all()
+    ]
+    assert persisted_ts == [t0, t1, t2, t3, t4]
+
+
+def test_normalize_utc_timestamp_handles_pandas_naive_and_aware_timestamps():
+    """
+    Verifies that _normalize_utc_timestamp normalizes pandas Timestamps, naive datetimes,
+    non-UTC timezone-aware datetimes, and ISO-8601 strings to exact Python UTC datetimes,
+    and rejects invalid inputs.
+    """
+    import pandas as pd
+
+    expected = datetime(2026, 2, 7, 12, 0, tzinfo=timezone.utc)
+
+    # 1. pandas Timestamp (UTC and naive)
+    res_pd_utc = sync._normalize_utc_timestamp(pd.Timestamp("2026-02-07 12:00:00+00:00"))
+    assert res_pd_utc == expected
+    assert type(res_pd_utc) is datetime
+
+    res_pd_naive = sync._normalize_utc_timestamp(pd.Timestamp("2026-02-07 12:00:00"))
+    assert res_pd_naive == expected
+    assert type(res_pd_naive) is datetime
+
+    # 2. Naive Python datetime and +05:30 offset aware datetime
+    res_naive = sync._normalize_utc_timestamp(datetime(2026, 2, 7, 12, 0))
+    assert res_naive == expected
+    assert res_naive.tzinfo == timezone.utc
+
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
+    res_ist = sync._normalize_utc_timestamp(datetime(2026, 2, 7, 17, 30, tzinfo=ist_tz))
+    assert res_ist == expected
+
+    # 3. ISO-8601 strings
+    assert sync._normalize_utc_timestamp("2026-02-07T12:00:00Z") == expected
+    assert sync._normalize_utc_timestamp("2026-02-07T17:30:00+05:30") == expected
+
+    # 4. Invalid inputs raise ValueError or TypeError
+    for bad_val in (None, True, False, float("nan"), pd.NaT, "", "   ", 12345):
+        with pytest.raises((ValueError, TypeError)):
+            sync._normalize_utc_timestamp(bad_val)
+
+
+def test_existing_candle_with_force_false_reconciles_when_outcome_candle_already_exists(isolated_db, monkeypatch):
+    """
+    Verifies that when the latest candle (t2) AND the relevant outcome candle (t1) ALREADY
+    exist in market_ticks (so backfilled_count == 0), while an earlier prediction (t0)
+    remains unresolved, running sync_hourly_quant_cycle(force=False):
+    1. Reconciles t0 against t1's realized close ($60,420.00) even though backfilled_count == 0.
+    2. Does not rerun the trading graph, create CouncilAudit rows, or execute new paper trades.
+    3. Preserves strict idempotency on repeated force=False runs (reconciled exactly once).
+    """
+    import pandas as pd
+    from src.database.models import Reconciliation
+
+    session, _ = isolated_db
+    t0 = datetime(2026, 2, 8, 10, 0, tzinfo=timezone.utc)
+    t1 = t0 + timedelta(hours=1)
+    t2 = t0 + timedelta(hours=2)
+
+    tick0 = MarketTick(
+        timestamp=t0,
+        open=59900.0,
+        high=60100.0,
+        low=59800.0,
+        close=60000.0,
+        volume=50.0,
+        predicted_return_1h=0.50,
+        predicted_price_1h=60300.0,
+    )
+    tick1 = MarketTick(
+        timestamp=t1,
+        open=60000.0,
+        high=60500.0,
+        low=59950.0,
+        close=60420.0,
+        volume=55.0,
+    )
+    tick2 = MarketTick(
+        timestamp=t2,
+        open=60420.0,
+        high=60600.0,
+        low=60350.0,
+        close=60500.0,
+        volume=60.0,
+        predicted_return_1h=0.25,
+        predicted_price_1h=60651.25,
+    )
+    session.add_all([tick0, tick1, tick2])
+    session.commit()
+    id0, id1, id2 = tick0.id, tick1.id, tick2.id
+
+    # Seed one existing paper order for tick0 to verify no additional paper trades are created
+    execute_paper_order(session, "BUY", 60000.0, kelly_fraction=0.10, tick_id=id0)
+    session.commit()
+    initial_portfolio_count = len(session.execute(select(PaperPortfolio)).scalars().all())
+    initial_audit_count = len(session.execute(select(CouncilAudit)).scalars().all())
+
+    # Confirm t0 is initially unresolved and all 3 candles already exist in market_ticks
+    assert len(session.execute(select(Reconciliation)).scalars().all()) == 0
+    assert len(session.execute(select(MarketTick)).scalars().all()) == 3
+
+    c2 = {
+        "timestamp": t2,
+        "open": 60420.0,
+        "high": 60600.0,
+        "low": 60350.0,
+        "close": 60500.0,
+        "volume": 60.0,
+        "candles": [
+            {"timestamp": pd.Timestamp(t0), "open": 59900.0, "high": 60100.0, "low": 59800.0, "close": 60000.0, "volume": 50.0},
+            {"timestamp": pd.Timestamp(t1), "open": 60000.0, "high": 60500.0, "low": 59950.0, "close": 60420.0, "volume": 55.0},
+            {"timestamp": pd.Timestamp(t2), "open": 60420.0, "high": 60600.0, "low": 60350.0, "close": 60500.0, "volume": 60.0},
+        ],
+    }
+    monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: c2)
+
+    graph_calls = [0]
+    def _forbidden_graph(**kwargs):
+        graph_calls[0] += 1
+        raise AssertionError("run_trading_graph must not be called when existing and not force")
+
+    order_calls = [0]
+    def _forbidden_order(*args, **kwargs):
+        order_calls[0] += 1
+        raise AssertionError("execute_paper_order must not be called when existing and not force")
+
+    monkeypatch.setattr(sync, "run_trading_graph", _forbidden_graph)
+    monkeypatch.setattr(sync, "execute_paper_order", _forbidden_order)
+
+    # 1. First idempotent run (force=False): backfilled_count is 0, but t0 must be reconciled against t1
+    ok1, msg1, summ1 = sync.sync_hourly_quant_cycle(force=False)
+    assert ok1 is False
+    assert "already recorded in Neon" in msg1
+    assert summ1 == {"tick_id": id2}
+    assert graph_calls[0] == 0
+    assert order_calls[0] == 0
+
+    session.expire_all()
+    assert len(session.execute(select(MarketTick)).scalars().all()) == 3
+    recs_1 = session.execute(select(Reconciliation)).scalars().all()
+    assert len(recs_1) == 1
+    assert recs_1[0].tick_id == id0
+    assert recs_1[0].actual_price_at_t_plus_1 == pytest.approx(60420.0)
+    assert len(session.execute(select(PaperPortfolio)).scalars().all()) == initial_portfolio_count
+    assert len(session.execute(select(CouncilAudit)).scalars().all()) == initial_audit_count
+
+    # 2. Second idempotent run (force=False): reconciliation must NOT duplicate
+    ok2, msg2, summ2 = sync.sync_hourly_quant_cycle(force=False)
+    assert ok2 is False
+    assert "already recorded in Neon" in msg2
+    assert summ2 == {"tick_id": id2}
+
+    session.expire_all()
+    recs_2 = session.execute(select(Reconciliation)).scalars().all()
+    assert len(recs_2) == 1
+    assert recs_2[0].id == recs_1[0].id
+    assert len(session.execute(select(PaperPortfolio)).scalars().all()) == initial_portfolio_count
+    assert len(session.execute(select(CouncilAudit)).scalars().all()) == initial_audit_count
+
+
+def test_backfill_inserts_window_start_when_prior_tick_predates_window_and_later_tick_exists(isolated_db, monkeypatch):
+    """
+    Verifies that when:
+    - The database has a prior tick earlier than the fetched history window (e.g. 09:00 UTC),
+    - The fetched window starts at 10:00 UTC,
+    - 10:00 UTC is missing from market_ticks,
+    - 11:00 UTC already exists in market_ticks,
+    - 12:00 UTC is missing from market_ticks, and
+    - The current sync cycle runs for latest candle 13:00 UTC:
+    1. 10:00 UTC is backfilled into market_ticks (not skipped due to 11:00 UTC existing).
+    2. 11:00 UTC is not duplicated.
+    3. Later eligible missing candle 12:00 UTC is also backfilled.
+    4. Delayed reconciliation settles both 09:00 UTC (against 10:00 UTC) and 11:00 UTC (against 12:00 UTC).
+    5. No retrospective predictions, CouncilAudit rows, or PaperPortfolio trades are created for backfilled ticks (10:00 and 12:00).
+    """
+    import pandas as pd
+    from src.database.models import Reconciliation
+
+    session, _ = isolated_db
+    t_pre = datetime(2026, 2, 9, 9, 0, tzinfo=timezone.utc)   # Earlier than fetched window
+    t_10 = datetime(2026, 2, 9, 10, 0, tzinfo=timezone.utc)   # Fetched window start (missing)
+    t_11 = datetime(2026, 2, 9, 11, 0, tzinfo=timezone.utc)   # Already exists in DB
+    t_12 = datetime(2026, 2, 9, 12, 0, tzinfo=timezone.utc)   # Later eligible missing candle
+    t_13 = datetime(2026, 2, 9, 13, 0, tzinfo=timezone.utc)   # Latest confirmed candle
+
+    tick_pre = MarketTick(
+        timestamp=t_pre,
+        open=59800.0,
+        high=60050.0,
+        low=59750.0,
+        close=60000.0,
+        volume=45.0,
+        predicted_return_1h=0.50,
+        predicted_price_1h=60300.0,
+    )
+    tick_11 = MarketTick(
+        timestamp=t_11,
+        open=60250.0,
+        high=60500.0,
+        low=60200.0,
+        close=60400.0,
+        volume=55.0,
+        predicted_return_1h=0.50,
+        predicted_price_1h=60702.0,
+    )
+    session.add_all([tick_pre, tick_11])
+    session.commit()
+    id_pre, id_11 = tick_pre.id, tick_11.id
+
+    # Fetched window starts at 10:00 UTC (t_pre at 09:00 UTC is outside/earlier than the fetched window)
+    c13 = {
+        "timestamp": t_13,
+        "open": 60800.0,
+        "high": 61000.0,
+        "low": 60750.0,
+        "close": 60900.0,
+        "volume": 70.0,
+        "candles": [
+            {"timestamp": pd.Timestamp(t_10), "open": 60000.0, "high": 60300.0, "low": 59950.0, "close": 60250.0, "volume": 50.0},
+            {"timestamp": pd.Timestamp(t_11), "open": 60250.0, "high": 60500.0, "low": 60200.0, "close": 60400.0, "volume": 55.0},
+            {"timestamp": pd.Timestamp(t_12), "open": 60400.0, "high": 60850.0, "low": 60350.0, "close": 60800.0, "volume": 60.0},
+            {"timestamp": pd.Timestamp(t_13), "open": 60800.0, "high": 61000.0, "low": 60750.0, "close": 60900.0, "volume": 70.0},
+        ],
+    }
+    monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: c13)
+
+    mock_signals = MagicMock()
+    mock_signals.invoke.return_value = {"volatility_range_pct": 1.1}
+    monkeypatch.setattr(sync, "calculate_technical_signals", mock_signals)
+
+    mock_ml = MagicMock()
+    mock_ml.invoke.return_value = {
+        "expected_return_pct": 0.30,
+        "predicted_target_price": 61082.70,
+        "confidence": 0.76,
+        "clears_hurdle": True,
+    }
+    monkeypatch.setattr(sync, "get_model_return_forecast", mock_ml)
+    monkeypatch.setattr(
+        sync,
+        "run_trading_graph",
+        lambda **k: {
+            "final_decision": "BUY",
+            "risk_verdict": "APPROVED",
+            "strategist_action": "BUY",
+            "strategist_conviction": 7,
+            "kelly_fraction": 0.10,
+            "thesis": "Window-start gap recovery test",
+        },
+    )
+
+    ok, msg, _ = sync.sync_hourly_quant_cycle(force=False)
+    assert ok is True
+    assert "Recorded tick" in msg
+
+    session.expire_all()
+    all_ticks = session.execute(select(MarketTick).order_by(MarketTick.timestamp.asc())).scalars().all()
+    assert len(all_ticks) == 5
+    assert [sync._normalize_utc_timestamp(t.timestamp) for t in all_ticks] == [t_pre, t_10, t_11, t_12, t_13]
+
+    tick_10_db = all_ticks[1]
+    tick_11_db = all_ticks[2]
+    tick_12_db = all_ticks[3]
+    tick_13_db = all_ticks[4]
+
+    # 1. 10:00 and 12:00 are backfilled with OHLCV and NULL prediction/feature fields
+    assert tick_10_db.close == pytest.approx(60250.0)
+    assert tick_10_db.predicted_price_1h is None
+    assert tick_10_db.predicted_return_1h is None
+    assert tick_10_db.model_confidence is None
+    assert tick_10_db.market_regime is None
+    assert tick_10_db.features is None
+
+    assert tick_12_db.close == pytest.approx(60800.0)
+    assert tick_12_db.predicted_price_1h is None
+    assert tick_12_db.predicted_return_1h is None
+    assert tick_12_db.model_confidence is None
+    assert tick_12_db.market_regime is None
+    assert tick_12_db.features is None
+
+    # 2. 11:00 is not duplicated and retains its original record & prediction
+    assert tick_11_db.id == id_11
+    assert tick_11_db.predicted_price_1h == pytest.approx(60702.0)
+
+    # 3. Both 09:00 (against backfilled 10:00) and 11:00 (against backfilled 12:00) are reconciled
+    recs = session.execute(select(Reconciliation).order_by(Reconciliation.tick_id.asc())).scalars().all()
+    assert len(recs) == 2
+    assert recs[0].tick_id == id_pre
+    assert recs[0].actual_price_at_t_plus_1 == pytest.approx(60250.0)
+    assert recs[1].tick_id == id_11
+    assert recs[1].actual_price_at_t_plus_1 == pytest.approx(60800.0)
+
+    # 4. Zero CouncilAudit rows and zero PaperPortfolio trades for backfilled ticks (10:00 and 12:00)
+    audits = session.execute(select(CouncilAudit)).scalars().all()
+    assert [a.tick_id for a in audits] == [tick_13_db.id]
+
+    orders = session.execute(select(PaperPortfolio).where(PaperPortfolio.tick_id.isnot(None))).scalars().all()
+    assert [o.tick_id for o in orders] == [tick_13_db.id]
 
