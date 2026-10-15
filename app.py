@@ -11,6 +11,7 @@ except ImportError:
     pass
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -42,6 +43,7 @@ from config import (
     TAKER_FEE_PCT,
     SLIPPAGE_PCT,
     TOTAL_FRICTION_PER_SIDE_PCT,
+    ROUND_TRIP_FRICTION_PCT,
     MIN_HURDLE_PCT,
 )
 from src.explainability import get_tree_explainer, explain_single_prediction
@@ -228,6 +230,184 @@ def generate_live_shap_attribution(
         return explain_single_prediction(explainer_clf, clf_input_df, top_n=top_n)
     except Exception:
         return None
+
+
+def build_council_scenario_payload(scenario_selected: str, current_price: float):
+    """
+    Constructs market_data, engineered_features, and ml_forecast dictionaries for Tab 2
+    Multi-Agent Council stress/simulation scenarios.
+    Enforces strict internal mathematical consistency across all generated fields:
+      - high = current_price * (1.0 + volatility_spread / 2.0)
+      - low  = current_price * (1.0 - volatility_spread / 2.0)
+      - volatility_range_pct = round(((high - low) / current_price) * 100.0, 3)
+      - predicted_dollar_move = round(current_price * (expected_return_pct / 100.0), 2)
+      - clears_hurdle = bool(abs(expected_return_pct) >= MIN_HURDLE_PCT)
+    """
+    current_price = float(current_price)
+    if scenario_selected == "bullish":
+        volatility_spread = 0.015
+        volume = 5000.0
+        taker_buy_ratio = 0.65
+        order_flow_bias = "STRONG_BUYER_AGGRESSION"
+        rsi_estimate = 62.0
+        expected_return_pct = 0.42
+        confidence = 0.88
+    elif scenario_selected == "vol_spike":
+        volatility_spread = 0.052
+        volume = 12000.0
+        taker_buy_ratio = 0.35
+        order_flow_bias = "EXTREME_LIQUIDATION"
+        rsi_estimate = 28.0
+        expected_return_pct = -0.20
+        confidence = 0.60
+    elif scenario_selected == "chop":
+        volatility_spread = 0.004
+        volume = 400.0
+        taker_buy_ratio = 0.49
+        order_flow_bias = "FLAT_CHOP"
+        rsi_estimate = 50.0
+        expected_return_pct = 0.02
+        confidence = 0.45
+    else:
+        volatility_spread = 0.018
+        volume = 1200.0
+        taker_buy_ratio = 0.51
+        order_flow_bias = "NEUTRAL"
+        rsi_estimate = 51.0
+        expected_return_pct = 0.08
+        confidence = 0.65
+
+    half_spread = volatility_spread / 2.0
+    high_price = current_price * (1.0 + half_spread)
+    low_price = current_price * (1.0 - half_spread)
+    volatility_range_pct = (
+        round(((high_price - low_price) / current_price) * 100.0, 3)
+        if current_price > 0.0
+        else 0.0
+    )
+    predicted_dollar_move = round(current_price * (expected_return_pct / 100.0), 2)
+
+    m_data = {
+        "close": current_price,
+        "high": high_price,
+        "low": low_price,
+        "volume": volume,
+        "taker_buy_ratio": taker_buy_ratio,
+    }
+    t_data = {
+        "volatility_spread": volatility_spread,
+        "volatility_range_pct": volatility_range_pct,
+        "order_flow_bias": order_flow_bias,
+        "rsi_estimate": rsi_estimate,
+    }
+
+    clears_hurdle = bool(abs(expected_return_pct) >= MIN_HURDLE_PCT)
+    if not clears_hurdle:
+        direction = "SIDEWAYS"
+        direction_badge = "SIDEWAYS [CHOP]"
+    elif expected_return_pct >= 0.0:
+        direction = "UP"
+        direction_badge = "BULLISH [UP]"
+    else:
+        direction = "DOWN"
+        direction_badge = "BEARISH [DOWN]"
+
+    f_data = {
+        "expected_return_pct": expected_return_pct,
+        "predicted_dollar_move": predicted_dollar_move,
+        "clears_hurdle": clears_hurdle,
+        "confidence": confidence,
+        "direction": direction,
+        "direction_badge": direction_badge,
+    }
+    return m_data, t_data, f_data
+
+
+_EXPECTED_MOVE_PCT_RE = re.compile(
+    r"expected\s+(?:return|move)\s*\(\s*([+-]?\d+(?:\.\d+)?)\s*%\s*\)"
+)
+_BELOW_THRESHOLD_PCT_RE = re.compile(
+    r"(?:below|<|fails?\s+to\s+clear(?:\s+the|\s+estimated)?|failed\s+to\s+clear(?:\s+the|\s+estimated)?|does\s+not\s+justify(?:\s+estimated)?|lacks\s+sufficient\s+directional\s+momentum\s+to\s+clear(?:\s+estimated)?)\s*(\d+(?:\.\d+)?)\s*%"
+)
+
+
+def format_portfolio_rationale(row) -> str:
+    """
+    Formats the plain-English Strategy Rationale column for the Paper Portfolio table,
+    referencing canonical MIN_HURDLE_PCT dynamically and matching only explicit
+    sub-hurdle / below-hurdle notes without hardcoded threshold strings or overmatching
+    ambiguous hurdle or friction text.
+    """
+    act = str(row.get("action", "")).upper()
+    notes = str(row.get("notes", "") or "")
+    if act == "BUY":
+        amt = float(row.get("btc_amount", 0.0) or 0.0)
+        price = float(row.get("execution_price", 0.0) or 0.0)
+        val = amt * price
+        return f"Position Opened: Allocated 10% Kelly fraction (~${val:,.0f}) on approved bullish signal."
+    elif act == "SELL":
+        pnl = float(row.get("realized_pnl_usd", 0.0) or 0.0)
+        return f"Position Closed: Sold inventory at market (Realized PnL: ${pnl:+,.2f})."
+    elif act == "HOLD":
+        notes_lower = notes.lower()
+        move_match = _EXPECTED_MOVE_PCT_RE.search(notes_lower)
+        effective_hurdle_pct = float(MIN_HURDLE_PCT)
+        bound_matches = [
+            float(m) for m in _BELOW_THRESHOLD_PCT_RE.findall(notes_lower)
+        ]
+        has_explicit_below_phrase = (
+            "sub-hurdle" in notes_lower
+            or "below hurdle" in notes_lower
+            or "below fee hurdle" in notes_lower
+            or "below the fee hurdle" in notes_lower
+            or "fails to clear" in notes_lower
+            or "failed to clear" in notes_lower
+            or "fee drag" in notes_lower
+            or "does not justify" in notes_lower
+            or "lacks sufficient directional momentum to clear" in notes_lower
+        )
+
+        if move_match is not None:
+            move_mag_pct = abs(float(move_match.group(1)))
+            is_below_hurdle = has_explicit_below_phrase and (
+                move_mag_pct < float(MIN_HURDLE_PCT)
+            )
+        elif bound_matches:
+            is_below_hurdle = any(
+                bound <= effective_hurdle_pct for bound in bound_matches
+            )
+        else:
+            is_below_hurdle = has_explicit_below_phrase
+
+        if is_below_hurdle:
+            return (
+                f"Capital Preserved: Expected move is below {MIN_HURDLE_PCT:.2f}% "
+                "round-trip fee hurdle."
+            )
+        elif "veto" in notes_lower:
+            return "Risk Veto: Trade prevented by Risk Critic to protect capital."
+        return "Capital Preserved: Sideways chop; preserving cash until high-conviction setup."
+    elif "DEPOSIT" in act:
+        return "Portfolio Initialized: Starting bankroll of $10,000.00 USDT."
+    return notes if notes else "Execution logged."
+
+
+def build_model_pedigree_markdown() -> str:
+    """
+    Constructs the rendered Markdown table for Tab 5 Active Production Model Pedigree,
+    preserving historical 0.30% friction and +33.55 pp alpha provenance while formatting
+    current canonical ROUND_TRIP_FRICTION_PCT and TOTAL_FRICTION_PER_SIDE_PCT dynamically.
+    """
+    return (
+        "| Parameter | Active Value | Rationale |\n"
+        "| :--- | :--- | :--- |\n"
+        "| **Model Architecture** | `XGBRegressor (CPU)` | Sub-millisecond single-row latency |\n"
+        "| **Model Checkpoint** | `xgb_onnx_v1.0.0` | Optuna 50 Bayesian trial champion |\n"
+        "| **Cross-Validation RMSE**| `$396.22` | Chronological walk-forward split |\n"
+        "| **Directional Accuracy**| `53.17%` | Out-of-sample test set |\n"
+        f"| **Historical Backtest Friction** | `0.30% (Historical)` | Legacy Phase 1 report assumption (7,000h study); current canonical friction is `{ROUND_TRIP_FRICTION_PCT:.2f}%` (`{TOTAL_FRICTION_PER_SIDE_PCT:.2f}%` per side) |\n"
+        f"| **Net Strategy Alpha (Historical)** | `+33.55 pp (Historical)` | Measured under the historical `0.30%` friction assumption; not evidence of equivalent performance under current canonical `{ROUND_TRIP_FRICTION_PCT:.2f}%` friction |"
+    )
 
 
 from src.agents.tools import fetch_historical_candles
@@ -587,22 +767,10 @@ with tab2:
 
     if run_deliberation:
         with st.spinner("Convening Strategist and Risk Critic nodes..."):
-            if scenario_selected == "bullish":
-                m_data = {"close": current_price, "high": current_price * 1.01, "low": current_price * 0.99, "volume": 5000.0, "taker_buy_ratio": 0.65}
-                t_data = {"volatility_spread": 0.015, "order_flow_bias": "STRONG_BUYER_AGGRESSION", "rsi_estimate": 62.0}
-                f_data = {"expected_return_pct": 0.42, "predicted_dollar_move": 350.0, "clears_hurdle": True, "confidence": 0.88, "direction": "UP", "direction_badge": "BULLISH [UP]"}
-            elif scenario_selected == "vol_spike":
-                m_data = {"close": current_price, "high": current_price * 1.05, "low": current_price * 0.95, "volume": 12000.0, "taker_buy_ratio": 0.35}
-                t_data = {"volatility_spread": 0.052, "order_flow_bias": "EXTREME_LIQUIDATION", "rsi_estimate": 28.0}
-                f_data = {"expected_return_pct": 0.20, "predicted_dollar_move": 160.0, "clears_hurdle": True, "confidence": 0.60, "direction": "UP", "direction_badge": "BULLISH [UP]"}
-            elif scenario_selected == "chop":
-                m_data = {"close": current_price, "high": current_price * 1.002, "low": current_price * 0.998, "volume": 400.0, "taker_buy_ratio": 0.49}
-                t_data = {"volatility_spread": 0.004, "order_flow_bias": "FLAT_CHOP", "rsi_estimate": 50.0}
-                f_data = {"expected_return_pct": 0.02, "predicted_dollar_move": 15.0, "clears_hurdle": False, "confidence": 0.45, "direction": "SIDEWAYS", "direction_badge": "SIDEWAYS [CHOP]"}
-            else:
-                m_data = {"close": current_price, "high": current_price * 1.005, "low": current_price * 0.995, "volume": 1200.0, "taker_buy_ratio": 0.51}
-                t_data = {"volatility_spread": 0.018, "order_flow_bias": "NEUTRAL", "rsi_estimate": 51.0}
-                f_data = {"expected_return_pct": 0.08, "predicted_dollar_move": 65.0, "clears_hurdle": True, "confidence": 0.65, "direction": "UP", "direction_badge": "BULLISH [UP]"}
+            m_data, t_data, f_data = build_council_scenario_payload(
+                scenario_selected=scenario_selected,
+                current_price=current_price,
+            )
 
             st.session_state["council_state"] = run_trading_graph(
                 symbol="BTCUSDT",
@@ -897,28 +1065,7 @@ with tab4:
         t_disp["Time (UTC)"] = pd.to_datetime(t_disp["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
 
         # 7. Plain-English Strategy Rationale
-        def _fmt_rationale(row):
-            act = str(row.get("action", "")).upper()
-            notes = str(row.get("notes", "") or "")
-            if act == "BUY":
-                amt = float(row.get("btc_amount", 0.0) or 0.0)
-                price = float(row.get("execution_price", 0.0) or 0.0)
-                val = amt * price
-                return f"Position Opened: Allocated 10% Kelly fraction (~${val:,.0f}) on approved bullish signal."
-            elif act == "SELL":
-                pnl = float(row.get("realized_pnl_usd", 0.0) or 0.0)
-                return f"Position Closed: Sold inventory at market (Realized PnL: ${pnl:+,.2f})."
-            elif act == "HOLD":
-                if "hurdle" in notes.lower() or "friction" in notes.lower() or "0.14" in notes:
-                    return "Capital Preserved: Expected move is below 0.14% round-trip fee hurdle."
-                elif "veto" in notes.lower():
-                    return "Risk Veto: Trade prevented by Risk Critic to protect capital."
-                return "Capital Preserved: Sideways chop; preserving cash until high-conviction setup."
-            elif "DEPOSIT" in act:
-                return "Portfolio Initialized: Starting bankroll of $10,000.00 USDT."
-            return notes if notes else "Execution logged."
-
-        t_disp["Strategy Rationale"] = t_disp.apply(_fmt_rationale, axis=1)
+        t_disp["Strategy Rationale"] = t_disp.apply(format_portfolio_rationale, axis=1)
 
         display_cols = [
             "Time (UTC)",
@@ -949,18 +1096,7 @@ with tab5:
     g_col1, g_col2 = st.columns(2)
     with g_col1:
         st.markdown("#### Active Production Model Pedigree")
-        st.markdown(
-            """
-            | Parameter | Active Value | Rationale |
-            | :--- | :--- | :--- |
-            | **Model Architecture** | `XGBRegressor (CPU)` | Sub-millisecond single-row latency |
-            | **Model Checkpoint** | `xgb_onnx_v1.0.0` | Optuna 50 Bayesian trial champion |
-            | **Cross-Validation RMSE**| `$396.22` | Chronological walk-forward split |
-            | **Directional Accuracy**| `53.17%` | Out-of-sample test set |
-            | **Round-Trip Friction** | `0.30%` | Tested over 7,000 continuous hours |
-            | **Net Strategy Alpha** | `+33.55 pp` | Outperformed Buy & Hold |
-            """
-        )
+        st.markdown(build_model_pedigree_markdown())
 
     with g_col2:
         st.markdown("#### Anti-Leakage Chronological Split Boundary")
