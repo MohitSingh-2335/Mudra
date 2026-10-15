@@ -1,7 +1,7 @@
 # tests/test_execution_costs.py
 """
 Deterministic Unit & Regression Tests for Mudra Execution Costs, Fees, Slippage & Hurdle Schema.
-TASK-P1-04.2: Transaction Cost & Fee Schema Harmonization.
+Transaction Cost & Fee Schema Harmonization.
 
 Covers:
 1. Canonical decimal rate invariants and unit boundaries in config.py.
@@ -535,7 +535,7 @@ def test_strategist_heuristic_text_reflects_canonical_config():
 
 
 # -----------------------------------------------------------------------------
-# 8. Streamlit UI Live Forecast Hurdle Alignment (TASK-P1-04.5)
+# 8. Streamlit UI Live Forecast Hurdle Alignment
 # -----------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
@@ -755,3 +755,735 @@ def test_app_ui_imports_min_hurdle_pct_and_eliminates_hardcoded_005_hurdle():
     assert "abs(pred_ret_pct) >= 0.05" not in app_source
     assert "abs(pred_ret_pct) >= MIN_HURDLE_PCT" in app_source
     assert 'f"Cleared {MIN_HURDLE_PCT:.2f}% Hurdle [PASS]"' in app_source
+
+
+# -----------------------------------------------------------------------------
+# 9. Residual Cost, Risk-Boundary & Scenario Consistency
+# -----------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "unsupported_action",
+    [
+        "SHORT",
+        "LONG",
+        " close ",
+        "",
+        "   ",
+        None,
+        123,
+        "__OMIT__",
+    ],
+)
+def test_risk_critic_rejects_unsupported_trade_actions_fail_closed(
+    monkeypatch, unsupported_action
+):
+    """
+    Verifies that risk_critic_node allows only 'HOLD', 'BUY', and 'SELL' and fails closed
+    on any unsupported action ('SHORT', 'LONG', empty/whitespace string, None, non-string,
+    or omitted trade_action):
+      - risk_approved is False
+      - recommended_position_pct == 0.0
+      - stop_loss_price is None and take_profit_price is None
+      - deterministic veto_reason cites 'Unsupported Trade Action'
+      - never invokes the LLM approval path or treats 'SHORT' as 'SELL'
+    """
+    import sys
+    import types
+
+    rcn_mod = sys.modules["src.agents.risk_critic_node"]
+    llm_calls = []
+
+    class ForbiddenGenerativeModel:
+        def __init__(self, model_name):
+            llm_calls.append(model_name)
+
+        def generate_content(self, prompt):
+            llm_calls.append(prompt)
+            raise AssertionError("LLM approval path must not be reached for unsupported actions")
+
+    dummy_genai = types.ModuleType("google.generativeai")
+    dummy_genai.configure = lambda **kwargs: None
+    dummy_genai.GenerativeModel = ForbiddenGenerativeModel
+
+    google_pkg = sys.modules.get("google")
+    if google_pkg is None:
+        google_pkg = types.ModuleType("google")
+        google_pkg.__path__ = []
+        monkeypatch.setitem(sys.modules, "google", google_pkg)
+
+    monkeypatch.setitem(sys.modules, "google.generativeai", dummy_genai)
+    monkeypatch.setattr(google_pkg, "generativeai", dummy_genai, raising=False)
+    monkeypatch.setattr(rcn_mod, "_get_gemini_api_key", lambda: "test-offline-api-key")
+
+    state: AgentState = {
+        "symbol": "BTCUSDT",
+        "current_price": 65000.0,
+        "market_data": {"close": 65000.0},
+        "engineered_features": {"volatility_range_pct": 1.0},
+        "ml_forecast": {
+            "expected_return_pct": 0.50,
+            "clears_hurdle": True,
+        },
+        "conviction_score": 8,
+        "circuit_breaker_active": False,
+    }
+    if unsupported_action != "__OMIT__":
+        state["trade_action"] = unsupported_action
+
+    out = risk_critic_node(state)
+    assert out["risk_approved"] is False
+    assert out["recommended_position_pct"] == 0.0
+    assert out["stop_loss_price"] is None
+    assert out["take_profit_price"] is None
+    assert out["veto_reason"] is not None
+    assert "Unsupported Trade Action" in out["veto_reason"]
+    assert "VETOED BY RISK CRITIC" in out["risk_critic_critique"]
+    assert len(llm_calls) == 0
+
+    # Verify Gate 0 also runs BEFORE converting malformed ancillary state fields without raising
+    malformed_ancillary_state: AgentState = {
+        "symbol": "BTCUSDT",
+        "current_price": "malformed_price",
+        "market_data": None,
+        "engineered_features": {"volatility_range_pct": "malformed_vol"},
+        "ml_forecast": "malformed_forecast",
+        "conviction_score": "malformed_conviction",
+        "circuit_breaker_active": False,
+    }
+    if unsupported_action != "__OMIT__":
+        malformed_ancillary_state["trade_action"] = unsupported_action
+
+    out_malformed = risk_critic_node(malformed_ancillary_state)
+    assert out_malformed["risk_approved"] is False
+    assert out_malformed["recommended_position_pct"] == 0.0
+    assert out_malformed["stop_loss_price"] is None
+    assert out_malformed["take_profit_price"] is None
+    assert out_malformed["veto_reason"] is not None
+    assert "Unsupported Trade Action" in out_malformed["veto_reason"]
+    assert len(llm_calls) == 0
+
+
+@pytest.mark.parametrize(
+    "raw_action,expected_normalized,expected_ret,expected_pos_gt_zero",
+    [
+        ("hold", "HOLD", 0.0, False),
+        ("  hold  ", "HOLD", 0.0, False),
+        ("buy", "BUY", 0.25, True),
+        ("  buy\n", "BUY", 0.25, True),
+        ("sell", "SELL", -0.25, True),
+        ("  sell  ", "SELL", -0.25, True),
+    ],
+)
+def test_risk_critic_normalizes_lowercase_and_padded_valid_actions(
+    monkeypatch,
+    raw_action,
+    expected_normalized,
+    expected_ret,
+    expected_pos_gt_zero,
+):
+    """
+    Verifies that lowercase/whitespace-padded 'hold', 'buy', and 'sell' actions are
+    normalized to 'HOLD', 'BUY', and 'SELL' and preserve their intended risk semantics.
+    """
+    import sys
+
+    rcn_mod = sys.modules["src.agents.risk_critic_node"]
+    monkeypatch.setattr(rcn_mod, "_get_gemini_api_key", lambda: None)
+
+    current_price = 65000.0
+    state: AgentState = {
+        "symbol": "BTCUSDT",
+        "current_price": current_price,
+        "market_data": {"close": current_price},
+        "engineered_features": {"volatility_range_pct": 1.0},
+        "ml_forecast": {
+            "expected_return_pct": expected_ret,
+            "clears_hurdle": True,
+        },
+        "trade_action": raw_action,
+        "conviction_score": 7,
+    }
+    out = risk_critic_node(state)
+    assert out["trade_action"] == expected_normalized
+    assert out["risk_approved"] is True
+    assert out["veto_reason"] is None
+
+    if expected_pos_gt_zero:
+        assert out["recommended_position_pct"] > 0.0
+        if expected_normalized == "BUY":
+            assert out["stop_loss_price"] < current_price < out["take_profit_price"]
+        else:
+            assert out["take_profit_price"] < current_price < out["stop_loss_price"]
+
+        # Verify Gate 2 (volatility veto) and Gate 3 (conviction veto) remain effective on active BUY/SELL
+        vol_veto_state = dict(state, engineered_features={"volatility_range_pct": 4.5})
+        vol_veto_out = risk_critic_node(vol_veto_state)
+        assert vol_veto_out["risk_approved"] is False
+        assert vol_veto_out["recommended_position_pct"] == 0.0
+        assert vol_veto_out["stop_loss_price"] is None
+        assert vol_veto_out["take_profit_price"] is None
+        assert "Volatility Spike Anomaly" in vol_veto_out["veto_reason"]
+
+        conv_veto_state = dict(state, conviction_score=3)
+        conv_veto_out = risk_critic_node(conv_veto_state)
+        assert conv_veto_out["risk_approved"] is False
+        assert conv_veto_out["recommended_position_pct"] == 0.0
+        assert conv_veto_out["stop_loss_price"] is None
+        assert conv_veto_out["take_profit_price"] is None
+        assert "Low Conviction Rating" in conv_veto_out["veto_reason"]
+    else:
+        assert out["recommended_position_pct"] == 0.0
+        assert out["stop_loss_price"] is None
+        assert out["take_profit_price"] is None
+
+
+@pytest.mark.parametrize(
+    "action,expected_ret,caller_clears,expected_approved,expected_pos_gt_zero",
+    [
+        # Positive & negative interior sub-hurdle returns with contradictory clears_hurdle=True
+        ("BUY", 0.08, True, False, False),
+        ("SELL", -0.08, True, False, False),
+        ("BUY", 0.12, True, False, False),
+        ("SELL", -0.12, True, False, False),
+        # Immediately below threshold (1 ULP below MIN_HURDLE_PCT in magnitude)
+        ("BUY", math.nextafter(MIN_HURDLE_PCT, 0.0), True, False, False),
+        ("SELL", math.nextafter(-MIN_HURDLE_PCT, 0.0), True, False, False),
+        # Exactly at threshold (abs(expected_return_pct) == MIN_HURDLE_PCT)
+        ("BUY", MIN_HURDLE_PCT, True, True, True),
+        ("SELL", -MIN_HURDLE_PCT, True, True, True),
+        # Immediately above threshold (1 ULP above MIN_HURDLE_PCT in magnitude)
+        ("BUY", math.nextafter(MIN_HURDLE_PCT, math.inf), True, True, True),
+        ("SELL", math.nextafter(-MIN_HURDLE_PCT, -math.inf), True, True, True),
+        # Super-hurdle numeric return with valid clears_hurdle=True
+        ("BUY", 0.25, True, True, True),
+        ("SELL", -0.25, True, True, True),
+        # Super-hurdle numeric return but caller explicitly set clears_hurdle=False
+        ("BUY", 0.25, False, False, False),
+        ("SELL", -0.25, False, False, False),
+        # Super-hurdle numeric return with missing or malformed clears_hurdle flag (must fail closed, no truthy coercion)
+        ("BUY", 0.25, "__OMIT__", False, False),
+        ("SELL", -0.25, "__OMIT__", False, False),
+        ("BUY", 0.25, None, False, False),
+        ("SELL", -0.25, None, False, False),
+        ("BUY", 0.25, "false", False, False),
+        ("SELL", -0.25, "false", False, False),
+        ("BUY", 0.25, "true", False, False),
+        ("SELL", -0.25, "true", False, False),
+        ("BUY", 0.25, 1, False, False),
+        ("SELL", -0.25, 1, False, False),
+        ("BUY", 0.25, 0, False, False),
+        ("SELL", -0.25, [True], False, False),
+        # Directional sign mismatch: BUY with negative return or SELL with positive return must fail closed
+        ("BUY", -MIN_HURDLE_PCT, True, False, False),
+        ("SELL", MIN_HURDLE_PCT, True, False, False),
+        ("BUY", -0.25, True, False, False),
+        ("SELL", 0.25, True, False, False),
+        ("BUY", -0.08, True, False, False),
+        ("SELL", 0.08, True, False, False),
+    ],
+)
+def test_risk_critic_numeric_hurdle_boundary_and_sign_handling(
+    monkeypatch,
+    action,
+    expected_ret,
+    caller_clears,
+    expected_approved,
+    expected_pos_gt_zero,
+):
+    """
+    Verifies that risk_critic_node enforces both abs(expected_return_pct) >= MIN_HURDLE_PCT
+    and a strict boolean clears_hurdle is True across positive/negative sub-hurdle values,
+    exact MIN_HURDLE_PCT boundary, 1-ULP neighbors, and missing/malformed clears_hurdle flags,
+    while preserving BUY and SELL stop-loss/take-profit directional orientation when approved.
+    """
+    import sys
+
+    rcn_mod = sys.modules["src.agents.risk_critic_node"]
+    monkeypatch.setattr(rcn_mod, "_get_gemini_api_key", lambda: None)
+
+    current_price = 65000.0
+    ml_forecast_dict = {"expected_return_pct": expected_ret}
+    if caller_clears != "__OMIT__":
+        ml_forecast_dict["clears_hurdle"] = caller_clears
+
+    state: AgentState = {
+        "symbol": "BTCUSDT",
+        "current_price": current_price,
+        "market_data": {"close": current_price},
+        "engineered_features": {"volatility_range_pct": 1.0},
+        "ml_forecast": ml_forecast_dict,
+        "trade_action": action,
+        "conviction_score": 7,
+    }
+    out = risk_critic_node(state)
+    assert out["risk_approved"] is expected_approved
+
+    if expected_pos_gt_zero:
+        assert out["recommended_position_pct"] > 0.0
+        assert out["veto_reason"] is None
+        if action == "BUY":
+            assert out["stop_loss_price"] < current_price < out["take_profit_price"]
+        else:
+            assert out["take_profit_price"] < current_price < out["stop_loss_price"]
+    else:
+        assert out["recommended_position_pct"] == 0.0
+        assert out["stop_loss_price"] is None
+        assert out["take_profit_price"] is None
+        assert out["veto_reason"] is not None
+        assert "Sub-Hurdle Fee Drag" in out["veto_reason"]
+
+
+@pytest.mark.parametrize(
+    "action,ml_forecast_payload",
+    [
+        (act, payload)
+        for act in ("BUY", "SELL")
+        for payload in (
+            {},                                                         # Missing expected_return_pct
+            {"clears_hurdle": True},                                    # Missing return with clears_hurdle=True
+            {"expected_return_pct": None, "clears_hurdle": True},       # None
+            {"expected_return_pct": True, "clears_hurdle": True},       # Boolean True (must not coerce to 1.0%)
+            {"expected_return_pct": "malformed", "clears_hurdle": True},# Non-numeric string
+            {"expected_return_pct": "", "clears_hurdle": True},         # Empty string
+            {"expected_return_pct": float("nan"), "clears_hurdle": True},
+            {"expected_return_pct": float("inf"), "clears_hurdle": True},
+            {"expected_return_pct": float("-inf"), "clears_hurdle": True},
+        )
+    ],
+)
+def test_risk_critic_invalid_or_non_finite_return_fails_closed(action, ml_forecast_payload):
+    """
+    Verifies that missing, None, boolean, malformed string, NaN, +inf, and -inf
+    expected_return_pct values fail closed (VETO with 0.0 allocation and no SL/TP)
+    for active BUY/SELL trades without raising uncaught ValueError/TypeError.
+    """
+    state: AgentState = {
+        "symbol": "BTCUSDT",
+        "current_price": 65000.0,
+        "market_data": {"close": 65000.0},
+        "engineered_features": {"volatility_range_pct": 1.0},
+        "ml_forecast": dict(ml_forecast_payload),
+        "trade_action": action,
+        "conviction_score": 7,
+    }
+    out = risk_critic_node(state)
+    assert out["risk_approved"] is False
+    assert out["recommended_position_pct"] == 0.0
+    assert out["stop_loss_price"] is None
+    assert out["take_profit_price"] is None
+    assert out["veto_reason"] is not None
+    assert "Sub-Hurdle Fee Drag" in out["veto_reason"]
+
+
+@pytest.mark.parametrize(
+    "ml_forecast_payload",
+    [
+        {},
+        {"expected_return_pct": None},
+        {"expected_return_pct": "not_a_number"},
+        {"expected_return_pct": float("nan")},
+        {"expected_return_pct": float("inf")},
+        {"expected_return_pct": float("-inf")},
+    ],
+)
+def test_risk_critic_hold_preserves_zero_allocation_with_missing_or_malformed_return(
+    ml_forecast_payload,
+):
+    """
+    Verifies that HOLD orders preserve their intended zero-allocation approval behavior
+    (risk_approved=True, veto_reason=None, recommended_position_pct=0.0, no SL/TP)
+    even when expected_return_pct is missing, None, malformed, or non-finite.
+    """
+    state: AgentState = {
+        "symbol": "BTCUSDT",
+        "current_price": 65000.0,
+        "market_data": {"close": 65000.0},
+        "engineered_features": {"volatility_range_pct": 1.0},
+        "ml_forecast": dict(ml_forecast_payload),
+        "trade_action": "HOLD",
+        "conviction_score": 4,
+    }
+    out = risk_critic_node(state)
+    assert out["risk_approved"] is True
+    assert out["veto_reason"] is None
+    assert out["recommended_position_pct"] == 0.0
+    assert out["stop_loss_price"] is None
+    assert out["take_profit_price"] is None
+    assert "RISK CRITIC CONCURS" in out["risk_critic_critique"]
+
+    # Also verify HOLD preserves zero-allocation approval when ancillary state fields are missing or malformed
+    hold_malformed_ancillary: AgentState = {
+        "symbol": "BTCUSDT",
+        "current_price": "bad_price",
+        "market_data": None,
+        "engineered_features": {"volatility_range_pct": "bad_vol"},
+        "ml_forecast": dict(ml_forecast_payload),
+        "trade_action": "  hold  ",
+        "conviction_score": "bad_conviction",
+    }
+    out_ancillary = risk_critic_node(hold_malformed_ancillary)
+    assert out_ancillary["trade_action"] == "HOLD"
+    assert out_ancillary["risk_approved"] is True
+    assert out_ancillary["veto_reason"] is None
+    assert out_ancillary["recommended_position_pct"] == 0.0
+    assert out_ancillary["stop_loss_price"] is None
+    assert out_ancillary["take_profit_price"] is None
+
+
+@pytest.mark.parametrize(
+    "action,field_override,expected_veto_substring",
+    [
+        (act, override, veto_sub)
+        for act in ("BUY", "SELL")
+        for override, veto_sub in (
+            # Malformed / non-finite / non-positive current_price
+            ({"current_price": None}, "Invalid Market Price"),
+            ({"current_price": "malformed_price"}, "Invalid Market Price"),
+            ({"current_price": True}, "Invalid Market Price"),
+            ({"current_price": 0.0}, "Invalid Market Price"),
+            ({"current_price": -65000.0}, "Invalid Market Price"),
+            ({"current_price": float("nan")}, "Invalid Market Price"),
+            ({"current_price": float("inf")}, "Invalid Market Price"),
+            ({"current_price": float("-inf")}, "Invalid Market Price"),
+            # Malformed / non-finite / boolean / fractional conviction_score
+            ({"conviction_score": None}, "Low Conviction Rating"),
+            ({"conviction_score": "malformed_conv"}, "Low Conviction Rating"),
+            ({"conviction_score": True}, "Low Conviction Rating"),
+            ({"conviction_score": False}, "Low Conviction Rating"),
+            ({"conviction_score": 6.5}, "Low Conviction Rating"),
+            ({"conviction_score": float("nan")}, "Low Conviction Rating"),
+            ({"conviction_score": float("inf")}, "Low Conviction Rating"),
+            ({"conviction_score": float("-inf")}, "Low Conviction Rating"),
+            # Malformed / non-finite / negative / missing volatility_range_pct
+            ({"engineered_features": None}, "Volatility Spike Anomaly"),
+            ({"engineered_features": {}}, "Volatility Spike Anomaly"),
+            ({"engineered_features": {"volatility_range_pct": None}}, "Volatility Spike Anomaly"),
+            ({"engineered_features": {"volatility_range_pct": "malformed_vol"}}, "Volatility Spike Anomaly"),
+            ({"engineered_features": {"volatility_range_pct": True}}, "Volatility Spike Anomaly"),
+            ({"engineered_features": {"volatility_range_pct": -0.5}}, "Volatility Spike Anomaly"),
+            ({"engineered_features": {"volatility_range_pct": float("nan")}}, "Volatility Spike Anomaly"),
+            ({"engineered_features": {"volatility_range_pct": float("inf")}}, "Volatility Spike Anomaly"),
+            ({"engineered_features": {"volatility_range_pct": float("-inf")}}, "Volatility Spike Anomaly"),
+        )
+    ],
+)
+def test_risk_critic_active_trade_malformed_or_non_finite_ancillary_inputs_fail_closed(
+    monkeypatch, action, field_override, expected_veto_substring
+):
+    """
+    Verifies that for active BUY and SELL orders whose forecast return clears MIN_HURDLE_PCT,
+    malformed, boolean, non-finite (NaN, +inf, -inf), or invalid current_price, conviction_score,
+    or engineered_features.volatility_range_pct values fail closed without raising uncaught
+    exceptions, never approve a trade, and never reach the LLM approval path.
+    """
+    import sys
+
+    rcn_mod = sys.modules["src.agents.risk_critic_node"]
+    monkeypatch.setattr(rcn_mod, "_get_gemini_api_key", lambda: None)
+
+    state: AgentState = {
+        "symbol": "BTCUSDT",
+        "current_price": 65000.0,
+        "market_data": {"close": 65000.0},
+        "engineered_features": {"volatility_range_pct": 1.0},
+        "ml_forecast": {
+            "expected_return_pct": 0.25 if action == "BUY" else -0.25,
+            "clears_hurdle": True,
+        },
+        "trade_action": action,
+        "conviction_score": 7,
+    }
+    state.update(field_override)
+
+    out = risk_critic_node(state)
+    assert out["risk_approved"] is False
+    assert out["recommended_position_pct"] == 0.0
+    assert out["stop_loss_price"] is None
+    assert out["take_profit_price"] is None
+    assert out["veto_reason"] is not None
+    assert expected_veto_substring in out["veto_reason"]
+    assert "VETOED BY RISK CRITIC" in out["risk_critic_critique"]
+
+
+def test_risk_critic_approved_llm_prompt_uses_canonical_min_hurdle_pct(monkeypatch):
+    """
+    Verifies that when risk_critic_node approves a trade and invokes the LLM gateway,
+    the prompt sent to Gemini cites canonical MIN_HURDLE_PCT (~0.14%) rather than
+    the legacy 'Cleared 0.05% hurdle' string, without requiring a live API key.
+    """
+    import sys
+    import types
+    from types import SimpleNamespace
+
+    rcn_mod = sys.modules["src.agents.risk_critic_node"]
+    captured_prompts = []
+
+    class DummyGenerativeModel:
+        def __init__(self, model_name):
+            self.model_name = model_name
+
+        def generate_content(self, prompt):
+            captured_prompts.append(prompt)
+            return SimpleNamespace(text="Formal CRO critique: Trade authorized under canonical hurdle.")
+
+    dummy_genai = types.ModuleType("google.generativeai")
+    dummy_genai.configure = lambda **kwargs: None
+    dummy_genai.GenerativeModel = DummyGenerativeModel
+
+    google_pkg = sys.modules.get("google")
+    if google_pkg is None:
+        google_pkg = types.ModuleType("google")
+        google_pkg.__path__ = []
+        monkeypatch.setitem(sys.modules, "google", google_pkg)
+
+    monkeypatch.setitem(sys.modules, "google.generativeai", dummy_genai)
+    monkeypatch.setattr(google_pkg, "generativeai", dummy_genai, raising=False)
+    monkeypatch.setattr(rcn_mod, "_get_gemini_api_key", lambda: "test-offline-api-key")
+
+    state: AgentState = {
+        "symbol": "BTCUSDT",
+        "current_price": 65000.0,
+        "market_data": {"close": 65000.0},
+        "engineered_features": {"volatility_range_pct": 1.0},
+        "ml_forecast": {
+            "expected_return_pct": 0.25,
+            "clears_hurdle": True,
+        },
+        "trade_action": "BUY",
+        "conviction_score": 7,
+        "circuit_breaker_active": False,
+    }
+
+    out = risk_critic_node(state)
+    assert out["risk_approved"] is True
+    assert len(captured_prompts) == 1
+    prompt_text = captured_prompts[0]
+    assert f"(Cleared {MIN_HURDLE_PCT:.2f}% hurdle)" in prompt_text
+    assert "0.05% hurdle" not in prompt_text
+    assert out["risk_critic_critique"] == "Formal CRO critique: Trade authorized under canonical hurdle."
+
+
+@pytest.mark.parametrize(
+    "scenario_selected,expected_ret,expected_dollar_move,expected_vol_pct,expected_clears,expected_dir,expected_badge,expected_strategist_action,expected_final_decision,expected_verdict,expected_kelly_gt_zero",
+    [
+        ("live", 0.08, 52.0, 1.80, False, "SIDEWAYS", "SIDEWAYS [CHOP]", "HOLD", "HOLD", "APPROVED", False),
+        ("chop", 0.02, 13.0, 0.40, False, "SIDEWAYS", "SIDEWAYS [CHOP]", "HOLD", "HOLD", "APPROVED", False),
+        ("bullish", 0.42, 273.0, 1.50, True, "UP", "BULLISH [UP]", "BUY", "BUY", "APPROVED", True),
+        ("vol_spike", -0.20, -130.0, 5.20, True, "DOWN", "BEARISH [DOWN]", "SELL", "HOLD", "VETOED", False),
+    ],
+)
+def test_tab2_council_scenario_payload_and_graph_consistency(
+    monkeypatch,
+    scenario_selected,
+    expected_ret,
+    expected_dollar_move,
+    expected_vol_pct,
+    expected_clears,
+    expected_dir,
+    expected_badge,
+    expected_strategist_action,
+    expected_final_decision,
+    expected_verdict,
+    expected_kelly_gt_zero,
+):
+    """
+    Verifies internal mathematical and behavioral consistency for all 4 Tab 2 scenarios:
+      - predicted_dollar_move == round(current_price * expected_return_pct / 100.0, 2)
+      - high > close > low > 0
+      - ((high - low) / close) * 100.0 == volatility_range_pct == volatility_spread * 100.0
+      - clears_hurdle, direction, direction_badge, strategist_action, final_decision,
+        risk_verdict, and kelly_fraction behave as intended.
+    """
+    import sys
+    import app
+    from src.agents.trading_graph import run_trading_graph
+
+    sn_mod = sys.modules["src.agents.strategist_node"]
+    rcn_mod = sys.modules["src.agents.risk_critic_node"]
+    monkeypatch.setattr(sn_mod, "_get_gemini_api_key", lambda: None)
+    monkeypatch.setattr(rcn_mod, "_get_gemini_api_key", lambda: None)
+
+    current_price = 65000.0
+    m_data, t_data, f_data = app.build_council_scenario_payload(
+        scenario_selected=scenario_selected,
+        current_price=current_price,
+    )
+
+    assert f_data["expected_return_pct"] == pytest.approx(expected_ret, abs=1e-8)
+    computed_dollar_move = current_price * (f_data["expected_return_pct"] / 100.0)
+    assert f_data["predicted_dollar_move"] == pytest.approx(computed_dollar_move, abs=1e-6)
+    assert f_data["predicted_dollar_move"] == pytest.approx(expected_dollar_move, abs=1e-6)
+
+    assert m_data["high"] > m_data["close"] > m_data["low"] > 0.0
+    computed_range_pct = ((m_data["high"] - m_data["low"]) / m_data["close"]) * 100.0
+    assert computed_range_pct == pytest.approx(t_data["volatility_range_pct"], abs=1e-6)
+    assert t_data["volatility_spread"] * 100.0 == pytest.approx(t_data["volatility_range_pct"], abs=1e-6)
+    assert t_data["volatility_range_pct"] == pytest.approx(expected_vol_pct, abs=1e-6)
+
+    assert f_data["clears_hurdle"] is expected_clears
+    assert f_data["direction"] == expected_dir
+    assert f_data["direction_badge"] == expected_badge
+
+    council_state = run_trading_graph(
+        symbol="BTCUSDT",
+        current_price=current_price,
+        market_data=m_data,
+        engineered_features=t_data,
+        ml_forecast=f_data,
+    )
+    assert council_state["strategist_action"] == expected_strategist_action
+    assert council_state["final_decision"] == expected_final_decision
+    assert council_state["risk_verdict"] == expected_verdict
+    if expected_kelly_gt_zero:
+        assert council_state["kelly_fraction"] > 0.0
+    else:
+        assert council_state["kelly_fraction"] == 0.0
+
+    if scenario_selected == "vol_spike":
+        assert council_state["risk_approved"] is False
+        assert any("Volatility Spike Anomaly" in v for v in council_state["veto_reasons"])
+    elif not expected_clears:
+        veto_check = risk_critic_node({
+            "symbol": "BTCUSDT",
+            "current_price": current_price,
+            "market_data": m_data,
+            "engineered_features": {"volatility_range_pct": 1.0},
+            "ml_forecast": f_data,
+            "trade_action": "BUY",
+            "conviction_score": 7,
+        })
+        assert veto_check["risk_approved"] is False
+        assert "Sub-Hurdle Fee Drag" in veto_check["veto_reason"]
+        assert veto_check["recommended_position_pct"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "notes_text,expected_category",
+    [
+        # 1. Explicit below-hurdle / sub-hurdle rationales -> "below_hurdle"
+        ("Expected return (+0.0800%) fails to clear the 0.14% estimated round-trip break-even hurdle", "below_hurdle"),
+        ("Chop / sub-hurdle regime: Expected move (+0.0200%) does not justify estimated 0.14% round-trip exchange friction", "below_hurdle"),
+        ("Sub-hurdle fee drag: preserving capital.", "below_hurdle"),
+        ("Forecasted return < 0.14% break-even threshold", "chop"),
+        ("Expected move is below hurdle; skipping entry.", "below_hurdle"),
+        ("Below Fee Hurdle [SKIP]", "below_hurdle"),
+        ("Market setup lacks sufficient directional momentum to clear estimated 0.14% round-trip friction", "chop"),
+        # 2. Messages stating the hurdle WAS cleared on a HOLD row -> "chop" (NOT below_hurdle)
+        ("Cleared 0.14% hurdle, but holding for volume confirmation.", "chop"),
+        ("Expected return clears hurdle; awaiting macro catalyst.", "chop"),
+        # 3. Ambiguous or deferred hurdle evaluations -> "chop"
+        ("Hurdle evaluation deferred pending data", "chop"),
+        # 4. Generic transaction-cost/friction notes -> "chop" or "veto"
+        ("Neutral regime with normal market friction.", "chop"),
+        ("Standard transaction cost model active.", "chop"),
+        ("Order vetoed due to volatility spike and order-book friction.", "veto"),
+    ],
+)
+def test_format_portfolio_rationale_explicit_conditions_and_no_overmatching(
+    monkeypatch, notes_text, expected_category
+):
+    """
+    Verifies that app.format_portfolio_rationale classifies HOLD rows as below-hurdle
+    only when explicit below-hurdle/sub-hurdle phrases are present, and does not
+    misclassify cleared-hurdle, deferred-evaluation, or generic friction notes.
+    """
+    import app
+
+    row = {"action": "HOLD", "notes": notes_text}
+    msg = app.format_portfolio_rationale(row)
+
+    if expected_category == "below_hurdle":
+        assert msg == (
+            f"Capital Preserved: Expected move is below {MIN_HURDLE_PCT:.2f}% round-trip fee hurdle."
+        )
+    elif expected_category == "veto":
+        assert msg == "Risk Veto: Trade prevented by Risk Critic to protect capital."
+    else:
+        assert msg == "Capital Preserved: Sideways chop; preserving cash until high-conviction setup."
+
+
+@pytest.mark.parametrize(
+    "configured_hurdle,notes_text,expected_category",
+    [
+        # 1. Custom hurdle of 0.10% and notes mentioning 0.10% vs 0.14%
+        (0.10, "Move below 0.09% threshold.", "below_hurdle"),
+        (0.10, "Move below 0.10% threshold.", "below_hurdle"),
+        (0.10, "Forecasted return < 0.10% break-even threshold", "below_hurdle"),
+        (0.10, "Move below 0.14% threshold.", "chop"),
+        (0.10, "Forecasted return < 0.14% break-even threshold", "chop"),
+        (0.10, "Market setup lacks sufficient directional momentum to clear estimated 0.14% round-trip friction", "chop"),
+        (0.10, "Expected return (+0.0800%) fails to clear the 0.14% estimated round-trip break-even hurdle", "below_hurdle"),
+        (0.10, "Expected return (+0.1400%) fails to clear the 0.14% estimated round-trip break-even hurdle", "chop"),
+        # 2. Custom hurdle of 0.25% and notes mentioning 0.14% vs 0.25% vs 0.30%
+        (0.25, "Move below 0.14% threshold.", "below_hurdle"),
+        (0.25, "Forecasted return < 0.14% break-even threshold", "below_hurdle"),
+        (0.25, "Market setup lacks sufficient directional momentum to clear estimated 0.14% round-trip friction", "below_hurdle"),
+        (0.25, "Move below 0.25% threshold.", "below_hurdle"),
+        (0.25, "Forecasted return < 0.25% break-even threshold", "below_hurdle"),
+        (0.25, "Move below 0.30% threshold.", "chop"),
+        (0.25, "Expected return (+0.1400%) fails to clear the 0.14% estimated round-trip break-even hurdle", "below_hurdle"),
+        (0.25, "Expected return (+0.2800%) fails to clear the 0.25% estimated round-trip break-even hurdle", "chop"),
+        # 3. Explicit below-hurdle phrases at each configured threshold -> "below_hurdle"
+        (0.10, "Sub-hurdle fee drag: preserving capital.", "below_hurdle"),
+        (0.10, "Expected move is below hurdle; skipping entry.", "below_hurdle"),
+        (0.25, "Sub-hurdle fee drag: preserving capital.", "below_hurdle"),
+        (0.25, "Expected move is below hurdle; skipping entry.", "below_hurdle"),
+        # 4. Cleared-hurdle, deferred-evaluation, and generic-friction notes at each threshold -> "chop"
+        (0.10, "Cleared 0.10% hurdle, but holding for volume confirmation.", "chop"),
+        (0.10, "Hurdle evaluation deferred pending data", "chop"),
+        (0.10, "Neutral regime with normal market friction.", "chop"),
+        (0.25, "Cleared 0.25% hurdle, but holding for volume confirmation.", "chop"),
+        (0.25, "Hurdle evaluation deferred pending data", "chop"),
+        (0.25, "Neutral regime with normal market friction.", "chop"),
+    ],
+)
+def test_format_portfolio_rationale_custom_min_hurdle_pct_and_tab5_provenance(
+    monkeypatch, configured_hurdle, notes_text, expected_category
+):
+    """
+    Verifies dynamic MIN_HURDLE_PCT classification in app.format_portfolio_rationale()
+    across custom 0.10% and 0.25% hurdles (including notes mentioning 0.14%, explicit
+    below-hurdle phrases, cleared-hurdle, deferred-evaluation, and generic-friction notes),
+    confirms monkeypatch fixture restoration of app.MIN_HURDLE_PCT before override,
+    and verifies app.build_model_pedigree_markdown() Tab 5 provenance.
+    """
+    import app
+
+    # 5. Verify normal fixture restoration: before monkeypatching in this test invocation,
+    # app.MIN_HURDLE_PCT is always restored to the canonical MIN_HURDLE_PCT (~0.139951%).
+    assert app.MIN_HURDLE_PCT == pytest.approx(MIN_HURDLE_PCT, abs=1e-12)
+    assert app.ROUND_TRIP_FRICTION_PCT == pytest.approx(ROUND_TRIP_FRICTION_PCT, abs=1e-12)
+    assert app.TOTAL_FRICTION_PER_SIDE_PCT == pytest.approx(TOTAL_FRICTION_PER_SIDE_PCT, abs=1e-12)
+
+    monkeypatch.setattr(app, "MIN_HURDLE_PCT", configured_hurdle)
+    msg = app.format_portfolio_rationale({"action": "HOLD", "notes": notes_text})
+
+    if expected_category == "below_hurdle":
+        assert msg == (
+            f"Capital Preserved: Expected move is below {configured_hurdle:.2f}% round-trip fee hurdle."
+        )
+    else:
+        assert msg == (
+            "Capital Preserved: Sideways chop; preserving cash until high-conviction setup."
+        )
+
+    rendered_default = app.build_model_pedigree_markdown()
+    assert "{" not in rendered_default and "}" not in rendered_default
+    assert "ROUND_TRIP_FRICTION_PCT" not in rendered_default
+    assert "TOTAL_FRICTION_PER_SIDE_PCT" not in rendered_default
+    assert "0.30% (Historical)" in rendered_default
+    assert "+33.55 pp (Historical)" in rendered_default
+    assert f"`{ROUND_TRIP_FRICTION_PCT:.2f}%` (`{TOTAL_FRICTION_PER_SIDE_PCT:.2f}%` per side)" in rendered_default
+    assert (
+        f"Measured under the historical `0.30%` friction assumption; not evidence of equivalent "
+        f"performance under current canonical `{ROUND_TRIP_FRICTION_PCT:.2f}%` friction"
+    ) in rendered_default
+
+    monkeypatch.setattr(app, "ROUND_TRIP_FRICTION_PCT", 0.22)
+    monkeypatch.setattr(app, "TOTAL_FRICTION_PER_SIDE_PCT", 0.11)
+    rendered_custom = app.build_model_pedigree_markdown()
+    assert "{" not in rendered_custom and "}" not in rendered_custom
+    assert "`0.22%` (`0.11%` per side)" in rendered_custom
+    assert "current canonical `0.22%` friction" in rendered_custom
+    assert "0.30% (Historical)" in rendered_custom
+    assert "+33.55 pp (Historical)" in rendered_custom
