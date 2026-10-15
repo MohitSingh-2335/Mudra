@@ -165,8 +165,8 @@ def test_agents_trade_endpoint(client):
             "taker_buy_ratio": 0.55
         },
         "ml_forecast": {
-            "expected_return_pct": 0.12,
-            "predicted_dollar_move": 78.0,
+            "expected_return_pct": 0.25,
+            "predicted_dollar_move": 162.5,
             "clears_hurdle": True
         }
     }
