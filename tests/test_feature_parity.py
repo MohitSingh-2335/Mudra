@@ -604,7 +604,7 @@ def test_fresh_feed_executes_forecast_and_shap_inference(sample_historical_candl
     assert is_stale is False
 
     mock_reg = MagicMock()
-    mock_reg.predict.return_value = np.array([0.002])  # +0.20% predicted return (clears 0.05% hurdle)
+    mock_reg.predict.return_value = np.array([0.002])  # +0.20% predicted return (clears MIN_HURDLE_PCT ~0.14% hurdle)
 
     mock_clf = MagicMock()
     mock_clf.predict.return_value = np.array([1])      # UP
@@ -1179,7 +1179,7 @@ def test_merge_fear_greed_rolling_mean_consistency():
 
 
 # =====================================================================
-# TASK-P1-03: Feature Ordering & Schema Validation Tests
+# Feature Ordering & Schema Validation Tests
 # =====================================================================
 
 def test_validate_inference_features_regressor_valid():
