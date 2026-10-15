@@ -1,7 +1,7 @@
 # Mudra: Bitcoin Quantitative ML & Autonomous Trading Terminal
 
 [![Live Terminal](https://img.shields.io/badge/Live%20Terminal-Streamlit%20Cloud-00E599?style=flat-square&logo=streamlit)](https://mudra-trading.streamlit.app)
-[![CI/CD](https://img.shields.io/badge/CI%2FCD-Passing-brightgreen?style=flat-square&logo=githubactions)](https://github.com/MohitSingh-2335/Stock_Prediction_ML/actions)
+[![CI/CD](https://img.shields.io/badge/CI%2FCD-Passing-brightgreen?style=flat-square&logo=githubactions)](https://github.com/MohitSingh-2335/Mudra/actions)
 [![Pytest](https://img.shields.io/badge/pytest-20%20passed-brightgreen?style=flat-square&logo=pytest)](tests/)
 [![Python](https://img.shields.io/badge/Python-3.11-blue?style=flat-square&logo=python)](https://www.python.org/)
 [![Database](https://img.shields.io/badge/Database-Neon%20PostgreSQL-blueviolet?style=flat-square&logo=postgresql)](https://neon.tech)
@@ -18,10 +18,10 @@ Mudra is a machine learning trading platform for Bitcoin (`BTC/USDT`). It uses t
 
 Most machine learning models for crypto fail in real markets because of two common mistakes:
 1. **Data Leakage (Lookahead Bias):** Randomly shuffling time-series data lets future price patterns leak into training. Mudra uses a strict chronological split: training on past data (2021 to mid-2025) and testing on 7,000 out-of-sample hours (mid-2025 to 2026).
-2. **Ignoring Trading Fees:** Trading on every small signal burns capital quickly through exchange taker fees (0.05%) and slippage (0.02%). Mudra only enters a trade when the model's expected return clears an institutional 0.05% hurdle rate.
+2. **Ignoring Trading Fees:** Trading on every small signal burns capital quickly through exchange taker fees (0.05% per side) and slippage (0.02% per side, or 0.07% per fill). Mudra only enters an active trade when the model's expected return clears the canonical ~0.14% (`0.139951%`) round-trip break-even hurdle rate.
 
 ### Key Results
-During an out-of-sample period where Bitcoin dropped **-45.2%**, Mudra filtered out 96% of low-conviction chop trades and held USDT cash, outperforming Buy & Hold by **+33.55% excess return (Alpha)**.
+During the historical Phase 1 out-of-sample study (7,000 hours evaluated under a legacy 0.30% round-trip friction assumption) where Bitcoin dropped **-45.2%**, Mudra filtered out 96% of low-conviction chop trades and held USDT cash, recording **+33.55 percentage points of historical excess return (Alpha)** over Buy & Hold (historical benchmark provenance; not evidence of equivalent performance under the current canonical `0.139951%` friction).
 
 | Strategy | Total Return | Max Drawdown | Total Trades | Exposure Time |
 | :--- | :---: | :---: | :---: | :---: |
@@ -72,8 +72,8 @@ flowchart LR
 
 ### Run with Docker (Recommended)
 ```bash
-git clone https://github.com/MohitSingh-2335/Stock_Prediction_ML.git
-cd Stock_Prediction_ML
+git clone https://github.com/MohitSingh-2335/Mudra.git
+cd Mudra
 docker compose up --build
 ```
 * Dashboard: `http://localhost:8501`
@@ -159,7 +159,7 @@ Interactive documentation is available at `http://localhost:8000/docs` when runn
 <br>
 
 ```text
-Stock_Prediction_ML/
+Mudra/
 ├── .github/workflows/       # Automated CI/CD and hourly worker workflow
 ├── artifacts/models/        # Tuned XGBoost regressor and classifier models
 ├── data/                    # Raw and processed historical data
