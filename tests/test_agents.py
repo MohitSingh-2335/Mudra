@@ -39,7 +39,7 @@ def test_technical_tools_execution():
 
 def test_trading_graph_bullish_approval():
     """
-    Test scenario: High expected return (+0.12%) with strong order-flow and normal volatility.
+    Test scenario: High expected return (+0.25% >= MIN_HURDLE_PCT) with strong order-flow and normal volatility.
     Expected: Risk Critic APPROVES trade, sets position size > 0, pins stop-loss & take-profit.
     """
     state = run_trading_graph(
@@ -59,8 +59,8 @@ def test_trading_graph_bullish_approval():
             "rsi_estimate": 62.0
         },
         ml_forecast={
-            "expected_return_pct": 0.12,
-            "predicted_dollar_move": 78.0,
+            "expected_return_pct": 0.25,
+            "predicted_dollar_move": 162.5,
             "clears_hurdle": True
         }
     )
@@ -77,7 +77,7 @@ def test_trading_graph_bullish_approval():
 def test_risk_critic_sub_hurdle_veto():
     """
     Test scenario: Strategist (LLM) recommends BUY, but expected return (+0.02%)
-    is below the institutional 0.05% fee hurdle.
+    is below the canonical MIN_HURDLE_PCT (~0.14% round-trip fee hurdle).
     Expected: Reflexion Risk Critic overrides and VETOES the order, sets position size = 0.0,
     and logs fee drag veto reason.
     """
