@@ -2,7 +2,7 @@
 """
 Deterministic Unit & Regression Tests for Mudra Hourly Worker Lifecycle,
 Exit Code Contracts, and Durable Outbox Processing.
-TASK-P1-05.3: Verify External Scheduler Integration, Then Fix Worker Reliability.
+Verify External Scheduler Integration, Then Fix Worker Reliability.
 """
 
 import json
@@ -821,7 +821,7 @@ def test_has_tick_id_column_and_fallback_on_legacy_schema():
 
 
 # -----------------------------------------------------------------------------
-# 4. Candle Gap Detection & Historical Backfill Contracts (TASK-P1-05.7)
+# 4. Candle Gap Detection & Historical Backfill Contracts
 # -----------------------------------------------------------------------------
 
 def test_backfill_empty_database_bootstrap_inserts_zero_historical_candles(isolated_db, monkeypatch):

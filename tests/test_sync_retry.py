@@ -1,7 +1,7 @@
 # tests/test_sync_retry.py
 """
 Deterministic Unit & Regression Tests for Bounded Exchange Retries.
-TASK-P1-05.6.2: Verify _fetch_feed_with_retry and fetch_latest_confirmed_candle
+Verify _fetch_feed_with_retry and fetch_latest_confirmed_candle
 retry behavior, error classification, cooperative retry-scheduling budget enforcement,
 late-response rejection, payload validation, and confirmed-candle filtering under
 mocked HTTP, sleep, clock, and jitter dependencies.
