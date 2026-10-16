@@ -1,7 +1,7 @@
 """
 Mudra 24/7 Hourly Headless Cron Worker.
-Executes the full quant lifecycle: market ingestion, API telemetry,
-delayed ground truth reconciliation, multi-agent council deliberation,
+Executes the full quant lifecycle: read-only schema verification, market ingestion,
+API telemetry, delayed ground truth reconciliation, multi-agent council deliberation,
 paper portfolio execution, and outbox synchronization.
 """
 # PRE-LOAD ONNXRUNTIME FIRST to prevent Windows OpenMP (0xC0000005) thread collision
@@ -23,7 +23,8 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from src.database.connection import get_db, init_db, test_connection
+import src.database.connection as db_conn
+from src.database.connection import get_db, init_db, test_connection, verify_db_schema
 from src.database.models import MarketTick, ApiTelemetry
 from src.engine.sync import sync_hourly_quant_cycle, fetch_latest_confirmed_candle
 
@@ -145,19 +146,19 @@ def run_worker(force: bool = False) -> bool:
     print(f"Mudra Hourly Worker Starting at {datetime.now(timezone.utc).isoformat()}")
     print(f"{'='*70}")
 
-    # 1. Initialize Tables in Neon Cloud
-    try:
-        init_db()
-    except Exception as exc:
-        print(f"[FATAL] Cannot initialize database schema: {exc}")
-        return False
-    
-    # 2. Test Connection
-    ok, ver, lat = test_connection()
+    # 1. Test Connection First
+    ok, ver, lat = db_conn.test_connection()
     if not ok:
         print(f"[FATAL] Cannot reach Database: {ver}")
         return False
     print(f"[DB] Connected to {ver[:35]}... (Latency: {lat:.1f}ms)")
+
+    # 2. Read-Only Schema Verification (Zero DDL on Worker Startup; Fails Closed on Drift)
+    try:
+        db_conn.verify_db_schema()
+    except Exception as exc:
+        print(f"[FATAL] Database schema verification failed: {exc}")
+        return False
 
     # 3. Flush any pending offline queue items
     try:
@@ -185,7 +186,7 @@ def run_worker(force: bool = False) -> bool:
 
     # Exit Status Contract:
     # - True (exit 0): New tick successfully synced OR candle was already recorded (idempotent no-op).
-    # - False (exit 1): Genuine operational failure (database unreachable, market feeds failed, crash).
+    # - False (exit 1): Genuine operational failure (database unreachable, schema drift, market feeds failed, crash).
     if synced:
         return True
     if "already recorded" in message or (isinstance(summary, dict) and "tick_id" in summary):
