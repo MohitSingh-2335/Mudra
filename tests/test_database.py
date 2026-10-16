@@ -904,6 +904,293 @@ def test_migrate_db_defaults_to_read_only_dry_run(in_memory_db):
     assert plan["writes_executed"] is False
 
 
+def test_migrate_db_seed_hashes_metrics_and_rejection_evidence():
+    """
+    Verifies that scripts/migrate_db.py seeds:
+    1. Verified SHA-256 hashes for production baseline regressor and classifier artifacts,
+       matching the actual files on disk.
+    2. Authoritative controlled-comparison evaluation metrics for both production baseline
+       and rejected candidate models (including benchmark qualification tag), matching
+       artifacts/experiments/p1_controlled_retrain/evaluation_results.json when present.
+    3. Accurate candidate evaluation and rejection reasons that neither misrepresent the
+       candidate's slightly lower price RMSE ($399.3687 vs $399.4728) nor contain stale
+       metric literals.
+    """
+    import hashlib
+    import scripts.migrate_db as migrate_db
+    from scripts.migrate_db import (
+        BASELINE_MODEL_SPEC,
+        CANDIDATE_EVALUATED_REASON,
+        CANDIDATE_MODEL_SPEC,
+        CANDIDATE_REJECTION_REASON,
+    )
+
+    expected_reg_sha = "b44fba18cf2c7b51e3297e83a946d869392803a267e951a5e85ea052c63eb854"
+    expected_clf_sha = "df139c1018ed5025b1444d6597c3d98b4d7c377a898487268d18e58d253ae684"
+    expected_benchmark_tag = "REUSED HISTORICAL BENCHMARK — PRIOR MODEL SELECTION EXPOSURE"
+
+    # 1. Baseline seed hashes equal verified SHA-256 values and match production artifacts on disk
+    assert BASELINE_MODEL_SPEC["regressor_sha256"] == expected_reg_sha
+    assert BASELINE_MODEL_SPEC["classifier_sha256"] == expected_clf_sha
+
+    reg_path = Path(BASELINE_MODEL_SPEC["regressor_artifact_path"])
+    clf_path = Path(BASELINE_MODEL_SPEC["classifier_artifact_path"])
+    if reg_path.exists():
+        assert hashlib.sha256(reg_path.read_bytes()).hexdigest() == expected_reg_sha
+    if clf_path.exists():
+        assert hashlib.sha256(clf_path.read_bytes()).hexdigest() == expected_clf_sha
+
+    # 2. Seeded evaluation metrics match authoritative values and retain benchmark qualification
+    expected_baseline_metrics = {
+        "reg_price_rmse_usd": 399.4728,
+        "naive_persistence_price_rmse_usd": 398.7661,
+        "rmse_outperformance_usd": -0.7067,
+        "reg_rmse": 0.00487042,
+        "reg_mae": 0.00322086,
+        "directional_hit_rate": 0.505001,
+        "clf_accuracy_pct": 53.2581,
+        "clf_macro_f1": 0.529665,
+        "clf_log_loss": 0.691365,
+        "benchmark_tag": expected_benchmark_tag,
+    }
+    expected_candidate_metrics = {
+        "reg_price_rmse_usd": 399.3687,
+        "naive_persistence_price_rmse_usd": 398.7661,
+        "rmse_outperformance_usd": -0.6027,
+        "reg_rmse": 0.00486872,
+        "reg_mae": 0.00321975,
+        "directional_hit_rate": 0.503572,
+        "clf_accuracy_pct": 53.0294,
+        "clf_macro_f1": 0.528027,
+        "clf_log_loss": 0.691404,
+        "benchmark_tag": expected_benchmark_tag,
+    }
+
+    assert BASELINE_MODEL_SPEC["evaluation_metrics"] == expected_baseline_metrics
+    assert CANDIDATE_MODEL_SPEC["evaluation_metrics"] == expected_candidate_metrics
+
+    # Cross-check against authoritative evaluation_results.json when present on disk
+    eval_json_path = Path("artifacts/experiments/p1_controlled_retrain/evaluation_results.json")
+    if eval_json_path.exists():
+        raw_eval = json.loads(eval_json_path.read_text(encoding="utf-8"))
+        assert raw_eval["benchmark_governance_warning"] == expected_benchmark_tag
+
+        prod_reg = raw_eval["production_baseline_metrics"]["regressor"]
+        prod_clf = raw_eval["production_baseline_metrics"]["classifier"]
+        assert round(float(prod_reg["price_rmse"]), 4) == expected_baseline_metrics["reg_price_rmse_usd"]
+        assert round(float(prod_reg["naive_persistence_rmse"]), 4) == expected_baseline_metrics["naive_persistence_price_rmse_usd"]
+        assert round(float(prod_reg["rmse_outperformance_usd"]), 4) == expected_baseline_metrics["rmse_outperformance_usd"]
+        assert round(float(prod_reg["return_rmse"]), 8) == expected_baseline_metrics["reg_rmse"]
+        assert round(float(prod_reg["return_mae"]), 8) == expected_baseline_metrics["reg_mae"]
+        assert round(float(prod_reg["directional_hit_rate"]), 6) == expected_baseline_metrics["directional_hit_rate"]
+        assert round(float(prod_clf["accuracy"]) * 100.0, 4) == expected_baseline_metrics["clf_accuracy_pct"]
+        assert round(float(prod_clf["macro_f1"]), 6) == expected_baseline_metrics["clf_macro_f1"]
+        assert round(float(prod_clf["log_loss"]), 6) == expected_baseline_metrics["clf_log_loss"]
+
+        cand_reg = raw_eval["candidate_metrics"]["regressor"]
+        cand_clf = raw_eval["candidate_metrics"]["classifier"]
+        assert round(float(cand_reg["price_rmse"]), 4) == expected_candidate_metrics["reg_price_rmse_usd"]
+        assert round(float(cand_reg["naive_persistence_rmse"]), 4) == expected_candidate_metrics["naive_persistence_price_rmse_usd"]
+        assert round(float(cand_reg["rmse_outperformance_usd"]), 4) == expected_candidate_metrics["rmse_outperformance_usd"]
+        assert round(float(cand_reg["return_rmse"]), 8) == expected_candidate_metrics["reg_rmse"]
+        assert round(float(cand_reg["return_mae"]), 8) == expected_candidate_metrics["reg_mae"]
+        assert round(float(cand_reg["directional_hit_rate"]), 6) == expected_candidate_metrics["directional_hit_rate"]
+        assert round(float(cand_clf["accuracy"]) * 100.0, 4) == expected_candidate_metrics["clf_accuracy_pct"]
+        assert round(float(cand_clf["macro_f1"]), 6) == expected_candidate_metrics["clf_macro_f1"]
+        assert round(float(cand_clf["log_loss"]), 6) == expected_candidate_metrics["clf_log_loss"]
+
+    # 3. Verify rejection evidence accurately describes the comparison and contains no stale literals
+    assert "399.3687" in CANDIDATE_EVALUATED_REASON
+    assert "398.7661" in CANDIDATE_EVALUATED_REASON
+    assert "-$0.6027" in CANDIDATE_EVALUATED_REASON
+    assert "0.00486872" in CANDIDATE_EVALUATED_REASON
+    assert "0.00321975" in CANDIDATE_EVALUATED_REASON
+    assert "0.503572" in CANDIDATE_EVALUATED_REASON
+    assert "53.0294%" in CANDIDATE_EVALUATED_REASON
+    assert "0.528027" in CANDIDATE_EVALUATED_REASON
+    assert "0.691404" in CANDIDATE_EVALUATED_REASON
+
+    assert "slightly lower" in CANDIDATE_REJECTION_REASON
+    assert "$399.3687" in CANDIDATE_REJECTION_REASON
+    assert "$399.4728" in CANDIDATE_REJECTION_REASON
+    assert "both regressors underperform naive persistence ($398.7661" in CANDIDATE_REJECTION_REASON
+    assert "-$0.6027 vs baseline -$0.7067" in CANDIDATE_REJECTION_REASON
+    assert "0.503572 vs 0.505001" in CANDIDATE_REJECTION_REASON
+    assert "53.0294% vs 53.2581%" in CANDIDATE_REJECTION_REASON
+    assert "0.528027 vs 0.529665" in CANDIDATE_REJECTION_REASON
+    assert "0.691404 vs 0.691365" in CANDIDATE_REJECTION_REASON
+
+    migrate_source = Path(migrate_db.__file__).read_text(encoding="utf-8")
+    stale_literals = [
+        "b44fba18b2eb9ecfd7fbbe3efe526f72c4ca33ceaa49144519bd1eb5ce5e3898",
+        "df139c100d2ad8aa37f0bcd4bcdb8b8cd1fd9cb5c0aa5368dc0abfb890bc231f",
+        "396.2294",
+        "397.4563",
+        "395.5150",
+        "0.00547593",
+        "0.00548947",
+        "53.2152",
+        "52.5722",
+        "-72.8634",
+        "-82.9315",
+        "397.46",
+        "395.52",
+        "-82.93%",
+        "-72.86%",
+    ]
+    for stale in stale_literals:
+        assert stale not in migrate_source, f"Stale literal {stale!r} still present in scripts/migrate_db.py"
+
+
+def test_migrate_db_tx1b_seeding_rejection_state_and_promotion_safeguards():
+    """
+    Verifies that:
+    1. run_tx1b() seeds baseline model as ACTIVE and transitions p1_controlled_candidate_v1
+       through CANDIDATE (seq 1) -> EVALUATED (seq 2) -> REJECTED (seq 3) with authoritative
+       metrics and rejection evidence, leaving the candidate in REJECTED status.
+    2. Re-running run_tx1b() is idempotent when seeded metadata matches, and raises
+       SchemaDriftError if hashes, evaluation_metrics, status, or lifecycle_seq drift.
+    3. Canonical promotion safeguards forbid promoting a REJECTED model to ACTIVE and
+       forbid promoting any CANDIDATE without evaluation_metrics and an EVALUATED event.
+    """
+    from contextlib import contextmanager
+    from scripts.migrate_db import (
+        BASELINE_MODEL_SPEC,
+        CANDIDATE_EVALUATED_REASON,
+        CANDIDATE_MODEL_SPEC,
+        CANDIDATE_REJECTION_REASON,
+        run_tx1b,
+    )
+
+    class _MockResult:
+        def __init__(self, row):
+            self._row = row
+
+        def mappings(self):
+            return self
+
+        def first(self):
+            return self._row
+
+    class _FakeTx1BConn:
+        def __init__(self):
+            self.registry: Dict[str, Dict[str, Any]] = {}
+            self.events: list[Dict[str, Any]] = []
+
+        def execute(self, stmt, params=None):
+            sql = " ".join(str(stmt).split())
+            params = params or {}
+            if "pg_advisory_xact_lock" in sql or "SET LOCAL" in sql:
+                return _MockResult(None)
+            if "SELECT model_version, regressor_sha256" in sql and "FROM public.model_registry" in sql:
+                mv = params["mv"]
+                row = self.registry.get(mv)
+                return _MockResult(dict(row) if row is not None else None)
+            if "INSERT INTO public.model_registry" in sql:
+                mv = params["model_version"]
+                status = "CANDIDATE" if "'CANDIDATE'" in sql else params["current_status"]
+                eval_m = None if "NULL," in sql and ":evaluation_metrics" not in sql else json.loads(params["evaluation_metrics"])
+                self.registry[mv] = {
+                    "model_version": mv,
+                    "regressor_sha256": params["regressor_sha256"],
+                    "classifier_sha256": params["classifier_sha256"],
+                    "feature_schema_version": params["feature_schema_version"],
+                    "current_status": status,
+                    "lifecycle_seq": 1,
+                    "evaluation_metrics": eval_m,
+                }
+                return _MockResult(None)
+            if "UPDATE public.model_registry SET evaluation_metrics" in sql:
+                mv = params["mv"]
+                self.registry[mv]["evaluation_metrics"] = json.loads(params["eval_json"])
+                self.registry[mv]["lifecycle_seq"] += 1
+                return _MockResult(None)
+            if "UPDATE public.model_registry SET current_status = 'REJECTED'" in sql:
+                mv = params["mv"]
+                self.registry[mv]["current_status"] = "REJECTED"
+                self.registry[mv]["lifecycle_seq"] += 1
+                return _MockResult(None)
+            if "INSERT INTO public.model_lifecycle_events" in sql:
+                self.events.append({
+                    "model_version": params["mv"],
+                    "sql": sql,
+                    "reason": params.get("reason"),
+                    "evidence_json": json.loads(params["ev_json"]),
+                })
+                return _MockResult(None)
+            raise AssertionError(f"Unexpected SQL in run_tx1b: {sql}")
+
+    class _FakeEngine:
+        def __init__(self, conn):
+            self._conn = conn
+
+        @contextmanager
+        def begin(self):
+            yield self._conn
+
+    fake_conn = _FakeTx1BConn()
+    fake_eng = _FakeEngine(fake_conn)
+
+    # 1. Initial seeding executes 3-step state machine and leaves candidate REJECTED
+    res1 = run_tx1b(fake_eng)
+    assert res1["seeded_models"] == ["xgb_onnx_v1.0.0", "p1_controlled_candidate_v1"]
+    assert fake_conn.registry["xgb_onnx_v1.0.0"]["current_status"] == "ACTIVE"
+    assert fake_conn.registry["xgb_onnx_v1.0.0"]["evaluation_metrics"] == BASELINE_MODEL_SPEC["evaluation_metrics"]
+    assert fake_conn.registry["p1_controlled_candidate_v1"]["current_status"] == "REJECTED"
+    assert fake_conn.registry["p1_controlled_candidate_v1"]["lifecycle_seq"] == 3
+    assert fake_conn.registry["p1_controlled_candidate_v1"]["evaluation_metrics"] == CANDIDATE_MODEL_SPEC["evaluation_metrics"]
+
+    cand_events = [e for e in fake_conn.events if e["model_version"] == "p1_controlled_candidate_v1"]
+    assert len(cand_events) == 3
+    assert cand_events[1]["reason"] == CANDIDATE_EVALUATED_REASON
+    assert cand_events[1]["evidence_json"] == CANDIDATE_MODEL_SPEC["evaluation_metrics"]
+    assert cand_events[2]["reason"] == CANDIDATE_REJECTION_REASON
+    assert cand_events[2]["evidence_json"] == CANDIDATE_MODEL_SPEC["evaluation_metrics"]
+
+    # 2. Second run is an idempotent no-op
+    res2 = run_tx1b(fake_eng)
+    assert res2["seeded_models"] == []
+
+    # 3. Drift in baseline hash or metrics raises SchemaDriftError
+    fake_conn.registry["xgb_onnx_v1.0.0"]["regressor_sha256"] = "stale_hash"
+    with pytest.raises(SchemaDriftError, match="Existing baseline model 'xgb_onnx_v1.0.0'"):
+        run_tx1b(fake_eng)
+    fake_conn.registry["xgb_onnx_v1.0.0"]["regressor_sha256"] = BASELINE_MODEL_SPEC["regressor_sha256"]
+
+    fake_conn.registry["xgb_onnx_v1.0.0"]["evaluation_metrics"] = {"reg_price_rmse_usd": 396.2294}
+    with pytest.raises(SchemaDriftError, match="Existing baseline model 'xgb_onnx_v1.0.0'"):
+        run_tx1b(fake_eng)
+    fake_conn.registry["xgb_onnx_v1.0.0"]["evaluation_metrics"] = BASELINE_MODEL_SPEC["evaluation_metrics"]
+
+    # 4. Drift in candidate status or metrics raises SchemaDriftError
+    fake_conn.registry["p1_controlled_candidate_v1"]["current_status"] = "CANDIDATE"
+    with pytest.raises(SchemaDriftError, match="Existing candidate model 'p1_controlled_candidate_v1'"):
+        run_tx1b(fake_eng)
+    fake_conn.registry["p1_controlled_candidate_v1"]["current_status"] = "REJECTED"
+
+    fake_conn.registry["p1_controlled_candidate_v1"]["evaluation_metrics"] = {"reg_price_rmse_usd": 397.4563}
+    with pytest.raises(SchemaDriftError, match="Existing candidate model 'p1_controlled_candidate_v1'"):
+        run_tx1b(fake_eng)
+
+    # 5. Verify canonical promotion safeguards in CANONICAL_FUNCTIONS
+    func_map = {f.name: f.expected_prosrc for f in CANONICAL_FUNCTIONS}
+    guard_write_sql = func_map["mudra_guard_model_registry_write"]
+    validate_event_sql = func_map["mudra_validate_lifecycle_event_insert"]
+
+    # Candidate cannot be promoted without non-null evaluation_metrics and an EVALUATED lifecycle event
+    assert (
+        "IF NEW.current_status = 'ACTIVE' AND (OLD.evaluation_metrics IS NULL OR NEW.evaluation_metrics IS NULL OR NOT eval_event_exists) THEN"
+        in guard_write_sql
+    )
+    assert (
+        "PROMOTED lifecycle event rejected for %: candidate must have non-null evaluation_metrics and a prior EVALUATED lifecycle event."
+        in validate_event_sql
+    )
+    # REJECTED models can only transition to ARCHIVED, never ACTIVE
+    assert "(OLD.current_status = 'REJECTED' AND NEW.current_status = 'ARCHIVED')" in guard_write_sql
+    assert "NEW.from_status NOT IN ('CANDIDATE', 'ARCHIVED', 'ROLLED_BACK') OR NEW.to_status != 'ACTIVE'" in validate_event_sql
+
+
 # =============================================================================
 # 2. PostgreSQL Model Governance & Catalog Integration Tests (12 Test Suites)
 # =============================================================================
@@ -1074,6 +1361,47 @@ def test_pg_model_registry_immutability_and_state_machine(pg_governance_engine):
     with pytest.raises(DBAPIError, match="No-op update on model_registry"):
         with pg_governance_engine.begin() as conn:
             conn.execute(text("UPDATE public.model_registry SET current_status = 'ACTIVE' WHERE model_version = 'xgb_onnx_v1.0.0'"))
+
+    # 4b. Verify seeded baseline & rejected candidate metadata and confirm REJECTED candidate cannot be promoted to ACTIVE
+    from scripts.migrate_db import (
+        BASELINE_MODEL_SPEC,
+        CANDIDATE_EVALUATED_REASON,
+        CANDIDATE_MODEL_SPEC,
+        CANDIDATE_REJECTION_REASON,
+    )
+    with pg_governance_engine.connect() as conn:
+        base_seed = conn.execute(
+            text("SELECT regressor_sha256, classifier_sha256, current_status, evaluation_metrics FROM public.model_registry WHERE model_version = 'xgb_onnx_v1.0.0'")
+        ).mappings().one()
+        assert base_seed["regressor_sha256"] == BASELINE_MODEL_SPEC["regressor_sha256"]
+        assert base_seed["classifier_sha256"] == BASELINE_MODEL_SPEC["classifier_sha256"]
+        assert base_seed["current_status"] == "ACTIVE"
+        assert base_seed["evaluation_metrics"] == BASELINE_MODEL_SPEC["evaluation_metrics"]
+
+        cand_seed = conn.execute(
+            text("SELECT regressor_sha256, classifier_sha256, current_status, lifecycle_seq, evaluation_metrics FROM public.model_registry WHERE model_version = 'p1_controlled_candidate_v1'")
+        ).mappings().one()
+        assert cand_seed["regressor_sha256"] == CANDIDATE_MODEL_SPEC["regressor_sha256"]
+        assert cand_seed["classifier_sha256"] == CANDIDATE_MODEL_SPEC["classifier_sha256"]
+        assert cand_seed["current_status"] == "REJECTED"
+        assert int(cand_seed["lifecycle_seq"]) == 3
+        assert cand_seed["evaluation_metrics"] == CANDIDATE_MODEL_SPEC["evaluation_metrics"]
+
+        cand_events = conn.execute(
+            text("SELECT lifecycle_seq, event_type, to_status, reason FROM public.model_lifecycle_events WHERE model_version = 'p1_controlled_candidate_v1' ORDER BY lifecycle_seq ASC")
+        ).mappings().all()
+        assert len(cand_events) == 3
+        assert cand_events[1]["event_type"] == "EVALUATED"
+        assert cand_events[1]["reason"] == CANDIDATE_EVALUATED_REASON
+        assert cand_events[2]["event_type"] == "REJECTED"
+        assert cand_events[2]["to_status"] == "REJECTED"
+        assert cand_events[2]["reason"] == CANDIDATE_REJECTION_REASON
+
+    with pytest.raises(DBAPIError, match="Invalid model_registry status transition for p1_controlled_candidate_v1: REJECTED -> ACTIVE"):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(
+                text("UPDATE public.model_registry SET current_status = 'ACTIVE' WHERE model_version = 'p1_controlled_candidate_v1'")
+            )
 
     # 5. Direct-SQL negative test: candidate cannot be promoted to ACTIVE without evaluation_metrics and EVALUATED event
     with pytest.raises(DBAPIError, match="Cannot promote candidate model"):
