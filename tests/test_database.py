@@ -4,9 +4,11 @@ and Model Governance & Catalog Verification.
 Runs in-memory (sqlite:///:memory:) for unit tests, and uses isolated disposable
 PostgreSQL (via TEST_DATABASE_URL) for PostgreSQL catalog, trigger, and constraint suites.
 """
+import ast
 import json
 import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, Generator, Optional
 from urllib.parse import urlsplit
 import pytest
@@ -16,6 +18,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from config import MIN_HURDLE_PCT, PORTFOLIO_ADVISORY_LOCK_ID
 from src.api.schemas import PortfolioSummaryResponse, ReconciliationSummaryResponse
+import src.database as db_pkg
+import src.database.connection as db_conn_mod
 from src.database.connection import (
     CANONICAL_CONSTRAINTS,
     CANONICAL_FOREIGN_KEYS,
@@ -203,8 +207,92 @@ def pg_governance_engine():
 
 
 # =============================================================================
-# 1. In-Memory SQLite Regression & Safety Guard Tests (19 Tests)
+# 1. In-Memory SQLite Regression & Safety Guard Tests (20 Tests)
 # =============================================================================
+
+def test_database_module_integrity_and_no_self_import():
+    """
+    Guards against accidental module replacement or circular self-imports in
+    src/database/connection.py and verifies all expected public exports on
+    src.database.connection and src.database. Also verifies create_db_engine()
+    contains zero implicit create_all() DDL calls.
+    """
+    conn_path = Path(db_conn_mod.__file__).resolve()
+    this_test_path = Path(__file__).resolve()
+    assert conn_path != this_test_path
+
+    conn_source = conn_path.read_text(encoding="utf-8")
+    test_source = this_test_path.read_text(encoding="utf-8")
+    assert conn_source != test_source, "src/database/connection.py must never be overwritten with test_database.py!"
+
+    tree = ast.parse(conn_source, filename=str(conn_path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            assert node.module != "src.database.connection", (
+                "src/database/connection.py must never import from src.database.connection (circular self-import)"
+            )
+        if isinstance(node, ast.FunctionDef) and node.name == "create_db_engine":
+            for child in ast.walk(node):
+                if isinstance(child, ast.Attribute):
+                    assert child.attr != "create_all", (
+                        "create_db_engine() must not execute Base.metadata.create_all() implicitly"
+                    )
+
+    expected_conn_exports = {
+        "SchemaDriftError",
+        "FunctionSpec",
+        "TriggerSpec",
+        "CANONICAL_TABLE_COLUMNS",
+        "CANONICAL_FOREIGN_KEYS",
+        "CANONICAL_CONSTRAINTS",
+        "CANONICAL_INDEXES",
+        "CANONICAL_FUNCTIONS",
+        "CANONICAL_TRIGGERS",
+        "normalize_sql",
+        "normalize_pg_predicate",
+        "ensure_canonical_function",
+        "ensure_canonical_trigger",
+        "verify_db_schema",
+        "get_database_url",
+        "create_db_engine",
+        "engine",
+        "SessionLocal",
+        "get_db",
+        "has_tick_id_column",
+        "init_db",
+        "test_connection",
+    }
+    for sym in expected_conn_exports:
+        assert hasattr(db_conn_mod, sym), f"Missing symbol {sym} on src.database.connection"
+
+    for sym in db_pkg.__all__:
+        assert hasattr(db_pkg, sym), f"Missing package export {sym} on src.database"
+
+    # Verify cold _TICK_ID_COLUMN_CACHE lookup inside an active SQLite SingletonThreadPool
+    # transaction inspects via session.connection() and never rolls back uncommitted MarketTick rows
+    from src.database.connection import _TICK_ID_COLUMN_CACHE
+    mem_engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(bind=mem_engine)
+    _TICK_ID_COLUMN_CACHE.pop(id(mem_engine), None)
+    MemSession = sessionmaker(bind=mem_engine)
+    with MemSession() as s:
+        t_row = MarketTick(
+            timestamp=datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc),
+            open=60000.0,
+            high=60100.0,
+            low=59900.0,
+            close=60050.0,
+            volume=10.0,
+        )
+        s.add(t_row)
+        s.flush()
+        _ = s.execute(select(PaperPortfolio)).scalars().all()
+        s.commit()
+    with MemSession() as s_check:
+        persisted_ticks = s_check.execute(select(MarketTick)).scalars().all()
+        assert len(persisted_ticks) == 1
+    mem_engine.dispose()
+
 
 def test_table_creation_and_inspection(in_memory_db):
     """Verifies that all registered tables are created in the database schema."""
@@ -762,16 +850,34 @@ def test_worker_startup_uses_read_only_verify_db_schema_and_fails_closed_on_drif
 
     init_called = []
     verify_called = []
+    outbox_called = []
     sync_called = []
 
     monkeypatch.setattr(db_conn, "test_connection", lambda: (True, "PostgreSQL 16.x", 1.2))
-    monkeypatch.setattr(db_conn, "init_db", worker._ORIGINAL_INIT_DB)
+    monkeypatch.setattr(
+        db_conn,
+        "init_db",
+        lambda *args, **kwargs: init_called.append(True),
+    )
+    if hasattr(worker, "init_db"):
+        monkeypatch.setattr(
+            worker,
+            "init_db",
+            lambda *args, **kwargs: init_called.append(True),
+        )
 
     def _failing_verify(*args, **kwargs):
         verify_called.append(True)
         raise SchemaDriftError("Required table 'model_registry' is missing from database schema.")
 
     monkeypatch.setattr(db_conn, "verify_db_schema", _failing_verify)
+    if hasattr(worker, "verify_db_schema"):
+        monkeypatch.setattr(worker, "verify_db_schema", _failing_verify)
+    monkeypatch.setattr(
+        worker,
+        "flush_outbox",
+        lambda *args, **kwargs: outbox_called.append(True) or 0,
+    )
     monkeypatch.setattr(
         worker,
         "sync_hourly_quant_cycle",
@@ -781,6 +887,7 @@ def test_worker_startup_uses_read_only_verify_db_schema_and_fails_closed_on_drif
     assert worker.run_worker(force=False) is False
     assert len(verify_called) == 1
     assert len(init_called) == 0
+    assert len(outbox_called) == 0
     assert len(sync_called) == 0
 
 
