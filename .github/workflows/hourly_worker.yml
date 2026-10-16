@@ -1,8 +1,6 @@
 name: Mudra 24/7 Hourly Quant Worker
 
 on:
-  schedule:
-    - cron: '5 * * * *'  # Autonomous 24/7 trigger at :05 past each hour (5m post-close buffer)
   workflow_dispatch:     # On-demand manual execution & external cron-job.org webhook trigger
 
 concurrency:
