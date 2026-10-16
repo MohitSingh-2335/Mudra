@@ -8,6 +8,7 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Generator, Optional
+from urllib.parse import urlsplit
 import pytest
 from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -53,32 +54,94 @@ from src.engine.reconciliation import (
 
 
 # =============================================================================
-# PostgreSQL Test Service Helpers & Safety Guards
+# PostgreSQL Test Service Helpers & Fail-Closed Disposable Safety Guards
 # =============================================================================
+
+_ALLOWED_DISPOSABLE_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "postgres"})
+_FORBIDDEN_DB_SUBSTRINGS = (
+    "neon.tech",
+    "neondb",
+    "amazonaws.com",
+    "rds.",
+    "supabase",
+    "railway",
+    "render.com",
+    "cockroach",
+    "digitalocean",
+    "azure.com",
+    "gcp",
+)
+_FORBIDDEN_DB_NAMES = frozenset(
+    {"postgres", "mudra", "neondb", "defaultdb", "main", "production", "prod", "mudra_prod"}
+)
+
 
 def get_safe_test_postgres_url() -> Optional[str]:
     """
-    Retrieves the isolated test PostgreSQL URL from environment.
-    Strictly refuses to run against live/production Neon databases.
+    Retrieves and validates the isolated disposable test PostgreSQL URL from environment.
+    Fails closed (raises RuntimeError) before any database connection or destructive SQL
+    if the URL is ambiguous, remote, matches DATABASE_URL, or lacks an explicit '*test*'
+    database name on a local/service-container host.
     """
-    url = os.getenv("TEST_DATABASE_URL")
-    if not url or url.strip() == "":
+    raw_url = os.getenv("TEST_DATABASE_URL")
+    if not raw_url or raw_url.strip() == "":
         return None
 
+    url = raw_url.strip()
     lower_url = url.lower()
-    if "neon.tech" in lower_url or "neondb" in lower_url:
+
+    if not lower_url.startswith(("postgresql://", "postgresql+psycopg2://", "postgres://")):
         raise RuntimeError(
-            "SAFETY VIOLATION: TEST_DATABASE_URL must never point to live Neon database!"
+            f"SAFETY VIOLATION: TEST_DATABASE_URL must use a postgresql:// scheme (got {url[:24]!r})."
         )
 
-    if not lower_url.startswith("postgres"):
-        return None
+    for forbidden in _FORBIDDEN_DB_SUBSTRINGS:
+        if forbidden in lower_url:
+            raise RuntimeError(
+                f"SAFETY VIOLATION: TEST_DATABASE_URL contains forbidden cloud/production marker '{forbidden}'!"
+            )
 
-    return url.strip()
+    prod_url = os.getenv("DATABASE_URL")
+    if prod_url and prod_url.strip():
+        norm_test = lower_url.replace("postgresql+psycopg2://", "postgresql://").replace("postgres://", "postgresql://")
+        norm_prod = (
+            prod_url.strip()
+            .lower()
+            .replace("postgresql+psycopg2://", "postgresql://")
+            .replace("postgres://", "postgresql://")
+        )
+        if norm_test == norm_prod:
+            raise RuntimeError(
+                "SAFETY VIOLATION: TEST_DATABASE_URL must never equal DATABASE_URL!"
+            )
+
+    parsed = urlsplit(url)
+    hostname = (parsed.hostname or "").lower()
+    if hostname not in _ALLOWED_DISPOSABLE_HOSTS:
+        raise RuntimeError(
+            f"SAFETY VIOLATION: TEST_DATABASE_URL host '{hostname}' is not in the disposable host allowlist "
+            f"{sorted(_ALLOWED_DISPOSABLE_HOSTS)}."
+        )
+
+    db_name = (parsed.path or "").lstrip("/").split("/")[0].lower()
+    if not db_name or db_name in _FORBIDDEN_DB_NAMES or "test" not in db_name:
+        raise RuntimeError(
+            f"SAFETY VIOLATION: TEST_DATABASE_URL database name '{db_name}' must explicitly contain 'test' "
+            "and must never target a default or production database."
+        )
+
+    username = (parsed.username or "").lower()
+    if not username or username in {"postgres", "neondb_owner", "admin", "root", "prod"}:
+        raise RuntimeError(
+            f"SAFETY VIOLATION: TEST_DATABASE_URL username '{username}' must be a dedicated test user "
+            "(e.g., 'mudra_test_user'), not a superuser or production role."
+        )
+
+    return url
 
 
 def is_postgres_available() -> bool:
-    """Verifies that an isolated PostgreSQL test service is reachable."""
+    """Verifies that an isolated disposable PostgreSQL test service is reachable."""
     url = get_safe_test_postgres_url()
     if not url:
         return False
@@ -117,7 +180,8 @@ def in_memory_db():
 def pg_governance_engine():
     """
     Provides an isolated, cleanly migrated disposable PostgreSQL engine for model governance tests.
-    Skips automatically if TEST_DATABASE_URL is not configured.
+    Validates disposable-database safety before connecting, and skips automatically if
+    TEST_DATABASE_URL is not configured.
     """
     url = get_safe_test_postgres_url()
     if not url or not is_postgres_available():
@@ -139,7 +203,7 @@ def pg_governance_engine():
 
 
 # =============================================================================
-# 1. In-Memory SQLite Regression Tests (16 Tests)
+# 1. In-Memory SQLite Regression & Safety Guard Tests (19 Tests)
 # =============================================================================
 
 def test_table_creation_and_inspection(in_memory_db):
@@ -645,6 +709,94 @@ def test_reconciliation_preserves_existing_reconciliation_records(in_memory_db):
     assert len(rec_second) == 0  # Already reconciled, zero duplicates created
 
 
+def test_get_safe_test_postgres_url_rejects_unsafe_configs(monkeypatch):
+    """
+    Proves that get_safe_test_postgres_url() fails closed before any connection or
+    destructive DROP SCHEMA statement can run when given production, remote, or
+    non-test database URLs, while accepting the dedicated CI disposable service URL.
+    """
+    # 1. Unset or empty -> returns None (skips cleanly)
+    monkeypatch.delenv("TEST_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert get_safe_test_postgres_url() is None
+
+    monkeypatch.setenv("TEST_DATABASE_URL", "   ")
+    assert get_safe_test_postgres_url() is None
+
+    # 2. Valid CI disposable PostgreSQL URL -> accepted
+    valid_ci_url = "postgresql+psycopg2://mudra_test_user:mudra_test_password@localhost:5432/mudra_test_db"
+    monkeypatch.setenv("TEST_DATABASE_URL", valid_ci_url)
+    assert get_safe_test_postgres_url() == valid_ci_url
+
+    # 3. Matching DATABASE_URL -> rejected fail-closed
+    monkeypatch.setenv("DATABASE_URL", "postgresql://mudra_test_user:mudra_test_password@localhost:5432/mudra_test_db")
+    with pytest.raises(RuntimeError, match="must never equal DATABASE_URL"):
+        get_safe_test_postgres_url()
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    # 4. Neon / cloud / remote hosts -> rejected fail-closed
+    unsafe_urls = [
+        "postgresql://neondb_owner:secret@ep-cool-Frog-123.us-east-2.aws.neon.tech/neondb?sslmode=require",
+        "postgresql://mudra_test_user:pass@db.internal.production.org:5432/mudra_test_db",
+        "postgresql://mudra_test_user:pass@192.168.1.50:5432/mudra_test_db",
+        "postgresql://mudra_test_user:pass@localhost:5432/mudra",
+        "postgresql://mudra_test_user:pass@localhost:5432/postgres",
+        "postgresql://mudra_test_user:pass@localhost:5432/production",
+        "postgresql://postgres:pass@localhost:5432/mudra_test_db",
+        "sqlite:///data/mudra_operational.db",
+    ]
+    for bad_url in unsafe_urls:
+        monkeypatch.setenv("TEST_DATABASE_URL", bad_url)
+        with pytest.raises(RuntimeError, match="SAFETY VIOLATION"):
+            get_safe_test_postgres_url()
+
+
+def test_worker_startup_uses_read_only_verify_db_schema_and_fails_closed_on_drift(monkeypatch):
+    """
+    Verifies that normal worker startup calls read-only verify_db_schema(), never calls
+    init_db(), and aborts before flush_outbox() or sync_hourly_quant_cycle() when schema
+    verification fails.
+    """
+    import scripts.run_hourly_worker as worker
+    import src.database.connection as db_conn
+
+    init_called = []
+    verify_called = []
+    sync_called = []
+
+    monkeypatch.setattr(db_conn, "test_connection", lambda: (True, "PostgreSQL 16.x", 1.2))
+    monkeypatch.setattr(db_conn, "init_db", worker._ORIGINAL_INIT_DB)
+
+    def _failing_verify(*args, **kwargs):
+        verify_called.append(True)
+        raise SchemaDriftError("Required table 'model_registry' is missing from database schema.")
+
+    monkeypatch.setattr(db_conn, "verify_db_schema", _failing_verify)
+    monkeypatch.setattr(
+        worker,
+        "sync_hourly_quant_cycle",
+        lambda force=False: (sync_called.append(True) or True, "Synced", {}),
+    )
+
+    assert worker.run_worker(force=False) is False
+    assert len(verify_called) == 1
+    assert len(init_called) == 0
+    assert len(sync_called) == 0
+
+
+def test_migrate_db_defaults_to_read_only_dry_run(in_memory_db):
+    """
+    Verifies that scripts/migrate_db.py defaults to read-only dry-run mode (writes_executed=False)
+    when invoked without --execute.
+    """
+    _, engine = in_memory_db
+    from scripts.migrate_db import run_migration
+
+    plan = run_migration(target_engine=engine)
+    assert plan["mode"] == "DRY_RUN"
+    assert plan["writes_executed"] is False
+
+
 # =============================================================================
 # 2. PostgreSQL Model Governance & Catalog Integration Tests (12 Test Suites)
 # =============================================================================
@@ -764,16 +916,47 @@ def test_pg_triggers_catalog(pg_governance_engine):
 
 
 def test_pg_model_registry_immutability_and_state_machine(pg_governance_engine):
-    """Suite 7: Verifies DELETE prevention, provenance immutability, no-op rejection, and unevaluated promotion rejection."""
-    # 1. DELETE is strictly forbidden
-    with pytest.raises(DBAPIError, match="strictly append-only"):
+    """
+    Suite 7: Verifies row-level DELETE prevention (on both referenced and unreferenced rows),
+    standalone vs. multi-table TRUNCATE protection, provenance immutability, no-op rejection,
+    and unevaluated candidate promotion rejection.
+    """
+    # 1a. Row-level DELETE on a referenced model_registry row is blocked by trg_mr_no_delete
+    with pytest.raises(DBAPIError, match="model_registry is strictly append-only; DELETE operations are forbidden"):
         with pg_governance_engine.begin() as conn:
             conn.execute(text("DELETE FROM public.model_registry WHERE model_version = 'xgb_onnx_v1.0.0'"))
 
-    # 2. TRUNCATE is strictly forbidden
-    with pytest.raises(DBAPIError, match="strictly append-only"):
+    # 1b. Row-level DELETE on an unreferenced model_registry row (zero FK children) is also blocked by trg_mr_no_delete
+    with pytest.raises(DBAPIError, match="model_registry is strictly append-only; DELETE operations are forbidden"):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO public.model_registry (
+                        model_version, regressor_artifact_path, regressor_sha256,
+                        classifier_artifact_path, classifier_sha256, feature_schema_version,
+                        target_definition, current_status
+                    ) VALUES (
+                        'unreferenced_cand_v1', 'p1', 's1', 'p2', 's2', 'v1_39features', 't1', 'CANDIDATE'
+                    )
+                """)
+            )
+            conn.execute(text("DELETE FROM public.model_registry WHERE model_version = 'unreferenced_cand_v1'"))
+
+    # 2a. Standalone TRUNCATE on model_registry is rejected by PostgreSQL's FK reference check prior to trigger execution
+    with pytest.raises(DBAPIError, match="cannot truncate a table referenced in a foreign key constraint"):
         with pg_governance_engine.begin() as conn:
             conn.execute(text("TRUNCATE TABLE public.model_registry"))
+
+    # 2b. Multi-table TRUNCATE including all referencing tables (without CASCADE) passes PostgreSQL's FK check
+    # and is rejected by statement-level trigger trg_mr_no_truncate
+    with pytest.raises(DBAPIError, match="model_registry is strictly append-only; TRUNCATE operations are forbidden"):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "TRUNCATE TABLE public.model_registry, public.model_lifecycle_events, "
+                    "public.model_predictions, public.prediction_investigations"
+                )
+            )
 
     # 3. Provenance fields are immutable
     with pytest.raises(DBAPIError, match="Provenance fields in model_registry are immutable"):
@@ -816,18 +999,23 @@ def test_pg_model_registry_immutability_and_state_machine(pg_governance_engine):
 
 
 def test_pg_lifecycle_event_synchronization_and_audit(pg_governance_engine):
-    """Suite 8: Verifies model_lifecycle_events is append-only and enforces atomic audit sync."""
+    """Suite 8: Verifies model_lifecycle_events is append-only (UPDATE, DELETE, TRUNCATE) and enforces atomic audit sync."""
     # 1. UPDATE on lifecycle events is forbidden
-    with pytest.raises(DBAPIError, match="strictly append-only"):
+    with pytest.raises(DBAPIError, match="model_lifecycle_events is strictly append-only; UPDATE operations are forbidden"):
         with pg_governance_engine.begin() as conn:
             conn.execute(text("UPDATE public.model_lifecycle_events SET actor = 'tampered' WHERE model_version = 'xgb_onnx_v1.0.0'"))
 
     # 2. DELETE on lifecycle events is forbidden
-    with pytest.raises(DBAPIError, match="strictly append-only"):
+    with pytest.raises(DBAPIError, match="model_lifecycle_events is strictly append-only; DELETE operations are forbidden"):
         with pg_governance_engine.begin() as conn:
             conn.execute(text("DELETE FROM public.model_lifecycle_events WHERE model_version = 'xgb_onnx_v1.0.0'"))
 
-    # 3. Unsynchronized status transition violates deferred audit trigger
+    # 3. TRUNCATE on lifecycle events (leaf table with no incoming FKs) is blocked by trg_mle_no_truncate
+    with pytest.raises(DBAPIError, match="model_lifecycle_events is strictly append-only; TRUNCATE operations are forbidden"):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(text("TRUNCATE TABLE public.model_lifecycle_events"))
+
+    # 4. Unsynchronized status transition violates deferred audit trigger
     with pytest.raises(DBAPIError, match="Atomic lifecycle audit violation"):
         with pg_governance_engine.begin() as conn:
             # Transition ACTIVE -> ARCHIVED on model_registry without adding corresponding SUPERSEDED/ARCHIVED event
@@ -917,10 +1105,15 @@ def test_pg_reconciliation_all_or_nothing_and_immutability(pg_governance_engine)
             """)
         )
 
-    # 1. DELETE on model_predictions is strictly forbidden
-    with pytest.raises(DBAPIError, match="strictly append-only"):
+    # 1a. DELETE on model_predictions is strictly forbidden by trg_model_predictions_no_delete
+    with pytest.raises(DBAPIError, match="model_predictions is strictly append-only; DELETE operations are forbidden"):
         with pg_governance_engine.begin() as conn:
             conn.execute(text("DELETE FROM public.model_predictions WHERE id = 5001"))
+
+    # 1b. TRUNCATE on model_predictions (with referencing table) is strictly forbidden by trg_model_predictions_no_truncate
+    with pytest.raises(DBAPIError, match="model_predictions is strictly append-only; TRUNCATE operations are forbidden"):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(text("TRUNCATE TABLE public.model_predictions, public.prediction_investigations"))
 
     # 2. Point-in-time forecast fields are immutable on update
     with pytest.raises(DBAPIError, match="Point-in-time forecast fields in model_predictions are immutable"):
