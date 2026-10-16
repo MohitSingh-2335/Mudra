@@ -2,7 +2,7 @@
 """
 Deterministic Unit & Regression Tests for Mudra Hourly Worker Lifecycle,
 Exit Code Contracts, and Durable Outbox Processing.
-Verify External Scheduler Integration, Then Fix Worker Reliability.
+TASK-P1-05.3: Verify External Scheduler Integration, Then Fix Worker Reliability.
 """
 
 import json
@@ -102,10 +102,11 @@ def test_worker_failure_on_unhandled_exception(isolated_db, temp_outbox, monkeyp
 
 
 def test_worker_failure_on_init_db_error(isolated_db, temp_outbox, monkeypatch):
-    """Verifies that database schema initialization failure returns False (exit 1)."""
-    def _crashing_init(target_engine=None):
+    """Verifies that database schema verification/initialization failure at startup returns False (exit 1)."""
+    def _crashing_init(target_engine=None, *args, **kwargs):
         raise RuntimeError("PostgreSQL relation creation failure")
 
+    monkeypatch.setattr("src.database.connection.verify_db_schema", _crashing_init)
     monkeypatch.setattr("src.database.connection.init_db", _crashing_init)
     assert worker.run_worker(force=False) is False
 
@@ -821,7 +822,7 @@ def test_has_tick_id_column_and_fallback_on_legacy_schema():
 
 
 # -----------------------------------------------------------------------------
-# 4. Candle Gap Detection & Historical Backfill Contracts
+# 4. Candle Gap Detection & Historical Backfill Contracts (TASK-P1-05.7)
 # -----------------------------------------------------------------------------
 
 def test_backfill_empty_database_bootstrap_inserts_zero_historical_candles(isolated_db, monkeypatch):
@@ -1761,4 +1762,3 @@ def test_backfill_inserts_window_start_when_prior_tick_predates_window_and_later
 
     orders = session.execute(select(PaperPortfolio).where(PaperPortfolio.tick_id.isnot(None))).scalars().all()
     assert [o.tick_id for o in orders] == [tick_13_db.id]
-
