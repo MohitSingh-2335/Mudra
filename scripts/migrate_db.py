@@ -44,9 +44,9 @@ MIGRATION_ADVISORY_LOCK_ID = 888002
 BASELINE_MODEL_SPEC: Dict[str, Any] = {
     "model_version": "xgb_onnx_v1.0.0",
     "regressor_artifact_path": "artifacts/models/best_regressor_model.pkl",
-    "regressor_sha256": "b44fba18b2eb9ecfd7fbbe3efe526f72c4ca33ceaa49144519bd1eb5ce5e3898",
+    "regressor_sha256": "b44fba18cf2c7b51e3297e83a946d869392803a267e951a5e85ea052c63eb854",
     "classifier_artifact_path": "artifacts/models/best_classifier_model.pkl",
-    "classifier_sha256": "df139c100d2ad8aa37f0bcd4bcdb8b8cd1fd9cb5c0aa5368dc0abfb890bc231f",
+    "classifier_sha256": "df139c1018ed5025b1444d6597c3d98b4d7c377a898487268d18e58d253ae684",
     "feature_schema_version": "v1_39features",
     "target_definition": "next_1h_close_return_pct_and_binary_direction",
     "training_dataset_path": "data/processed/featured_btc_data.csv",
@@ -58,12 +58,15 @@ BASELINE_MODEL_SPEC: Dict[str, Any] = {
         "note": "Historical baseline production model trained prior to point-in-time causality remediation.",
     },
     "evaluation_metrics": {
-        "reg_rmse": 0.00547593,
-        "reg_price_rmse_usd": 396.2294,
-        "reg_r2": -0.003025,
-        "clf_accuracy_pct": 53.2152,
-        "clf_roc_auc": 0.537803,
-        "net_return_pct_at_7bps": -72.8634,
+        "reg_price_rmse_usd": 399.4728,
+        "naive_persistence_price_rmse_usd": 398.7661,
+        "rmse_outperformance_usd": -0.7067,
+        "reg_rmse": 0.00487042,
+        "reg_mae": 0.00322086,
+        "directional_hit_rate": 0.505001,
+        "clf_accuracy_pct": 53.2581,
+        "clf_macro_f1": 0.529665,
+        "clf_log_loss": 0.691365,
         "benchmark_tag": "REUSED HISTORICAL BENCHMARK — PRIOR MODEL SELECTION EXPOSURE",
     },
     "code_revision_sha": "e46a586",
@@ -93,18 +96,34 @@ CANDIDATE_MODEL_SPEC: Dict[str, Any] = {
         "test_end": "2026-07-06T08:00:00",
     },
     "evaluation_metrics": {
-        "reg_rmse": 0.00548947,
-        "reg_price_rmse_usd": 397.4563,
-        "reg_r2": -0.007994,
-        "naive_persistence_price_rmse_usd": 395.5150,
-        "clf_accuracy_pct": 52.5722,
-        "clf_roc_auc": 0.536421,
-        "net_return_pct_at_7bps": -82.9315,
-        "total_trades": 2675,
+        "reg_price_rmse_usd": 399.3687,
+        "naive_persistence_price_rmse_usd": 398.7661,
+        "rmse_outperformance_usd": -0.6027,
+        "reg_rmse": 0.00486872,
+        "reg_mae": 0.00321975,
+        "directional_hit_rate": 0.503572,
+        "clf_accuracy_pct": 53.0294,
+        "clf_macro_f1": 0.528027,
+        "clf_log_loss": 0.691404,
         "benchmark_tag": "REUSED HISTORICAL BENCHMARK — PRIOR MODEL SELECTION EXPOSURE",
     },
     "code_revision_sha": "99a27e297d3f54c91fdc2d170a05de536ec97fed",
 }
+
+CANDIDATE_EVALUATED_REASON = (
+    "Out-of-sample benchmark evaluation completed on 6,998 holdout rows "
+    "(price RMSE=$399.3687 vs naive persistence $398.7661, RMSE outperformance=-$0.6027, "
+    "return RMSE=0.00486872, return MAE=0.00321975, directional hit rate=0.503572; "
+    "classifier accuracy=53.0294%, macro F1=0.528027, log loss=0.691404)."
+)
+
+CANDIDATE_REJECTION_REASON = (
+    "Rejected candidate promotion: although candidate regressor price RMSE ($399.3687) is slightly lower "
+    "than production baseline ($399.4728), both regressors underperform naive persistence ($398.7661; "
+    "candidate outperformance -$0.6027 vs baseline -$0.7067) with lower directional hit rate "
+    "(0.503572 vs 0.505001), and candidate classifier underperforms baseline across accuracy "
+    "(53.0294% vs 53.2581%), macro F1 (0.528027 vs 0.529665), and log loss (0.691404 vs 0.691365)."
+)
 
 
 # Base 5 historical tables DDL (used only if bootstrapping an empty disposable PostgreSQL database)
@@ -516,7 +535,8 @@ def run_tx1b(target_engine: Engine) -> Dict[str, Any]:
         base_row = conn.execute(
             text("""
                 SELECT model_version, regressor_sha256, classifier_sha256,
-                       feature_schema_version, current_status, lifecycle_seq
+                       feature_schema_version, current_status, lifecycle_seq,
+                       evaluation_metrics
                 FROM public.model_registry
                 WHERE model_version = :mv
             """),
@@ -565,14 +585,20 @@ def run_tx1b(target_engine: Engine) -> Dict[str, Any]:
             )
             seeded_models.append(BASELINE_MODEL_SPEC["model_version"])
         else:
+            live_base_metrics = (
+                json.loads(base_row["evaluation_metrics"])
+                if isinstance(base_row.get("evaluation_metrics"), str)
+                else base_row.get("evaluation_metrics")
+            )
             if (
                 base_row["regressor_sha256"] != BASELINE_MODEL_SPEC["regressor_sha256"]
                 or base_row["classifier_sha256"] != BASELINE_MODEL_SPEC["classifier_sha256"]
                 or base_row["feature_schema_version"] != BASELINE_MODEL_SPEC["feature_schema_version"]
                 or base_row["current_status"] != "ACTIVE"
+                or live_base_metrics != BASELINE_MODEL_SPEC["evaluation_metrics"]
             ):
                 raise SchemaDriftError(
-                    f"Existing baseline model '{BASELINE_MODEL_SPEC['model_version']}' in model_registry exhibits artifact digest or status drift."
+                    f"Existing baseline model '{BASELINE_MODEL_SPEC['model_version']}' in model_registry exhibits artifact digest, metric, or status drift."
                 )
 
         # 2. Seed or verify rejected candidate model p1_controlled_candidate_v1 through 3-step state machine
@@ -648,12 +674,13 @@ def run_tx1b(target_engine: Engine) -> Dict[str, Any]:
                     ) VALUES (
                         :mv, 2, 'EVALUATED', 'CANDIDATE', 'CANDIDATE',
                         'xgb_onnx_v1.0.0', 'scripts/migrate_db.py',
-                        'Out-of-sample benchmark evaluation completed on 6,998 holdout rows (R2=-0.0080, Acc=52.57%, Net=-82.93%).',
+                        :reason,
                         CAST(:ev_json AS json)
                     )
                 """),
                 {
                     "mv": CANDIDATE_MODEL_SPEC["model_version"],
+                    "reason": CANDIDATE_EVALUATED_REASON,
                     "ev_json": json.dumps(CANDIDATE_MODEL_SPEC["evaluation_metrics"]),
                 },
             )
@@ -675,26 +702,32 @@ def run_tx1b(target_engine: Engine) -> Dict[str, Any]:
                     ) VALUES (
                         :mv, 3, 'REJECTED', 'CANDIDATE', 'REJECTED',
                         'xgb_onnx_v1.0.0', 'scripts/migrate_db.py',
-                        'Rejected candidate promotion: regressor underperformed naive persistence ($397.46 vs $395.52) and classifier degraded net return (-82.93% vs -72.86%).',
+                        :reason,
                         CAST(:ev_json AS json)
                     )
                 """),
                 {
                     "mv": CANDIDATE_MODEL_SPEC["model_version"],
+                    "reason": CANDIDATE_REJECTION_REASON,
                     "ev_json": json.dumps(CANDIDATE_MODEL_SPEC["evaluation_metrics"]),
                 },
             )
             seeded_models.append(CANDIDATE_MODEL_SPEC["model_version"])
         else:
+            live_cand_metrics = (
+                json.loads(cand_row["evaluation_metrics"])
+                if isinstance(cand_row.get("evaluation_metrics"), str)
+                else cand_row.get("evaluation_metrics")
+            )
             if (
                 cand_row["regressor_sha256"] != CANDIDATE_MODEL_SPEC["regressor_sha256"]
                 or cand_row["classifier_sha256"] != CANDIDATE_MODEL_SPEC["classifier_sha256"]
                 or cand_row["current_status"] != "REJECTED"
                 or int(cand_row["lifecycle_seq"]) != 3
-                or cand_row["evaluation_metrics"] is None
+                or live_cand_metrics != CANDIDATE_MODEL_SPEC["evaluation_metrics"]
             ):
                 raise SchemaDriftError(
-                    f"Existing candidate model '{CANDIDATE_MODEL_SPEC['model_version']}' in model_registry exhibits artifact digest, status, or sequence drift."
+                    f"Existing candidate model '{CANDIDATE_MODEL_SPEC['model_version']}' in model_registry exhibits artifact digest, metric, status, or sequence drift."
                 )
 
     return {"tx": "1B", "seeded_models": seeded_models}
