@@ -1,4 +1,4 @@
-"""Database package for Mudra operational ledger and telemetry."""
+"""Database package for Mudra operational ledger, model governance, and telemetry."""
 from .models import (
     Base,
     MarketTick,
@@ -6,8 +6,25 @@ from .models import (
     CouncilAudit,
     Reconciliation,
     PaperPortfolio,
+    ModelRegistry,
+    ModelLifecycleEvent,
+    ModelPrediction,
+    PredictionInvestigation,
 )
-from .connection import get_db, init_db, test_connection, engine, has_tick_id_column
+from .connection import (
+    SchemaDriftError,
+    FunctionSpec,
+    TriggerSpec,
+    ensure_canonical_function,
+    ensure_canonical_trigger,
+    verify_db_schema,
+    get_db,
+    init_db,
+    test_connection,
+    engine,
+    SessionLocal,
+    has_tick_id_column,
+)
 
 __all__ = [
     "Base",
@@ -16,9 +33,20 @@ __all__ = [
     "CouncilAudit",
     "Reconciliation",
     "PaperPortfolio",
+    "ModelRegistry",
+    "ModelLifecycleEvent",
+    "ModelPrediction",
+    "PredictionInvestigation",
+    "SchemaDriftError",
+    "FunctionSpec",
+    "TriggerSpec",
+    "ensure_canonical_function",
+    "ensure_canonical_trigger",
+    "verify_db_schema",
     "get_db",
     "init_db",
     "test_connection",
     "engine",
+    "SessionLocal",
     "has_tick_id_column",
 ]
