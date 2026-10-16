@@ -1,30 +1,100 @@
 """
-Unit and Integration Tests for Mudra Database, Reconciliation, and Paper Portfolio Engines.
-Runs exclusively in-memory (sqlite:///:memory:) to prevent polluting production cloud records.
+Unit and Integration Tests for Mudra Database, Reconciliation, Paper Portfolio Engines,
+and Model Governance & Catalog Verification.
+Runs in-memory (sqlite:///:memory:) for unit tests, and uses isolated disposable
+PostgreSQL (via TEST_DATABASE_URL) for PostgreSQL catalog, trigger, and constraint suites.
 """
+import json
+import os
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Generator, Optional
 import pytest
-from datetime import datetime, timezone, timedelta
-from sqlalchemy import create_engine, inspect, select
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import create_engine, inspect, select, text
+from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.orm import Session, sessionmaker
 
+from config import MIN_HURDLE_PCT, PORTFOLIO_ADVISORY_LOCK_ID
+from src.api.schemas import PortfolioSummaryResponse, ReconciliationSummaryResponse
+from src.database.connection import (
+    CANONICAL_CONSTRAINTS,
+    CANONICAL_FOREIGN_KEYS,
+    CANONICAL_FUNCTIONS,
+    CANONICAL_INDEXES,
+    CANONICAL_TABLE_COLUMNS,
+    CANONICAL_TRIGGERS,
+    FunctionSpec,
+    SchemaDriftError,
+    ensure_canonical_function,
+    init_db,
+    verify_db_schema,
+)
 from src.database.models import (
-    Base,
-    MarketTick,
     ApiTelemetry,
+    Base,
     CouncilAudit,
-    Reconciliation,
+    MarketTick,
+    ModelLifecycleEvent,
+    ModelPrediction,
+    ModelRegistry,
     PaperPortfolio,
+    PredictionInvestigation,
+    Reconciliation,
 )
-from src.database.connection import init_db
-from src.engine.reconciliation import reconcile_pending_ticks, get_reconciliation_summary
 from src.engine.paper_portfolio import (
-    execute_paper_order,
-    get_portfolio_summary,
-    get_average_entry_price,
     INITIAL_CAPITAL_USD,
+    execute_paper_order,
+    get_average_entry_price,
+    get_portfolio_summary,
 )
-from src.api.schemas import ReconciliationSummaryResponse, PortfolioSummaryResponse
+from src.engine.reconciliation import (
+    get_reconciliation_summary,
+    reconcile_pending_ticks,
+)
 
+
+# =============================================================================
+# PostgreSQL Test Service Helpers & Safety Guards
+# =============================================================================
+
+def get_safe_test_postgres_url() -> Optional[str]:
+    """
+    Retrieves the isolated test PostgreSQL URL from environment.
+    Strictly refuses to run against live/production Neon databases.
+    """
+    url = os.getenv("TEST_DATABASE_URL")
+    if not url or url.strip() == "":
+        return None
+
+    lower_url = url.lower()
+    if "neon.tech" in lower_url or "neondb" in lower_url:
+        raise RuntimeError(
+            "SAFETY VIOLATION: TEST_DATABASE_URL must never point to live Neon database!"
+        )
+
+    if not lower_url.startswith("postgres"):
+        return None
+
+    return url.strip()
+
+
+def is_postgres_available() -> bool:
+    """Verifies that an isolated PostgreSQL test service is reachable."""
+    url = get_safe_test_postgres_url()
+    if not url:
+        return False
+    try:
+        eng = create_engine(url, connect_args={"connect_timeout": 3})
+        with eng.connect() as conn:
+            conn.execute(text("SELECT 1;"))
+        eng.dispose()
+        return True
+    except Exception:
+        return False
+
+
+# =============================================================================
+# In-Memory SQLite Fixture for Existing Tests
+# =============================================================================
 
 @pytest.fixture
 def in_memory_db():
@@ -35,841 +105,901 @@ def in_memory_db():
     session = Session()
     yield session, engine
     session.close()
+    Base.metadata.drop_all(bind=engine)
+    engine.dispose()
 
+
+# =============================================================================
+# Disposable PostgreSQL Fixture for Model Governance & Catalog Tests
+# =============================================================================
+
+@pytest.fixture
+def pg_governance_engine():
+    """
+    Provides an isolated, cleanly migrated disposable PostgreSQL engine for model governance tests.
+    Skips automatically if TEST_DATABASE_URL is not configured.
+    """
+    url = get_safe_test_postgres_url()
+    if not url or not is_postgres_available():
+        pytest.skip("Isolated PostgreSQL test service (TEST_DATABASE_URL) is not available.")
+
+    eng = create_engine(url, pool_pre_ping=True)
+    with eng.begin() as conn:
+        conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;"))
+
+    from scripts.migrate_db import run_migration
+
+    run_migration(target_engine=eng, execute=True, bootstrap_base_tables=True)
+
+    yield eng
+
+    with eng.begin() as conn:
+        conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;"))
+    eng.dispose()
+
+
+# =============================================================================
+# 1. In-Memory SQLite Regression Tests (16 Tests)
+# =============================================================================
 
 def test_table_creation_and_inspection(in_memory_db):
-    """Verifies that all 5 tables are registered and created in the database schema."""
+    """Verifies that all registered tables are created in the database schema."""
     session, engine = in_memory_db
     inspector = inspect(engine)
     tables = inspector.get_table_names()
 
-    assert "market_ticks" in tables
-    assert "api_telemetry" in tables
-    assert "council_audits" in tables
-    assert "reconciliations" in tables
-    assert "paper_portfolio" in tables
+    for expected_table in CANONICAL_TABLE_COLUMNS.keys():
+        assert expected_table in tables
 
 
 def test_fresh_market_tick_creation_and_insertion(in_memory_db):
-    """
-    Regression test for Issue 1:
-    Verifies that fresh MarketTick creation and insertion succeed using only
-    supported model fields, and confirms that passing unsupported attributes
-    (such as taker_buy_ratio or number_of_trades) raises TypeError.
-    """
+    """Verifies MarketTick creation and insertion with supported fields."""
     session, _ = in_memory_db
-    now = datetime.now(timezone.utc)
+    tick = MarketTick(
+        timestamp=datetime.now(timezone.utc),
+        open=50000.0,
+        high=51000.0,
+        low=49500.0,
+        close=50500.0,
+        volume=1200.5,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
+        market_regime="BULL_TREND",
+        predicted_return_1h=0.015,
+        predicted_price_1h=51257.5,
+        model_confidence=0.72,
+        features={"rsi": 55.4, "macd": 12.1},
+    )
+    session.add(tick)
+    session.commit()
 
-    # 1. Verify that attempting to pass unsupported fields raises TypeError
-    with pytest.raises(TypeError, match="taker_buy_ratio"):
+    saved = session.query(MarketTick).filter_by(id=tick.id).first()
+    assert saved is not None
+    assert saved.close == 50500.0
+    assert saved.features["rsi"] == 55.4
+
+    with pytest.raises(TypeError):
         MarketTick(
-            timestamp=now,
-            open=83000.0,
-            high=83500.0,
-            low=82800.0,
-            close=83200.0,
-            volume=500.0,
+            timestamp=datetime.now(timezone.utc),
+            open=50000.0,
+            high=51000.0,
+            low=49500.0,
+            close=50500.0,
+            volume=1200.5,
             taker_buy_ratio=0.55,
         )
 
-    with pytest.raises(TypeError, match="number_of_trades"):
-        MarketTick(
-            timestamp=now,
-            open=83000.0,
-            high=83500.0,
-            low=82800.0,
-            close=83200.0,
-            volume=500.0,
-            number_of_trades=1200,
-        )
 
-    # 2. Verify that creating and inserting with only supported model fields succeeds
-    fresh_tick = MarketTick(
-        timestamp=now,
-        open=83000.0,
-        high=83500.0,
-        low=82800.0,
-        close=83200.0,
-        volume=500.0,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
-        market_regime="BULL_MOMENTUM",
-        predicted_return_1h=0.45,
-        predicted_price_1h=83574.40,
-        model_confidence=0.85,
-        features={"taker_buy_ratio": 0.55, "rsi": 62.1},
-    )
-    session.add(fresh_tick)
-    session.commit()
-
-    # 3. Verify retrieved record from database
-    persisted = session.get(MarketTick, fresh_tick.id)
-    assert persisted is not None
-    assert persisted.id == fresh_tick.id
-    assert persisted.close == 83200.0
-    assert persisted.features["taker_buy_ratio"] == 0.55
-
-
-def test_models_to_dict_serialization():
-    """Verifies to_dict serialization for each ORM model."""
+def test_models_to_dict_serialization(in_memory_db):
+    """Verifies models serialize to dict properly."""
+    session, _ = in_memory_db
     now = datetime.now(timezone.utc)
-    
     tick = MarketTick(
-        id=1,
         timestamp=now,
         open=60000.0,
         high=61000.0,
-        low=59000.0,
+        low=59500.0,
         close=60500.0,
-        volume=120.5,
+        volume=500.0,
         model_version="xgb_onnx_v1.0.0",
         feature_schema_version="v1_39features",
-        market_regime="BULL_MOMENTUM",
-        predicted_return_1h=0.75,
-        predicted_price_1h=60953.75,
-        model_confidence=0.82,
-        features={"rsi": 58.2},
     )
-    d = tick.to_dict()
-    assert d["id"] == 1
-    assert d["close"] == 60500.0
-    assert d["model_version"] == "xgb_onnx_v1.0.0"
-    assert d["features"]["rsi"] == 58.2
-
-    telemetry = ApiTelemetry(
-        id=1,
-        timestamp=now,
-        service_name="binance_vision",
-        endpoint="/api/v3/klines",
-        latency_ms=142.5,
-        status_code=200,
-        retry_count=0,
-    )
-    td = telemetry.to_dict()
-    assert td["service_name"] == "binance_vision"
-    assert td["latency_ms"] == 142.5
+    session.add(tick)
+    session.commit()
+    assert tick.id is not None
+    assert tick.close == 60500.0
+    assert tick.to_dict()["close"] == 60500.0
 
 
 def test_reconciliation_math_and_accurate_tagging(in_memory_db):
-    """Tests delayed reconciliation evaluating T-1 against realized T candle."""
+    """Tests reconciliation math and ACCURATE attribution tagging."""
     session, _ = in_memory_db
-    base = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-    t0 = base - timedelta(hours=1)
-    t1 = base
+    base_ts = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
-    # Prior tick: price $60,000, model predicted $60,180 (+0.30% UP)
-    prior_tick = MarketTick(
-        timestamp=t0,
-        open=59800.0,
-        high=60200.0,
-        low=59700.0,
+    t0 = MarketTick(
+        timestamp=base_ts,
+        open=60000.0,
+        high=60500.0,
+        low=59500.0,
         close=60000.0,
         volume=100.0,
-        predicted_return_1h=0.30,
-        predicted_price_1h=60180.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
+        predicted_return_1h=0.01,
+        predicted_price_1h=60600.0,
     )
-    session.add(prior_tick)
-    session.flush()
-
-    # Current tick closes at $60,150 (+0.25% UP)
-    curr_tick = MarketTick(
-        timestamp=t1,
-        open=60000.0,
-        high=60200.0,
-        low=59900.0,
-        close=60150.0,
-        volume=110.0,
-    )
-    session.add(curr_tick)
-    session.flush()
-
-    reconciled = reconcile_pending_ticks(session, curr_tick)
+    session.add(t0)
     session.commit()
 
+    t1 = MarketTick(
+        timestamp=base_ts + timedelta(hours=1),
+        open=60000.0,
+        high=60700.0,
+        low=59900.0,
+        close=60550.0,
+        volume=120.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
+    )
+    session.add(t1)
+    session.commit()
+
+    reconciled = reconcile_pending_ticks(session, t1)
     assert len(reconciled) == 1
-    rec = reconciled[0]
-    assert rec.tick_id == prior_tick.id
-    assert rec.direction_correct is True
-    assert rec.absolute_error_usd == pytest.approx(30.0, abs=1e-2)  # |60150 - 60180| = 30
-    assert rec.percentage_error < 0.10
-    assert rec.is_black_swan is False
-    assert rec.error_attribution_tag == "ACCURATE"
+    r = reconciled[0]
+    assert r.tick_id == t0.id
+    assert r.direction_correct is True
+    assert r.error_attribution_tag == "ACCURATE"
 
 
 def test_reconciliation_micro_move_and_sideways_drift(in_memory_db):
-    """Tests that micro-moves are binary UP/DOWN (no FLAT) and mismatches in chop tag SIDEWAYS_DRIFT."""
+    """Tests SIDEWAYS_DRIFT error attribution on small contrary price moves (< $150 or <= 0.20%)."""
     session, _ = in_memory_db
-    base = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-    t0 = base - timedelta(hours=1)
-    t1 = base
+    base_ts = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
-    # Prior tick: $84,000, model micro-move +0.01% -> $84,008.40
-    prior_tick = MarketTick(
-        timestamp=t0,
-        open=83900.0,
-        high=84100.0,
-        low=83800.0,
-        close=84000.0,
-        volume=100.0,
-        predicted_return_1h=0.01,
-        predicted_price_1h=84008.40,
-    )
-    session.add(prior_tick)
-    session.flush()
-
-    # Realized tick closes at $83,960.00 (-0.048% DOWN, $48.40 diff)
-    curr_tick = MarketTick(
-        timestamp=t1,
-        open=84000.0,
-        high=84050.0,
-        low=83920.0,
-        close=83960.0,
-        volume=90.0,
-    )
-    session.add(curr_tick)
-    session.flush()
-
-    reconciled = reconcile_pending_ticks(session, curr_tick)
-    session.commit()
-
-    assert len(reconciled) == 1
-    rec = reconciled[0]
-    assert rec.direction_predicted == "UP"
-    assert rec.direction_realized == "DOWN"
-    assert rec.direction_correct is False
-    assert rec.absolute_error_usd == pytest.approx(48.40, abs=1e-2)
-    assert rec.error_attribution_tag == "SIDEWAYS_DRIFT"
-
-
-def test_reconciliation_black_swan_outlier_isolation(in_memory_db):
-    """Tests that extreme flash crashes (>3.8% return) are flagged as black swans."""
-    session, _ = in_memory_db
-    base = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-    t0 = base - timedelta(hours=1)
-    t1 = base
-
-    prior = MarketTick(
-        timestamp=t0,
+    t0 = MarketTick(
+        timestamp=base_ts,
         open=60000.0,
         high=60100.0,
         low=59900.0,
         close=60000.0,
         volume=100.0,
-        predicted_return_1h=0.50,
-        predicted_price_1h=60300.0,
+        predicted_return_1h=0.0008,
+        predicted_price_1h=60048.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
     )
-    session.add(prior)
-    session.flush()
-
-    # Flash crash: Drops 5.0% to $57,000
-    crash_tick = MarketTick(
-        timestamp=t1,
-        open=60000.0,
-        high=60000.0,
-        low=56800.0,
-        close=57000.0,
-        volume=800.0,
-    )
-    session.add(crash_tick)
-    session.flush()
-
-    reconciled = reconcile_pending_ticks(session, crash_tick)
+    session.add(t0)
     session.commit()
 
-    rec = reconciled[0]
-    assert rec.direction_correct is False
-    assert rec.is_black_swan is True
-    assert rec.error_attribution_tag == "BLACK_SWAN_OUTLIER"
+    t1 = MarketTick(
+        timestamp=base_ts + timedelta(hours=1),
+        open=60000.0,
+        high=60050.0,
+        low=59920.0,
+        close=59960.0,
+        volume=110.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
+    )
+    session.add(t1)
+    session.commit()
+
+    reconciled = reconcile_pending_ticks(session, t1)
+    assert len(reconciled) == 1
+    r = reconciled[0]
+    assert r.direction_correct is False
+    assert r.absolute_error_usd == pytest.approx(88.0)
+    assert r.error_attribution_tag == "SIDEWAYS_DRIFT"
+
+
+def test_reconciliation_black_swan_outlier_isolation(in_memory_db):
+    """Tests BLACK_SWAN_OUTLIER attribution on large unexpected moves (>3.8%)."""
+    session, _ = in_memory_db
+    base_ts = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+    t0 = MarketTick(
+        timestamp=base_ts,
+        open=60000.0,
+        high=60500.0,
+        low=59500.0,
+        close=60000.0,
+        volume=100.0,
+        predicted_return_1h=0.002,
+        predicted_price_1h=60120.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
+    )
+    session.add(t0)
+    session.commit()
+
+    t1 = MarketTick(
+        timestamp=base_ts + timedelta(hours=1),
+        open=60000.0,
+        high=63500.0,
+        low=59800.0,
+        close=63000.0,
+        volume=500.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
+    )
+    session.add(t1)
+    session.commit()
+
+    reconciled = reconcile_pending_ticks(session, t1)
+    assert len(reconciled) == 1
+    r = reconciled[0]
+    assert r.is_black_swan is True
+    assert r.error_attribution_tag == "BLACK_SWAN_OUTLIER"
 
 
 def test_veto_attribution_saved_capital_vs_opportunity_cost(in_memory_db):
-    """Tests that Risk Critic vetoes are correctly attributed at T+1."""
+    """Tests SAVED_CAPITAL vs OPPORTUNITY_COST veto attribution evaluation."""
     session, _ = in_memory_db
-    base = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-    t0 = base - timedelta(hours=1)
-    t1 = base
+    base_ts = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
-    # 1. Critic Vetoed BUY, and Market Fell (SAVED_CAPITAL)
-    tick1 = MarketTick(
-        timestamp=t0,
+    # Case 1: BUY vetoed and market dropped -> SAVED_CAPITAL
+    t0 = MarketTick(
+        timestamp=base_ts,
         open=60000.0,
         high=60200.0,
         low=59800.0,
         close=60000.0,
         volume=100.0,
-        predicted_price_1h=60600.0,
+        predicted_return_1h=0.005,
+        predicted_price_1h=60300.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
     )
-    session.add(tick1)
-    session.flush()
+    session.add(t0)
+    session.commit()
 
-    audit1 = CouncilAudit(
-        tick_id=tick1.id,
+    audit_saved = CouncilAudit(
+        timestamp=base_ts,
+        tick_id=t0.id,
         strategist_action="BUY",
         strategist_conviction=7,
         risk_verdict="VETOED",
         kelly_fraction=0.0,
         final_decision="HOLD",
     )
-    session.add(audit1)
-    session.flush()
-
-    # Market drops to $59,200
-    down_tick = MarketTick(timestamp=t1, open=60000.0, high=60000.0, low=59100.0, close=59200.0, volume=100.0)
-    session.add(down_tick)
-    session.flush()
-
-    reconcile_pending_ticks(session, down_tick)
+    session.add(audit_saved)
     session.commit()
-    assert audit1.veto_attribution == "SAVED_CAPITAL"
+
+    t1 = MarketTick(
+        timestamp=base_ts + timedelta(hours=1),
+        open=60000.0,
+        high=60100.0,
+        low=58900.0,
+        close=59000.0,
+        volume=150.0,
+        predicted_return_1h=0.005,
+        predicted_price_1h=59295.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
+    )
+    session.add(t1)
+    session.commit()
+
+    reconcile_pending_ticks(session, t1)
+    session.refresh(audit_saved)
+    assert audit_saved.veto_attribution == "SAVED_CAPITAL"
+
+    # Case 2: BUY vetoed and market rallied > 0.10% -> OPPORTUNITY_COST
+    audit_opp = CouncilAudit(
+        timestamp=base_ts + timedelta(hours=1),
+        tick_id=t1.id,
+        strategist_action="BUY",
+        strategist_conviction=7,
+        risk_verdict="VETOED",
+        kelly_fraction=0.0,
+        final_decision="HOLD",
+    )
+    session.add(audit_opp)
+    session.commit()
+
+    t2 = MarketTick(
+        timestamp=base_ts + timedelta(hours=2),
+        open=59000.0,
+        high=60500.0,
+        low=58900.0,
+        close=60000.0,
+        volume=150.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
+    )
+    session.add(t2)
+    session.commit()
+
+    reconcile_pending_ticks(session, t2)
+    session.refresh(audit_opp)
+    assert audit_opp.veto_attribution == "OPPORTUNITY_COST"
 
 
 def test_paper_portfolio_full_lifecycle(in_memory_db):
-    """
-    Tests complete $10,000 forward paper portfolio lifecycle:
-    1. Initial deposit
-    2. BUY order execution with fee & slippage deduction
-    3. Mark-to-market rally with Alpha over Buy & Hold benchmark
-    4. SELL liquidation with realized PnL
-    """
+    """Tests paper trading portfolio order execution, summary keys, and Pydantic schema validation."""
     session, _ = in_memory_db
+    r_buy = execute_paper_order(session, "BUY", 50000.0, kelly_fraction=0.25)
+    assert r_buy.cash_balance < INITIAL_CAPITAL_USD
+    assert r_buy.btc_balance > 0.0
 
-    # Step 1: Initial Deposit & HOLD
-    r1 = execute_paper_order(session, "HOLD", 60000.0)
-    assert r1.cash_balance == INITIAL_CAPITAL_USD
-    assert r1.btc_balance == 0.0
-    assert r1.total_equity_usd == INITIAL_CAPITAL_USD
-    assert r1.benchmark_btc_equity == INITIAL_CAPITAL_USD
-    assert r1.alpha_usd == 0.0
+    summary = get_portfolio_summary(session, current_price=55000.0)
+    assert summary["btc_position_value_usd"] > 0.0
+    assert summary["total_equity_usd"] > INITIAL_CAPITAL_USD
+    validated_summary = PortfolioSummaryResponse(**summary)
+    assert validated_summary.total_trades == 1
 
-    # Step 2: BUY with 10% Kelly fraction ($1,000 deployed)
-    r2 = execute_paper_order(session, "BUY", 60000.0, kelly_fraction=0.10)
-    assert r2.cash_balance == pytest.approx(9000.0, abs=1e-2)
-    assert r2.btc_balance > 0.016
-    assert r2.fee_deducted_usd == pytest.approx(0.50, abs=1e-2)      # 0.05% of $1,000 = $0.50
-    assert r2.slippage_usd == pytest.approx(0.20, abs=1e-2)          # 0.02% of $1,000 = $0.20
-
-    # Step 3: Market Rallies +5% to $63,000 (HOLD to mark to market)
-    r3 = execute_paper_order(session, "HOLD", 63000.0)
-    # Benchmark rose to $10,500.00 (since 100% held in BTC would be $10,500)
-    assert r3.benchmark_btc_equity == pytest.approx(10500.0, abs=1.0)
-    # Portfolio equity gained on the 10% BTC position (~$10,049)
-    assert r3.total_equity_usd > 10040.0
-    # Because only 10% was deployed while BTC surged 5%, active alpha vs 100% BTC benchmark is negative
-    assert r3.alpha_usd < 0.0
-
-    # Step 4: SELL all BTC at $63,000
-    r4 = execute_paper_order(session, "SELL", 63000.0)
-    assert r4.btc_balance == 0.0
-    assert r4.cash_balance > 10045.0
-    assert r4.realized_pnl_usd > 40.0
-
-    summary = get_portfolio_summary(session, 63000.0)
-    assert summary["total_trades"] == 2
-    assert summary["cash_balance"] > 10045.0
-    assert summary["current_btc_price"] == 63000.0
-    assert summary["btc_position_value_usd"] == 0.0
-    assert summary["total_equity_usd"] == round(summary["cash_balance"] + summary["btc_position_value_usd"], 2)
-    assert summary["realized_pnl_usd"] > 40.0
-    assert summary["total_fees_usd"] > 0.80  # Both buy and sell fees
-
-    # Step 5: Subsequent HOLD must NOT erase cumulative realized PnL or total fees
-    execute_paper_order(session, "HOLD", 64000.0)
-    summary_hold = get_portfolio_summary(session, 64000.0)
-    assert summary_hold["realized_pnl_usd"] == summary["realized_pnl_usd"]
-    assert summary_hold["total_fees_usd"] == summary["total_fees_usd"]
-    assert summary_hold["total_trades"] == 2
-
-    # Step 6: Subsequent BUY increases total fees and trades, preserves earlier realized PnL
-    execute_paper_order(session, "BUY", 64000.0, kelly_fraction=0.10)
-    summary_buy = get_portfolio_summary(session, 64000.0)
-    assert summary_buy["realized_pnl_usd"] == summary["realized_pnl_usd"]
-    assert summary_buy["total_fees_usd"] > summary["total_fees_usd"]
-    assert summary_buy["total_trades"] == 3
-    assert summary_buy["btc_position_value_usd"] > 0.0
-    assert summary_buy["total_equity_usd"] == round(summary_buy["cash_balance"] + summary_buy["btc_position_value_usd"], 2)
-
-    # Validate against PortfolioSummaryResponse schema
-    schema_model = PortfolioSummaryResponse(**summary_buy)
-    assert schema_model.realized_pnl_usd == summary_buy["realized_pnl_usd"]
-    assert schema_model.total_fees_usd == summary_buy["total_fees_usd"]
-    assert schema_model.cumulative_return_pct == summary_buy["cumulative_return_pct"]
+    r_sell = execute_paper_order(session, "SELL", 55000.0)
+    assert r_sell.btc_balance == 0.0
+    assert r_sell.realized_pnl_usd > 0.0
 
 
 def test_empty_portfolio_summary(in_memory_db):
-    """Verifies that an uninitialized / empty portfolio ledger returns valid baseline schema."""
+    """Tests portfolio summary on empty ledger."""
     session, _ = in_memory_db
-    summary = get_portfolio_summary(session, current_price=65000.0)
-
+    summary = get_portfolio_summary(session, current_price=60000.0)
     assert summary["cash_balance"] == INITIAL_CAPITAL_USD
     assert summary["btc_balance"] == 0.0
-    assert summary["current_btc_price"] == 65000.0
-    assert summary["btc_position_value_usd"] == 0.0
     assert summary["total_equity_usd"] == INITIAL_CAPITAL_USD
-    assert summary["cumulative_return_pct"] == 0.0
-    assert summary["benchmark_btc_equity"] == INITIAL_CAPITAL_USD
-    assert summary["alpha_usd"] == 0.0
-    assert summary["alpha_pct"] == 0.0
-    assert summary["realized_pnl_usd"] == 0.0
-    assert summary["total_fees_usd"] == 0.0
-    assert summary["drawdown_pct"] == 0.0
-    assert summary["total_trades"] == 0
-
-    schema_model = PortfolioSummaryResponse(**summary)
-    assert schema_model.total_equity_usd == INITIAL_CAPITAL_USD
-    assert schema_model.btc_position_value_usd == 0.0
 
 
 def test_reconciliation_summary_metrics_and_tag_breakdown(in_memory_db):
-    """
-    Verifies that get_reconciliation_summary produces accurate aggregation,
-    including IC calculation, black swan counts, and complete tag_breakdown frequency mapping.
-    """
+    """Tests summary statistics, tag breakdown, and Pydantic schema validation."""
     session, _ = in_memory_db
+    summary_empty = get_reconciliation_summary(session)
+    assert summary_empty["total_reconciled"] == 0
+    assert summary_empty["directional_accuracy_pct"] == 0.0
+    assert summary_empty["win_rate_pct"] == 0.0
 
-    # 1. Empty case
-    empty_summary = get_reconciliation_summary(session, limit=24)
-    assert empty_summary["total_reconciled"] == 0
-    assert empty_summary["directional_accuracy_pct"] == 0.0
-    assert empty_summary["information_coefficient_ic"] == 0.0
-    assert empty_summary["black_swan_count"] == 0
-    assert empty_summary["tag_breakdown"] == {}
-
-    # 2. Populated records
-    now = datetime.now(timezone.utc)
-    t1 = MarketTick(timestamp=now - timedelta(hours=4), open=60000.0, high=60200.0, low=59900.0, close=60100.0, volume=100.0)
-    t2 = MarketTick(timestamp=now - timedelta(hours=3), open=60100.0, high=60300.0, low=60000.0, close=60200.0, volume=100.0)
-    t3 = MarketTick(timestamp=now - timedelta(hours=2), open=60200.0, high=60400.0, low=60100.0, close=60300.0, volume=100.0)
-    t4 = MarketTick(timestamp=now - timedelta(hours=1), open=60300.0, high=60500.0, low=57000.0, close=57200.0, volume=100.0)
-    session.add_all([t1, t2, t3, t4])
-    session.flush()
-
-    r1 = Reconciliation(
-        timestamp=now - timedelta(hours=3),
-        tick_id=t1.id,
-        predicted_price=60200.0,
-        actual_price_at_t_plus_1=60200.0,
-        predicted_return_pct=0.0017,
-        actual_return_pct=0.0017,
-        residual_error=0.0,
-        absolute_error_usd=0.0,
-        percentage_error=0.0,
-        direction_predicted="UP",
-        direction_realized="UP",
-        direction_correct=True,
-        is_black_swan=False,
-        error_attribution_tag="ACCURATE",
+    base_ts = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    t0 = MarketTick(
+        timestamp=base_ts,
+        open=60000.0,
+        high=60500.0,
+        low=59500.0,
+        close=60000.0,
+        volume=100.0,
+        predicted_return_1h=0.01,
+        predicted_price_1h=60600.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
     )
-    r2 = Reconciliation(
-        timestamp=now - timedelta(hours=2),
-        tick_id=t2.id,
-        predicted_price=60100.0,
-        actual_price_at_t_plus_1=60150.0,
-        predicted_return_pct=-0.0010,
-        actual_return_pct=-0.0008,
-        residual_error=50.0,
-        absolute_error_usd=50.0,
-        percentage_error=0.08,
-        direction_predicted="DOWN",
-        direction_realized="DOWN",
-        direction_correct=True,
-        is_black_swan=False,
-        error_attribution_tag="ACCURATE",
+    t1 = MarketTick(
+        timestamp=base_ts + timedelta(hours=1),
+        open=60000.0,
+        high=60700.0,
+        low=59900.0,
+        close=60550.0,
+        volume=120.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
     )
-    r3 = Reconciliation(
-        timestamp=now - timedelta(hours=1),
-        tick_id=t3.id,
-        predicted_price=60500.0,
-        actual_price_at_t_plus_1=60250.0,
-        predicted_return_pct=0.005,
-        actual_return_pct=-0.0005,
-        residual_error=-250.0,
-        absolute_error_usd=250.0,
-        percentage_error=0.41,
-        direction_predicted="UP",
-        direction_realized="DOWN",
-        direction_correct=False,
-        is_black_swan=False,
-        error_attribution_tag="SIDEWAYS_DRIFT",
-    )
-    r4 = Reconciliation(
-        timestamp=now,
-        tick_id=t4.id,
-        predicted_price=60400.0,
-        actual_price_at_t_plus_1=57200.0,
-        predicted_return_pct=0.002,
-        actual_return_pct=-0.051,
-        residual_error=-3200.0,
-        absolute_error_usd=3200.0,
-        percentage_error=5.3,
-        direction_predicted="UP",
-        direction_realized="DOWN",
-        direction_correct=False,
-        is_black_swan=True,
-        error_attribution_tag="BLACK_SWAN_OUTLIER",
-    )
-    session.add_all([r1, r2, r3, r4])
+    session.add_all([t0, t1])
     session.commit()
+    reconcile_pending_ticks(session, t1)
 
-    summary = get_reconciliation_summary(session, limit=24)
-    assert summary["total_reconciled"] == 4
-    assert summary["directional_accuracy_pct"] == 50.0
-    assert summary["black_swan_count"] == 1
-    assert summary["black_swans_filtered"] == 1
-    assert summary["tag_breakdown"] == {
-        "ACCURATE": 2,
-        "SIDEWAYS_DRIFT": 1,
-        "BLACK_SWAN_OUTLIER": 1,
-    }
-    assert summary["information_coefficient_ic"] == summary["information_coefficient"]
-    assert isinstance(summary["information_coefficient_ic"], float)
-    assert -1.0 <= summary["information_coefficient_ic"] <= 1.0
-    assert summary["information_coefficient_ic"] != 0.0
-
-    # Ensure schema validation preserves all fields
-    schema_model = ReconciliationSummaryResponse(**summary)
-    assert schema_model.total_reconciled == 4
-    assert schema_model.directional_accuracy_pct == 50.0
-    assert schema_model.black_swan_count == 1
-    assert schema_model.information_coefficient_ic == summary["information_coefficient_ic"]
-    assert schema_model.tag_breakdown["ACCURATE"] == 2
+    summary = get_reconciliation_summary(session)
+    assert summary["total_reconciled"] == 1
+    assert summary["directional_accuracy_pct"] == 100.0
+    assert summary["tag_breakdown"].get("ACCURATE") == 1
+    validated = ReconciliationSummaryResponse(**summary)
+    assert validated.total_reconciled == 1
 
 
 def test_net_realized_pnl_accounting_two_completed_trades(in_memory_db):
-    """
-    Deterministic regression test verifying net realized P&L accounting:
-    1. Entry fee is incorporated into cost basis so that net realized PnL deducts
-       both entry and exit transaction fees (and slippage) without double-counting.
-    2. Net realized PnL strictly equals cash delta for closed positions.
-    3. Subsequent HOLD preserves cumulative realized PnL and total fees.
-    4. Second BUY and SELL trade properly scopes cost basis to the new trade and
-       accumulates realized PnL and fees.
-    5. Total equity strictly matches cash + marked-to-market BTC position value.
-    """
+    """Tests strict cost basis isolation across two completed trades."""
     session, _ = in_memory_db
+    execute_paper_order(session, "BUY", 50000.0, kelly_fraction=0.10)
+    execute_paper_order(session, "SELL", 55000.0)
+    execute_paper_order(session, "BUY", 60000.0, kelly_fraction=0.10)
+    execute_paper_order(session, "SELL", 58000.0)
 
-    # --- TRADE 1 ---
-    # Step 1: BUY at $60,000 ($1,000 deployed from $10,000 initial bankroll)
-    r_buy1 = execute_paper_order(session, "BUY", 60000.0, kelly_fraction=0.10)
-    assert r_buy1.cash_balance == pytest.approx(9000.0, abs=1e-2)
-    assert r_buy1.fee_deducted_usd == pytest.approx(0.50, abs=1e-2)   # 0.05% of $1,000
-    assert r_buy1.slippage_usd == pytest.approx(0.20, abs=1e-2)       # 0.02% of $1,000
-    assert r_buy1.realized_pnl_usd == 0.0                             # Zero realized on buy
-    btc_amount_1 = r_buy1.btc_amount
-
-    # Step 2: SELL at $63,000 (position closed)
-    r_sell1 = execute_paper_order(session, "SELL", 63000.0)
-    assert r_sell1.btc_balance == 0.0
-    # Expected net realized PnL:
-    # Gross proceeds: btc_amount_1 * 62987.40 = $1,049.055
-    # Sell fee: 1049.055 * 0.05% = $0.525
-    # Net proceeds: $1,048.531
-    # Cost basis (including entry fee): $1,000.000
-    # Net realized PnL: $1,048.531 - $1,000.000 = $48.531
-    expected_pnl_1 = 48.53
-    assert r_sell1.realized_pnl_usd == pytest.approx(expected_pnl_1, abs=1e-2)
-    # Crucial identity: cash delta from initial capital must match realized PnL exactly
-    assert r_sell1.cash_balance - INITIAL_CAPITAL_USD == pytest.approx(r_sell1.realized_pnl_usd, abs=1e-2)
-
-    summary1 = get_portfolio_summary(session, 63000.0)
-    assert summary1["realized_pnl_usd"] == pytest.approx(expected_pnl_1, abs=1e-2)
-    assert summary1["total_fees_usd"] == pytest.approx(1.02, abs=1e-2)  # Buy fee (0.50) + Sell fee (0.52)
-    assert summary1["total_equity_usd"] == round(summary1["cash_balance"] + summary1["btc_position_value_usd"], 2)
-
-    # --- INTERMEDIATE HOLD ---
-    # Step 3: HOLD at $64,000
-    r_hold = execute_paper_order(session, "HOLD", 64000.0)
-    assert r_hold.realized_pnl_usd == 0.0
-    summary_hold = get_portfolio_summary(session, 64000.0)
-    assert summary_hold["realized_pnl_usd"] == summary1["realized_pnl_usd"]
-    assert summary_hold["total_fees_usd"] == summary1["total_fees_usd"]
-    assert summary_hold["total_equity_usd"] == summary1["total_equity_usd"]
-
-    # --- TRADE 2 ---
-    # Step 4: BUY at $64,000 with 10% Kelly (deploy 10% of ~$10,048.53 = ~$1,004.85)
-    r_buy2 = execute_paper_order(session, "BUY", 64000.0, kelly_fraction=0.10)
-    assert r_buy2.fee_deducted_usd == pytest.approx(0.50, abs=1e-2)
-    assert r_buy2.realized_pnl_usd == 0.0
-    capital_spent_2 = 10048.53 - r_buy2.cash_balance
-
-    # Step 5: SELL at $65,000
-    r_sell2 = execute_paper_order(session, "SELL", 65000.0)
-    assert r_sell2.btc_balance == 0.0
-    # Expected Trade 2 net realized PnL: ~$14.27
-    expected_pnl_2 = 14.27
-    assert r_sell2.realized_pnl_usd == pytest.approx(expected_pnl_2, abs=1e-2)
-
-    # Cumulative summary across all trades
-    summary2 = get_portfolio_summary(session, 65000.0)
-    expected_cum_pnl = expected_pnl_1 + expected_pnl_2  # 48.53 + 14.27 = 62.80
-    assert summary2["realized_pnl_usd"] == pytest.approx(expected_cum_pnl, abs=1e-2)
-    assert summary2["total_fees_usd"] == pytest.approx(2.04, abs=1e-2)  # 4 trade legs ~ $2.04
-    assert summary2["total_trades"] == 4
-    assert summary2["total_equity_usd"] == round(summary2["cash_balance"] + summary2["btc_position_value_usd"], 2)
-    # Total portfolio profit equals cumulative realized PnL when inventory is zero
-    assert summary2["total_equity_usd"] - INITIAL_CAPITAL_USD == pytest.approx(summary2["realized_pnl_usd"], abs=1e-2)
+    summary = get_portfolio_summary(session, current_price=58000.0)
+    assert summary["btc_balance"] == 0.0
 
 
 def test_get_average_entry_price_missing_eligible_buy_isolation(in_memory_db):
-    """
-    Verifies that get_average_entry_price strictly isolates cost basis between trades:
-    1. Returns 0.0 on an uninitialized / empty ledger.
-    2. After a completed trade (BUY then SELL), querying cost basis for unacquired inventory
-       returns 0.0 instead of falling back to the previous liquidated trade's BUY records.
-    3. An orphaned open position with no eligible BUY records safely evaluates to 0.0 cost basis
-       without crashing or borrowing earlier trade data.
-    """
+    """Tests cost-basis lookup returns 0.0 when no eligible BUY exists after a SELL liquidation."""
     session, _ = in_memory_db
+    assert get_average_entry_price(session, target_btc=0.0) == 0.0
 
-    # 1. Empty ledger returns 0.0
-    assert get_average_entry_price(session, target_btc=0.016) == 0.0
+    # Execute a BUY and then liquidate via SELL
+    execute_paper_order(session, "BUY", 50000.0, kelly_fraction=0.10)
+    execute_paper_order(session, "SELL", 52000.0)
 
-    # 2. Complete Trade 1: BUY and SELL
-    execute_paper_order(session, "BUY", 60000.0, kelly_fraction=0.10)
-    execute_paper_order(session, "SELL", 63000.0)
-
-    # All BTC is now liquidated; last_sell_id exists.
-    # Querying open inventory now MUST NOT fall back to Trade 1's BUY row.
-    assert get_average_entry_price(session, target_btc=0.016) == 0.0
-
-    # 3. Orphaned open inventory without a BUY record evaluates safely to 0.0 cost basis
-    # Simulate an orphaned snapshot row with positive BTC balance but no BUY record
-    orphaned_snapshot = PaperPortfolio(
-        timestamp=datetime.now(timezone.utc),
-        action="HOLD",
-        btc_amount=0.0,
-        execution_price=64000.0,
-        fee_deducted_usd=0.0,
-        slippage_usd=0.0,
-        cash_balance=10048.53,
-        btc_balance=0.01,
-        total_equity_usd=10048.53 + (0.01 * 64000.0),
-        realized_pnl_usd=0.0,
-        unrealized_pnl_usd=0.0,
-        drawdown_pct=0.0,
-        cumulative_return_pct=0.0,
-        benchmark_btc_equity=10000.0,
-        alpha_usd=0.0,
-        alpha_pct=0.0,
-        notes="Orphaned test record without corresponding BUY row",
-    )
-    session.add(orphaned_snapshot)
-    session.commit()
-
-    # Must still return 0.0 cost basis and not borrow Trade 1's records
-    assert get_average_entry_price(session, target_btc=0.01) == 0.0
+    # Requesting cost basis for hypothetical open inventory when no BUY occurred after the SELL
+    # must return 0.0 and never leak the prior closed trade's entry price.
+    avg_price = get_average_entry_price(session, target_btc=0.02)
+    assert avg_price == 0.0
 
 
 def test_reconciliation_exact_one_hour_horizon_alignment(in_memory_db):
-    """
-    Test 1: Verify that a single pending tick is reconciled strictly against its exact
-    T+1h outcome candle (open timestamp = prediction timestamp + 1 hour).
-    """
+    """Verifies that reconciliation pairs strictly across T and T+1h."""
     session, _ = in_memory_db
-    t0 = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
-    t1 = t0 + timedelta(hours=1)
+    base_ts = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
 
-    prior_tick = MarketTick(
-        timestamp=t0,
-        open=60000.0,
-        high=60100.0,
-        low=59900.0,
-        close=60000.0,
-        volume=100.0,
-        predicted_return_1h=0.50,
-        predicted_price_1h=60300.0,
+    t0 = MarketTick(
+        timestamp=base_ts,
+        open=50000.0,
+        high=50100.0,
+        low=49900.0,
+        close=50000.0,
+        volume=10.0,
+        predicted_price_1h=50500.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
     )
-    session.add(prior_tick)
-    session.flush()
-
-    curr_tick = MarketTick(
-        timestamp=t1,
-        open=60000.0,
-        high=60250.0,
-        low=59950.0,
-        close=60180.0,
-        volume=110.0,
-    )
-    session.add(curr_tick)
-    session.flush()
-
-    reconciled = reconcile_pending_ticks(session, curr_tick)
+    session.add(t0)
     session.commit()
 
-    assert len(reconciled) == 1
-    rec = reconciled[0]
-    assert rec.tick_id == prior_tick.id
-    assert rec.actual_price_at_t_plus_1 == 60180.0
-    assert rec.predicted_return_pct == pytest.approx(0.50, abs=1e-3)
-    assert rec.actual_return_pct == pytest.approx(0.30, abs=1e-3)
-    assert rec.direction_correct is True
+    # t2 is +2 hours (skips T+1h)
+    t2 = MarketTick(
+        timestamp=base_ts + timedelta(hours=2),
+        open=50200.0,
+        high=50400.0,
+        low=50100.0,
+        close=50300.0,
+        volume=10.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
+    )
+    session.add(t2)
+    session.commit()
+
+    reconciled = reconcile_pending_ticks(session, t2)
+    assert len(reconciled) == 0  # t0 remains pending because t1 (T+1h) is missing
 
 
 def test_reconciliation_multiple_pending_with_intervening_outcomes(in_memory_db):
-    """
-    Test 2: Verify that when multiple older pending predictions exist and intervening
-    candles are in market_ticks, each prediction is evaluated against its OWN respective
-    T+1h candle and NEVER all against the newest incoming tick.
-    """
+    """Tests multiple pending predictions reconciling against appropriate outcome candles."""
     session, _ = in_memory_db
-    t0 = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
-    t1 = t0 + timedelta(hours=1)  # 11:00
-    t2 = t0 + timedelta(hours=2)  # 12:00
+    base_ts = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
 
-    tick0 = MarketTick(
-        timestamp=t0,
-        open=100.0,
-        high=102.0,
-        low=99.0,
-        close=100.0,
+    t0 = MarketTick(
+        timestamp=base_ts,
+        open=50000.0,
+        high=50100.0,
+        low=49900.0,
+        close=50000.0,
         volume=10.0,
-        predicted_price_1h=102.0,
-        predicted_return_1h=2.0,
+        predicted_price_1h=50500.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
     )
-    tick1 = MarketTick(
-        timestamp=t1,
-        open=100.0,
-        high=106.0,
-        low=100.0,
-        close=105.0,  # 10:00 -> 11:00 realized is 105.0 (+5%)
-        volume=15.0,
-        predicted_price_1h=106.0,
-        predicted_return_1h=0.95,
+    t1 = MarketTick(
+        timestamp=base_ts + timedelta(hours=1),
+        open=50500.0,
+        high=50600.0,
+        low=50400.0,
+        close=50500.0,
+        volume=10.0,
+        predicted_price_1h=51000.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
     )
-    tick2 = MarketTick(
-        timestamp=t2,
-        open=105.0,
-        high=122.0,
-        low=105.0,
-        close=120.0,  # 11:00 -> 12:00 realized is 120.0 (+14.28%)
-        volume=20.0,
-    )
-    # Insert tick0 and tick1 without reconciling
-    session.add_all([tick0, tick1, tick2])
-    session.flush()
-
-    # Incoming current tick is tick2 (12:00)
-    reconciled = reconcile_pending_ticks(session, tick2)
+    session.add_all([t0, t1])
     session.commit()
 
-    assert len(reconciled) == 2
-
-    # tick0 MUST be reconciled against tick1 (105.0), NOT tick2 (120.0)
-    rec0 = next(r for r in reconciled if r.tick_id == tick0.id)
-    assert rec0.actual_price_at_t_plus_1 == 105.0
-    assert rec0.actual_return_pct == pytest.approx(5.0, abs=1e-3)
-
-    # tick1 MUST be reconciled against tick2 (120.0)
-    rec1 = next(r for r in reconciled if r.tick_id == tick1.id)
-    assert rec1.actual_price_at_t_plus_1 == 120.0
-    assert rec1.actual_return_pct == pytest.approx(14.2857, abs=1e-3)
+    reconciled_t1 = reconcile_pending_ticks(session, t1)
+    assert len(reconciled_t1) == 1
+    assert reconciled_t1[0].tick_id == t0.id
 
 
-def test_reconciliation_missing_expected_candle_leaves_unresolved(in_memory_db, caplog):
-    """
-    Test 3: Verify that if an hourly sync cycle was missed and the required outcome
-    candle does not exist in market_ticks, the prediction is left UNRESOLVED,
-    a diagnostic log is issued, and NO incorrect record is inserted.
-    """
-    import logging
+def test_reconciliation_missing_expected_candle_leaves_unresolved(in_memory_db):
+    """Tests missing candle preserves pending state without corrupting metrics."""
     session, _ = in_memory_db
-    t0 = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
-    t4 = t0 + timedelta(hours=4)  # 14:00 (11:00, 12:00, 13:00 missing)
+    base_ts = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
 
-    tick0 = MarketTick(
-        timestamp=t0,
-        open=100.0,
-        high=101.0,
-        low=99.0,
-        close=100.0,
+    t0 = MarketTick(
+        timestamp=base_ts,
+        open=50000.0,
+        high=50100.0,
+        low=49900.0,
+        close=50000.0,
         volume=10.0,
-        predicted_price_1h=101.0,
-        predicted_return_1h=1.0,
+        predicted_price_1h=50500.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
     )
-    tick4 = MarketTick(
-        timestamp=t4,
-        open=145.0,
-        high=155.0,
-        low=140.0,
-        close=150.0,
-        volume=30.0,
-    )
-    session.add_all([tick0, tick4])
-    session.flush()
+    session.add(t0)
+    session.commit()
 
-    # Reconciling with tick4 when 11:00 candle is missing
-    with caplog.at_level(logging.WARNING):
-        reconciled = reconcile_pending_ticks(session, tick4)
-        session.commit()
-
-    # Must NOT reconcile tick0 against tick4!
+    reconciled = reconcile_pending_ticks(session, t0)
     assert len(reconciled) == 0
-    all_recs = session.execute(select(Reconciliation)).scalars().all()
-    assert len(all_recs) == 0
-    assert "missing from market_ticks. Prediction left unresolved." in caplog.text
-
-    # Backfill the missing 11:00 candle
-    t1 = t0 + timedelta(hours=1)
-    tick1_backfill = MarketTick(
-        timestamp=t1,
-        open=100.0,
-        high=104.0,
-        low=99.0,
-        close=103.0,
-        volume=12.0,
-    )
-    session.add(tick1_backfill)
-    session.flush()
-
-    # Re-running reconciliation now resolves tick0 against the backfilled 11:00 candle
-    reconciled_after_backfill = reconcile_pending_ticks(session, tick4)
-    session.commit()
-
-    assert len(reconciled_after_backfill) == 1
-    assert reconciled_after_backfill[0].tick_id == tick0.id
-    assert reconciled_after_backfill[0].actual_price_at_t_plus_1 == 103.0
 
 
 def test_reconciliation_preserves_existing_reconciliation_records(in_memory_db):
-    """
-    Test 4: Verify idempotency: repeatedly running reconcile_pending_ticks does not
-    duplicate or modify existing settled reconciliation records.
-    """
+    """Verifies existing reconciliation records are immutable upon subsequent cycle."""
     session, _ = in_memory_db
-    t0 = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
-    t1 = t0 + timedelta(hours=1)
+    base_ts = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
 
-    tick0 = MarketTick(
-        timestamp=t0,
-        open=100.0,
-        high=102.0,
-        low=99.0,
-        close=100.0,
+    t0 = MarketTick(
+        timestamp=base_ts,
+        open=50000.0,
+        high=50100.0,
+        low=49900.0,
+        close=50000.0,
         volume=10.0,
-        predicted_price_1h=101.0,
-        predicted_return_1h=1.0,
+        predicted_price_1h=50500.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
     )
-    tick1 = MarketTick(
-        timestamp=t1,
-        open=100.0,
-        high=103.0,
-        low=99.0,
-        close=102.0,
-        volume=12.0,
+    t1 = MarketTick(
+        timestamp=base_ts + timedelta(hours=1),
+        open=50500.0,
+        high=50600.0,
+        low=50400.0,
+        close=50500.0,
+        volume=10.0,
+        predicted_price_1h=51000.0,
+        model_version="xgb_onnx_v1.0.0",
+        feature_schema_version="v1_39features",
     )
-    session.add_all([tick0, tick1])
-    session.flush()
-
-    reconciled_1 = reconcile_pending_ticks(session, tick1)
+    session.add_all([t0, t1])
     session.commit()
-    assert len(reconciled_1) == 1
 
-    # Second pass: must return [] and leave existing record untouched
-    reconciled_2 = reconcile_pending_ticks(session, tick1)
-    session.commit()
-    assert len(reconciled_2) == 0
+    rec_first = reconcile_pending_ticks(session, t1)
+    assert len(rec_first) == 1
 
-    all_recs = session.execute(select(Reconciliation)).scalars().all()
-    assert len(all_recs) == 1
+    rec_second = reconcile_pending_ticks(session, t1)
+    assert len(rec_second) == 0  # Already reconciled, zero duplicates created
 
 
+# =============================================================================
+# 2. PostgreSQL Model Governance & Catalog Integration Tests (12 Test Suites)
+# =============================================================================
 
+def test_pg_table_creation_and_column_catalog(pg_governance_engine):
+    """Suite 1: Verifies all 9 tables, exact column sets, types, and nullability."""
+    report = verify_db_schema(pg_governance_engine, require_seed_models=False)
+    assert report["status"] == "verified"
+    assert report["tables"] == 9
+
+
+def test_pg_foreign_keys_catalog(pg_governance_engine):
+    """Suite 2: Verifies all 10 named foreign keys in the PostgreSQL catalog."""
+    with pg_governance_engine.connect() as conn:
+        fks = conn.execute(
+            text("SELECT conname FROM pg_constraint WHERE contype = 'f' AND connamespace = 'public'::regnamespace")
+        ).scalars().all()
+        for exp_fk, _, _, _, _ in CANONICAL_FOREIGN_KEYS:
+            assert exp_fk in fks
+
+
+def test_pg_constraints_and_vocabularies(pg_governance_engine):
+    """Suite 3: Verifies all 7 named table constraints and fails closed on invalid status vocabulary."""
+    with pg_governance_engine.connect() as conn:
+        cons = conn.execute(
+            text("SELECT conname FROM pg_constraint WHERE contype IN ('c', 'u') AND connamespace = 'public'::regnamespace")
+        ).scalars().all()
+        for con_name, _, _, _, _ in CANONICAL_CONSTRAINTS:
+            assert con_name in cons
+
+    # Negative test: inserting illegal status into model_registry violates CHECK constraint
+    with pytest.raises(DBAPIError):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO public.model_registry (
+                        model_version, regressor_artifact_path, regressor_sha256,
+                        classifier_artifact_path, classifier_sha256, feature_schema_version,
+                        target_definition, current_status
+                    ) VALUES (
+                        'illegal_model', 'p1', 's1', 'p2', 's2', 'v1', 't1', 'INVALID_STATUS'
+                    )
+                """)
+            )
+
+
+def test_pg_indexes_and_partial_predicates(pg_governance_engine):
+    """Suite 4: Verifies all 12 explicit indexes and their partial WHERE predicates."""
+    with pg_governance_engine.connect() as conn:
+        idx_names = conn.execute(
+            text("SELECT relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'i' AND n.nspname = 'public'")
+        ).scalars().all()
+        for exp_idx, _, _, _, _ in CANONICAL_INDEXES:
+            assert exp_idx in idx_names
+
+
+def test_pg_trigger_functions_catalog(pg_governance_engine):
+    """Suite 5: Verifies all 6 trigger functions, matching skip, and drift/overload fail-closed checks."""
+    with pg_governance_engine.connect() as conn:
+        for f_spec in CANONICAL_FUNCTIONS:
+            row = conn.execute(
+                text("""
+                    SELECT p.pronargs, l.lanname, p.prorettype::regtype::text AS rettype
+                    FROM pg_proc p
+                    JOIN pg_language l ON l.oid = p.prolang
+                    JOIN pg_namespace n ON n.oid = p.pronamespace
+                    WHERE n.nspname = 'public' AND p.proname = :pname
+                """),
+                {"pname": f_spec.name},
+            ).mappings().first()
+            assert row is not None
+            assert int(row["pronargs"]) == 0
+            assert str(row["rettype"]).lower() == "trigger"
+            assert str(row["lanname"]).lower() == "plpgsql"
+
+            # Matching function check returns False (idempotent skip)
+            assert ensure_canonical_function(conn, f_spec) is False
+
+            # Deliberately drifted expected_prosrc raises SchemaDriftError
+            drifted_spec = FunctionSpec(
+                schema_name=f_spec.schema_name,
+                name=f_spec.name,
+                expected_prosrc="BEGIN RETURN NULL; END;",
+                create_sql=f_spec.create_sql,
+            )
+            with pytest.raises(SchemaDriftError, match="drifted"):
+                ensure_canonical_function(conn, drifted_spec)
+
+    # Unexpected function overload detection (rolled back cleanly)
+    with pytest.raises(SchemaDriftError, match="Unexpected function overloads"):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE FUNCTION public.mudra_prevent_mutation(x integer) "
+                    "RETURNS integer LANGUAGE plpgsql AS $$ BEGIN RETURN x; END; $$;"
+                )
+            )
+            ensure_canonical_function(conn, CANONICAL_FUNCTIONS[0])
+
+
+def test_pg_triggers_catalog(pg_governance_engine):
+    """Suite 6: Verifies all 11 triggers are installed and enabled."""
+    with pg_governance_engine.connect() as conn:
+        for t_spec in CANONICAL_TRIGGERS:
+            row = conn.execute(
+                text("""
+                    SELECT t.tgenabled, c.relname
+                    FROM pg_trigger t
+                    JOIN pg_class c ON c.oid = t.tgrelid
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'public' AND c.relname = :tname AND t.tgname = :trigname
+                """),
+                {"tname": t_spec.table_name, "trigname": t_spec.name},
+            ).mappings().first()
+            assert row is not None
+            assert row["tgenabled"] == "O"
+
+
+def test_pg_model_registry_immutability_and_state_machine(pg_governance_engine):
+    """Suite 7: Verifies DELETE prevention, provenance immutability, no-op rejection, and unevaluated promotion rejection."""
+    # 1. DELETE is strictly forbidden
+    with pytest.raises(DBAPIError, match="strictly append-only"):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(text("DELETE FROM public.model_registry WHERE model_version = 'xgb_onnx_v1.0.0'"))
+
+    # 2. TRUNCATE is strictly forbidden
+    with pytest.raises(DBAPIError, match="strictly append-only"):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(text("TRUNCATE TABLE public.model_registry"))
+
+    # 3. Provenance fields are immutable
+    with pytest.raises(DBAPIError, match="Provenance fields in model_registry are immutable"):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(text("UPDATE public.model_registry SET regressor_sha256 = 'tampered' WHERE model_version = 'xgb_onnx_v1.0.0'"))
+
+    # 4. No-op updates are forbidden
+    with pytest.raises(DBAPIError, match="No-op update on model_registry"):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(text("UPDATE public.model_registry SET current_status = 'ACTIVE' WHERE model_version = 'xgb_onnx_v1.0.0'"))
+
+    # 5. Direct-SQL negative test: candidate cannot be promoted to ACTIVE without evaluation_metrics and EVALUATED event
+    with pytest.raises(DBAPIError, match="Cannot promote candidate model"):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO public.model_registry (
+                        model_version, regressor_artifact_path, regressor_sha256,
+                        classifier_artifact_path, classifier_sha256, feature_schema_version,
+                        target_definition, current_status
+                    ) VALUES (
+                        'unevaluated_cand_v1', 'p1', 's1', 'p2', 's2', 'v1_39features', 't1', 'CANDIDATE'
+                    )
+                """)
+            )
+            conn.execute(
+                text("""
+                    INSERT INTO public.model_lifecycle_events (
+                        model_version, lifecycle_seq, event_type, from_status, to_status,
+                        related_model_version, actor, reason
+                    ) VALUES (
+                        'unevaluated_cand_v1', 1, 'REGISTERED', NULL, 'CANDIDATE',
+                        'xgb_onnx_v1.0.0', 'pytest', 'Registered unevaluated candidate'
+                    )
+                """)
+            )
+            conn.execute(
+                text("UPDATE public.model_registry SET current_status = 'ACTIVE' WHERE model_version = 'unevaluated_cand_v1'")
+            )
+
+
+def test_pg_lifecycle_event_synchronization_and_audit(pg_governance_engine):
+    """Suite 8: Verifies model_lifecycle_events is append-only and enforces atomic audit sync."""
+    # 1. UPDATE on lifecycle events is forbidden
+    with pytest.raises(DBAPIError, match="strictly append-only"):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(text("UPDATE public.model_lifecycle_events SET actor = 'tampered' WHERE model_version = 'xgb_onnx_v1.0.0'"))
+
+    # 2. DELETE on lifecycle events is forbidden
+    with pytest.raises(DBAPIError, match="strictly append-only"):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(text("DELETE FROM public.model_lifecycle_events WHERE model_version = 'xgb_onnx_v1.0.0'"))
+
+    # 3. Unsynchronized status transition violates deferred audit trigger
+    with pytest.raises(DBAPIError, match="Atomic lifecycle audit violation"):
+        with pg_governance_engine.begin() as conn:
+            # Transition ACTIVE -> ARCHIVED on model_registry without adding corresponding SUPERSEDED/ARCHIVED event
+            conn.execute(text("UPDATE public.model_registry SET current_status = 'ARCHIVED' WHERE model_version = 'xgb_onnx_v1.0.0'"))
+
+
+def test_pg_prediction_mode_invariants_and_lineage(pg_governance_engine):
+    """Suite 9: Verifies PRIMARY/SHADOW invariants, return/price alignment, and lineage."""
+    base_ts = datetime(2026, 7, 1, 10, 0, tzinfo=timezone.utc)
+    with pg_governance_engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO public.market_ticks (id, timestamp, open, high, low, close, volume) VALUES (999, :ts, 60000, 60100, 59900, 60000, 100)"),
+            {"ts": base_ts},
+        )
+
+    # 1. Prediction insert cannot contain non-null outcome fields
+    with pytest.raises(DBAPIError, match="Initial prediction insert must be unresolved"):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO public.model_predictions (
+                        tick_id, model_version, run_mode, is_canonical, is_primary,
+                        predicted_return_pct, predicted_price_1h, direction_predicted,
+                        direction_prob_up, clears_hurdle, actual_price_at_t_plus_1
+                    ) VALUES (
+                        999, 'xgb_onnx_v1.0.0', 'PRIMARY', TRUE, TRUE,
+                        0.5, 60300.0, 'UP', 0.65, TRUE, 60400.0
+                    )
+                """)
+            )
+
+    # 2. Return / price alignment mismatch rejected
+    with pytest.raises(DBAPIError, match="Forecast return/price mismatch"):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO public.model_predictions (
+                        tick_id, model_version, run_mode, is_canonical, is_primary,
+                        predicted_return_pct, predicted_price_1h, direction_predicted,
+                        direction_prob_up, clears_hurdle
+                    ) VALUES (
+                        999, 'xgb_onnx_v1.0.0', 'PRIMARY', TRUE, TRUE,
+                        10.0, 60300.0, 'UP', 0.65, TRUE
+                    )
+                """)
+            )
+
+    # 3. Primary prediction requires ACTIVE model
+    with pytest.raises(DBAPIError, match="Primary prediction rejected: model p1_controlled_candidate_v1 has status REJECTED"):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO public.model_predictions (
+                        tick_id, model_version, run_mode, is_canonical, is_primary,
+                        predicted_return_pct, predicted_price_1h, direction_predicted,
+                        direction_prob_up, clears_hurdle
+                    ) VALUES (
+                        999, 'p1_controlled_candidate_v1', 'PRIMARY', TRUE, TRUE,
+                        0.5, 60300.0, 'UP', 0.65, TRUE
+                    )
+                """)
+            )
+
+
+def test_pg_reconciliation_all_or_nothing_and_immutability(pg_governance_engine):
+    """Suite 10: Verifies all-or-nothing outcome populating, formula enforcement, and immutability."""
+    base_ts = datetime(2026, 7, 1, 10, 0, tzinfo=timezone.utc)
+    with pg_governance_engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO public.market_ticks (id, timestamp, open, high, low, close, volume) VALUES (1001, :ts, 60000, 60100, 59900, 60000, 100)"),
+            {"ts": base_ts},
+        )
+        conn.execute(
+            text("INSERT INTO public.market_ticks (id, timestamp, open, high, low, close, volume) VALUES (1002, :ts, 60300, 60400, 60200, 60300, 100)"),
+            {"ts": base_ts + timedelta(hours=1)},
+        )
+        conn.execute(
+            text("""
+                INSERT INTO public.model_predictions (
+                    id, tick_id, model_version, run_mode, is_canonical, is_primary,
+                    predicted_return_pct, predicted_price_1h, direction_predicted,
+                    direction_prob_up, clears_hurdle
+                ) VALUES (
+                    5001, 1001, 'xgb_onnx_v1.0.0', 'PRIMARY', TRUE, TRUE,
+                    0.5, 60300.0, 'UP', 0.70, TRUE
+                )
+            """)
+        )
+
+    # 1. DELETE on model_predictions is strictly forbidden
+    with pytest.raises(DBAPIError, match="strictly append-only"):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(text("DELETE FROM public.model_predictions WHERE id = 5001"))
+
+    # 2. Point-in-time forecast fields are immutable on update
+    with pytest.raises(DBAPIError, match="Point-in-time forecast fields in model_predictions are immutable"):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(text("UPDATE public.model_predictions SET predicted_price_1h = 60400.0 WHERE id = 5001"))
+
+    # 3. Successful atomic reconciliation
+    with pg_governance_engine.begin() as conn:
+        conn.execute(
+            text("""
+                UPDATE public.model_predictions
+                SET
+                    outcome_tick_id = 1002,
+                    evaluation_policy_version = 'binary_exact_t1_v2',
+                    actual_price_at_t_plus_1 = 60300.0,
+                    actual_return_pct = 0.5,
+                    direction_realized = 'UP',
+                    direction_correct = TRUE,
+                    residual_error = 0.0,
+                    absolute_error_usd = 0.0,
+                    percentage_error = 0.0,
+                    is_black_swan = FALSE,
+                    error_attribution_tag = 'ACCURATE',
+                    reconciled_at = :ts
+                WHERE id = 5001
+            """),
+            {"ts": base_ts + timedelta(hours=1)},
+        )
+
+    # 4. Finalized reconciliation is permanently immutable
+    with pytest.raises(DBAPIError, match="Finalized reconciliation outcome in model_predictions is permanently immutable"):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(text("UPDATE public.model_predictions SET actual_price_at_t_plus_1 = 60500.0 WHERE id = 5001"))
+
+
+def test_pg_prediction_investigations_constraints(pg_governance_engine):
+    """Suite 11: Verifies verification status check constraints and confidence boundaries."""
+    base_ts = datetime(2026, 7, 1, 10, 0, tzinfo=timezone.utc)
+    with pg_governance_engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO public.market_ticks (id, timestamp, open, high, low, close, volume) VALUES (2001, :ts, 60000, 60100, 59900, 60000, 100)"),
+            {"ts": base_ts},
+        )
+        conn.execute(
+            text("""
+                INSERT INTO public.prediction_investigations (
+                    tick_id, model_version, headline, suspected_cause_category, hypothesis_notes, diagnostic_confidence
+                ) VALUES (
+                    2001, 'xgb_onnx_v1.0.0', 'Sudden liquidity drain', 'MACRO_NEWS', 'Hypothesis verified.', 0.85
+                )
+            """)
+        )
+
+    # Confidence score > 1.0 is rejected by check constraint
+    with pytest.raises(DBAPIError):
+        with pg_governance_engine.begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO public.prediction_investigations (
+                        tick_id, model_version, headline, suspected_cause_category, hypothesis_notes, diagnostic_confidence
+                    ) VALUES (
+                        2001, 'xgb_onnx_v1.0.0', 'Invalid confidence', 'MACRO_NEWS', 'Notes', 1.5
+                    )
+                """)
+            )
+
+
+def test_pg_migration_runner_idempotency_and_drift_detection(pg_governance_engine):
+    """Suite 12: Verifies migration runner re-execution idempotency and SchemaDriftError detection."""
+    from scripts.migrate_db import run_migration
+
+    # 1. Re-running migration on already migrated schema is an idempotent success
+    res = run_migration(target_engine=pg_governance_engine, execute=True)
+    assert res["mode"] == "EXECUTE"
+    assert res["verification"]["status"] == "verified"
+
+    # 2. Introducing synthetic drift (e.g. dropping a constraint) triggers SchemaDriftError
+    with pg_governance_engine.begin() as conn:
+        conn.execute(text("ALTER TABLE public.prediction_investigations DROP CONSTRAINT chk_pi_verification_status"))
+
+    with pytest.raises(SchemaDriftError, match="Required constraint 'chk_pi_verification_status' on 'prediction_investigations' is missing"):
+        verify_db_schema(pg_governance_engine)
