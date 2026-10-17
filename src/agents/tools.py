@@ -14,8 +14,11 @@ from datetime import datetime, timezone
 from langchain_core.tools import tool
 
 from config import (
+    ACTIVE_MODEL_VERSION,
     REGRESSOR_MODEL_PATH,
+    REGRESSOR_MODEL_SHA256,
     CLASSIFIER_MODEL_PATH,
+    CLASSIFIER_MODEL_SHA256,
     REGRESSOR_FEATURES,
     CLASSIFIER_FEATURES,
     FEATURED_BTC_DATA_PATH,
@@ -23,6 +26,7 @@ from config import (
     LIVE_FETCH_LIMIT,
     MIN_HURDLE_PCT,
 )
+from src.model_loader import load_verified_model
 from src.feature_engineering import (
     extract_features_for_inference,
     validate_inference_features,
@@ -229,10 +233,7 @@ def get_model_return_forecast(features: Optional[Dict[str, Any]] = None) -> Dict
     current_close = float(feature_dict.get("close", feature_dict.get("close_price", feature_dict.get("current_price", 65000.0))))
 
     # 1. Regressor Inference (Target Return)
-    if not os.path.exists(REGRESSOR_MODEL_PATH):
-        raise FileNotFoundError(f"Regressor model artifact not found at {REGRESSOR_MODEL_PATH}")
-
-    model_reg = joblib.load(REGRESSOR_MODEL_PATH)
+    model_reg = load_verified_model(REGRESSOR_MODEL_PATH, REGRESSOR_MODEL_SHA256)
     if hasattr(model_reg, "set_params"):
         try:
             model_reg.set_params(device="cpu")
@@ -242,10 +243,7 @@ def get_model_return_forecast(features: Optional[Dict[str, Any]] = None) -> Dict
     raw_pred_return = float(predict_with_validation(model_reg, df_reg, model_type="regressor")[0])
 
     # 2. Classifier Inference (Directional Movement & Probability)
-    if not os.path.exists(CLASSIFIER_MODEL_PATH):
-        raise FileNotFoundError(f"Classifier model artifact not found at {CLASSIFIER_MODEL_PATH}")
-
-    model_clf = joblib.load(CLASSIFIER_MODEL_PATH)
+    model_clf = load_verified_model(CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256)
     if hasattr(model_clf, "set_params"):
         try:
             model_clf.set_params(device="cpu")
@@ -287,6 +285,7 @@ def get_model_return_forecast(features: Optional[Dict[str, Any]] = None) -> Dict
         "direction_probability_up": round(prob_up * 100.0, 2),
         "direction_probability_down": round(prob_down * 100.0, 2),
         "confidence": round(confidence, 4),
+        "model_version": ACTIVE_MODEL_VERSION,
         "status": "success"
     }
 
