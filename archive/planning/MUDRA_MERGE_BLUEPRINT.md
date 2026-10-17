@@ -27,7 +27,7 @@
 * **Limitations Before Merge**: Positioned as a generic tutorial-style stock prediction notebook without formal portfolio risk rules or crypto WebSocket streaming.
 
 ### Project B: `Mudra` (The Autonomous Architecture & Vision)
-* **Origins**: Conceptual design documents (`DESIGN.md`, `GOALS.docx`, `TRADING BOT.docx`, `BOT-requirement.txt`).
+* **Origins**: Conceptual design documents (`docs/reference/initial_system_design_vision.md` [formerly `DESIGN.md`], `GOALS.docx`, `TRADING BOT.docx`, `BOT-requirement.txt`).
 * **Core Strengths**:
   * Real-time crypto stream architecture (BTC/USDT via CCXT and Binance WebSocket).
   * Self-correcting learning loop: logs prediction errors into `prediction_log.csv` and auto-retrains after threshold errors.
