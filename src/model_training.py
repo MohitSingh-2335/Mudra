@@ -76,7 +76,7 @@ def train_and_save_models(
     df = load_and_clean_data(data_path)
     print(f"[INFO] Loaded {len(df):,} candlestick rows.")
 
-    # Check if features are already engineered, otherwise run Stage 2 ETL
+    # Check if features are already engineered; otherwise generate them
     required_targets = {"Target_Return", "Target_Movement", "Target_Close"}
     if not required_targets.issubset(df.columns):
         print("[INFO] Merging Fear & Greed sentiment metrics...")
