@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field, ConfigDict
 from src.agents.market_analyst_agent import MarketAnalystReport
 
-ACTIVE_MODEL_VERSION: str = "xgb_onnx_v1.0.0"
+from config import ACTIVE_MODEL_VERSION
 
 __all__ = [
     "ACTIVE_MODEL_VERSION",
@@ -115,6 +115,9 @@ class ReconciliationSummaryResponse(BaseModel):
     information_coefficient_ic: float = Field(default=0.0)
     black_swan_count: int = Field(default=0)
     tag_breakdown: Dict[str, int] = Field(default_factory=dict)
+    model_version: Optional[str] = Field(default=None, description="Optional model version filter applied")
+    query_failed: bool = Field(default=False, description="Flag indicating whether underlying database query failed")
+    error: Optional[str] = Field(default=None, description="Explicit failure description if query failed")
 
 
 class PortfolioSummaryResponse(BaseModel):
