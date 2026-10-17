@@ -33,6 +33,8 @@ from sqlalchemy import select, desc
 from sqlalchemy.exc import IntegrityError
 
 from config import (
+    ACTIVE_MODEL_VERSION,
+    FEATURE_SCHEMA_VERSION,
     EXCHANGE_RETRY_MAX_ATTEMPTS,
     EXCHANGE_CONNECT_TIMEOUT,
     EXCHANGE_READ_TIMEOUT,
@@ -256,8 +258,8 @@ def backfill_missing_candles(session, candle: Dict[str, Any]) -> int:
             low=c_data["low"],
             close=c_data["close"],
             volume=c_data["volume"],
-            model_version="xgb_onnx_v1.0.0",
-            feature_schema_version="v1_39features",
+            model_version=ACTIVE_MODEL_VERSION,
+            feature_schema_version=FEATURE_SCHEMA_VERSION,
             market_regime=None,
             predicted_return_1h=None,
             predicted_price_1h=None,
@@ -875,6 +877,8 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
                 current_tick.predicted_price_1h = pred_price
                 current_tick.model_confidence = confidence
                 current_tick.features = signals_output
+                current_tick.model_version = ACTIVE_MODEL_VERSION
+                current_tick.feature_schema_version = FEATURE_SCHEMA_VERSION
                 session.flush()
         else:
             current_tick = MarketTick(
@@ -884,8 +888,8 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
                 low=candle["low"],
                 close=candle["close"],
                 volume=candle["volume"],
-                model_version="xgb_onnx_v1.0.0",
-                feature_schema_version="v1_39features",
+                model_version=ACTIVE_MODEL_VERSION,
+                feature_schema_version=FEATURE_SCHEMA_VERSION,
                 market_regime=regime,
                 predicted_return_1h=pred_return,
                 predicted_price_1h=pred_price,
