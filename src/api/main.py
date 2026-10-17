@@ -36,6 +36,7 @@ from config import (
 from src.feature_engineering import validate_inference_features, predict_with_validation
 from src.explainability import get_tree_explainer, explain_single_prediction
 from src.api.schemas import (
+    ACTIVE_MODEL_VERSION,
     HealthResponse,
     PredictRequest,
     PredictResponse,
@@ -48,7 +49,7 @@ from src.api.schemas import (
     PortfolioSummaryResponse,
 )
 
-__all__ = ["app", "lifespan", "models"]
+__all__ = ["app", "lifespan", "models", "ACTIVE_MODEL_VERSION"]
 
 # Global model store for high-throughput serving
 models = {}
@@ -101,7 +102,7 @@ async def health_check():
     """Endpoint for load balancers and container health probes."""
     return HealthResponse(
         status="ok",
-        model_version="optuna_tuned_xgboost_v1"
+        model_version=ACTIVE_MODEL_VERSION
     )
 
 
@@ -139,7 +140,8 @@ async def predict(req: PredictRequest):
         predicted_price=round(pred_price, 2),
         predicted_return=round(pred_return, 6),
         directional_movement=move_text,
-        movement_code=move_code
+        movement_code=move_code,
+        model_version=ACTIVE_MODEL_VERSION,
     )
 
 
