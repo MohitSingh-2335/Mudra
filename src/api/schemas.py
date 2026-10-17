@@ -5,7 +5,10 @@ from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field, ConfigDict
 from src.agents.market_analyst_agent import MarketAnalystReport
 
+ACTIVE_MODEL_VERSION: str = "xgb_onnx_v1.0.0"
+
 __all__ = [
+    "ACTIVE_MODEL_VERSION",
     "HealthResponse",
     "PredictRequest",
     "FeatureAttribution",
@@ -23,7 +26,7 @@ class HealthResponse(BaseModel):
     """Health check status response."""
     model_config = ConfigDict(protected_namespaces=())
     status: str = Field(default="ok", examples=["ok"])
-    model_version: str = Field(default="optuna_tuned_xgboost_v1")
+    model_version: str = Field(default=ACTIVE_MODEL_VERSION)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -44,12 +47,14 @@ class FeatureAttribution(BaseModel):
 
 
 class PredictResponse(BaseModel):
-    """Response containing numeric forecast and directional classification."""
+    """Response containing numeric forecast, directional classification, and model provenance."""
+    model_config = ConfigDict(protected_namespaces=())
     current_price: float
     predicted_price: float
     predicted_return: float
     directional_movement: str
     movement_code: int
+    model_version: str = Field(default=ACTIVE_MODEL_VERSION)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
