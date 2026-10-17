@@ -22,6 +22,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
 
+from config import ACTIVE_MODEL_VERSION, FEATURE_SCHEMA_VERSION
+
 __all__ = [
     "Base",
     "MarketTick",
@@ -57,8 +59,8 @@ class MarketTick(Base):
     volume = Column(Float, nullable=False)
 
     # Model Lineage & Invariants
-    model_version = Column(String(32), nullable=False, default="xgb_onnx_v1.0.0")
-    feature_schema_version = Column(String(16), nullable=False, default="v1_39features")
+    model_version = Column(String(32), nullable=False, default=ACTIVE_MODEL_VERSION)
+    feature_schema_version = Column(String(16), nullable=False, default=FEATURE_SCHEMA_VERSION)
     market_regime = Column(String(32), nullable=True)  # e.g., HIGH_VOL_CHOP, BULL_TREND
 
     # Model Inference
@@ -553,7 +555,7 @@ class ModelPrediction(Base):
     is_canonical = Column(Boolean, nullable=False, default=True)
     is_primary = Column(Boolean, nullable=False, default=False)
     parent_prediction_id = Column(Integer, nullable=True)
-    feature_schema_version = Column(String(32), nullable=False, default="v1_39features")
+    feature_schema_version = Column(String(32), nullable=False, default=FEATURE_SCHEMA_VERSION)
     predicted_return_pct = Column(Float, nullable=False)
     predicted_price_1h = Column(Float, nullable=False)
     direction_predicted = Column(String(16), nullable=False)
