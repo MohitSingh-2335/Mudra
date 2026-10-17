@@ -144,8 +144,8 @@ real result â€” this phase is the third consecutive confirmation of why tha
 ## 8. Artifacts produced this phase
 
 - `src/agents/fear_greed_agent.py` â€” FNG fetch/merge agent (kept, reusable for future framing experiments)
-- `data/results/threshold_sweep.csv` â€” updated with +FNG numbers (overwrites Phase 1's file â€” Phase 1's
-  numbers are preserved in `phase_1.md` Â§4.2 for comparison)
+- `data/results/threshold_sweep.csv` — updated with +FNG numbers (overwrites Phase 1's file — Phase 1's
+  numbers are preserved in `classical_model_backtesting.md` §4.2 for comparison)
 - Modified: `src/feature_engineering.py`, `scripts/prepare_data.py`, `config.py`, `src/backtesting.py`,
   `scripts/experiments/sweep_threshold.py`, `experiments/backtesting/compare_models_backtest.py`,
   `experiments/backtesting/significance_test.py`, `experiments/backtesting/walk_forward_validate.py`
