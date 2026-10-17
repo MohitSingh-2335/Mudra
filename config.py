@@ -181,10 +181,16 @@ TOTAL_FRICTION_PER_SIDE_PCT: float = TOTAL_FRICTION_PER_SIDE_RATE * 100.0
 ROUND_TRIP_FRICTION_PCT: float = ROUND_TRIP_FRICTION_RATE * 100.0
 MIN_HURDLE_PCT: float = MIN_HURDLE_RATE * 100.0
 
-# Active Model Artifact Paths
+# Active Model Artifact Paths & Verified Hashes
 MODELS_DIR = str(BASE_DIR / "artifacts" / "models")
 REGRESSOR_MODEL_PATH = str(BASE_DIR / "artifacts" / "models" / "best_regressor_model.pkl")
 CLASSIFIER_MODEL_PATH = str(BASE_DIR / "artifacts" / "models" / "best_classifier_model.pkl")
+
+# Canonical Model Governance & Lineage (Single Source of Truth)
+ACTIVE_MODEL_VERSION: str = "xgb_onnx_v1.0.0"
+FEATURE_SCHEMA_VERSION: str = "v1_39features"
+REGRESSOR_MODEL_SHA256: str = "b44fba18cf2c7b51e3297e83a946d869392803a267e951a5e85ea052c63eb854"
+CLASSIFIER_MODEL_SHA256: str = "df139c1018ed5025b1444d6597c3d98b4d7c377a898487268d18e58d253ae684"
 
 # Auxiliary / Checkpoint Artifact Paths
 XGB_MODEL_PATH = str(BASE_DIR / "artifacts" / "models" / "best_xgb_model.pkl")
@@ -289,6 +295,10 @@ __all__ = [
     "MODELS_DIR",
     "REGRESSOR_MODEL_PATH",
     "CLASSIFIER_MODEL_PATH",
+    "ACTIVE_MODEL_VERSION",
+    "FEATURE_SCHEMA_VERSION",
+    "REGRESSOR_MODEL_SHA256",
+    "CLASSIFIER_MODEL_SHA256",
     "XGB_MODEL_PATH",
     "LSTM_MODEL_PATH",
     "SVC_MODEL_PATH",
