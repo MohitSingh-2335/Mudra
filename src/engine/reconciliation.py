@@ -180,23 +180,35 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
     return reconciled_records
 
 
-def get_reconciliation_summary(session: Session, limit: int = 168) -> Dict[str, Any]:
+def get_reconciliation_summary(session: Session, limit: int = 168, model_version: Optional[str] = None) -> Dict[str, Any]:
     """
     Computes rolling performance metrics across the most recent N reconciled predictions.
+    Supports optional model_version filtering via joined MarketTick.
     Used by Streamlit Terminal and FastAPI monitoring endpoints.
     
     Parameters:
         session: Active DB session
         limit: Rolling lookback window (default 168 hours = 7 days)
+        model_version: Optional model version filter (e.g. 'xgb_onnx_v1.0.0').
+                      If None or 'All Models', aggregates across all records.
         
     Returns:
-        Dictionary containing win rate, MAE, MAPE, IC, and sample counts.
+        Dictionary containing win rate, MAE, MAPE, IC, sample counts, and applied model_version filter.
     """
-    stmt = (
-        select(Reconciliation)
-        .order_by(desc(Reconciliation.timestamp))
-        .limit(limit)
-    )
+    if model_version is not None and model_version != "All Models":
+        stmt = (
+            select(Reconciliation)
+            .join(MarketTick, Reconciliation.tick_id == MarketTick.id)
+            .where(MarketTick.model_version == model_version)
+            .order_by(desc(Reconciliation.timestamp))
+            .limit(limit)
+        )
+    else:
+        stmt = (
+            select(Reconciliation)
+            .order_by(desc(Reconciliation.timestamp))
+            .limit(limit)
+        )
     records = session.execute(stmt).scalars().all()
 
     if not records:
@@ -213,6 +225,9 @@ def get_reconciliation_summary(session: Session, limit: int = 168) -> Dict[str, 
             "black_swan_count": 0,
             "accurate_count": 0,
             "tag_breakdown": {},
+            "model_version": model_version if (model_version and model_version != "All Models") else None,
+            "query_failed": False,
+            "error": None,
         }
 
     total = len(records)
@@ -246,6 +261,9 @@ def get_reconciliation_summary(session: Session, limit: int = 168) -> Dict[str, 
         "black_swan_count": black_swans,
         "accurate_count": accurate,
         "tag_breakdown": tag_counts,
+        "model_version": model_version if (model_version and model_version != "All Models") else None,
+        "query_failed": False,
+        "error": None,
     }
 
 
