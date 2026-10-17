@@ -351,7 +351,8 @@ def predict_with_validation(
     model_type: str = "regressor"
 ) -> np.ndarray:
     """
-    Validates feature contracts and executes model.predict() on strictly ordered columns.
+    Validates feature contracts, executes model.predict() on strictly ordered columns,
+    and enforces finite (non-NaN, non-Inf) real numerical outputs.
 
     Args:
         model: Trained model artifact with a .predict() method.
@@ -359,12 +360,24 @@ def predict_with_validation(
         model_type: "regressor" or "classifier".
 
     Returns:
-        np.ndarray: Model predictions.
+        np.ndarray: Finite model predictions.
+
+    Raises:
+        ValueError: If model lacks .predict, features fail schema/order/type/finite checks,
+                    or model prediction output contains NaNs or infinite values.
     """
     if model is None or not hasattr(model, "predict"):
         raise ValueError("Invalid model provided: must implement .predict().")
     validated_df = validate_inference_features(features, model_type=model_type)
-    return model.predict(validated_df)
+    raw_preds = model.predict(validated_df)
+    preds = np.asarray(raw_preds)
+    if preds.size == 0:
+        raise ValueError(f"Model inference integrity violation: {model_type} model returned empty predictions.")
+    if np.isnan(preds).any() or np.isinf(preds).any():
+        raise ValueError(
+            f"Model inference integrity violation: Non-finite values (NaN or Inf) returned by {model_type} model."
+        )
+    return preds
 
 
 def predict_proba_with_validation(
@@ -372,7 +385,8 @@ def predict_proba_with_validation(
     features: Union[pd.DataFrame, dict]
 ) -> np.ndarray:
     """
-    Validates classifier feature contracts and executes model.predict_proba().
+    Validates classifier feature contracts, executes model.predict_proba(),
+    and verifies that probabilities are finite and within [0.0, 1.0].
 
     Args:
         model: Trained classifier artifact with a .predict_proba() method.
@@ -380,8 +394,24 @@ def predict_proba_with_validation(
 
     Returns:
         np.ndarray: Predicted class probabilities.
+
+    Raises:
+        ValueError: If classifier lacks .predict_proba, features fail validation,
+                    or output probabilities are non-finite or outside [0.0, 1.0].
     """
     if model is None or not hasattr(model, "predict_proba"):
         raise ValueError("Invalid classifier provided: must implement .predict_proba().")
     validated_df = validate_inference_features(features, model_type="classifier")
-    return model.predict_proba(validated_df)
+    raw_probs = model.predict_proba(validated_df)
+    probs = np.asarray(raw_probs)
+    if probs.size == 0:
+        raise ValueError("Classifier predict_proba integrity violation: returned empty probabilities.")
+    if np.isnan(probs).any() or np.isinf(probs).any():
+        raise ValueError(
+            "Classifier predict_proba integrity violation: Probabilities contain non-finite values (NaN or Inf)."
+        )
+    if (probs < 0.0).any() or (probs > 1.0).any():
+        raise ValueError(
+            "Classifier predict_proba integrity violation: Probabilities must fall strictly within [0.0, 1.0]."
+        )
+    return probs
