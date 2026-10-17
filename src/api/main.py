@@ -19,20 +19,41 @@ if str(ROOT_DIR) not in sys.path:
 if hasattr(sys.stdout, "reconfigure") and sys.stdout.isatty():
     sys.stdout.reconfigure(encoding="utf-8")
 
+import logging
+import re
+
+logger = logging.getLogger("src.api.main")
+
+
+def _sanitize_log_message(msg: str) -> str:
+    """Masks database passwords, URLs with credentials, and secret tokens in logs."""
+    sanitized = re.sub(r"(://[^:]+:)[^@]+(@)", r"\1***\2", str(msg))
+    sanitized = re.sub(
+        r"(password|pwd|secret|token|api_key)=['\"]?[^'\"\s&]+['\"]?",
+        r"\1=***",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    return sanitized
+
 from src.agents.market_analyst_agent import generate_market_commentary
 import joblib
 import pandas as pd
 import numpy as np
+from typing import Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import (
     REGRESSOR_MODEL_PATH,
+    REGRESSOR_MODEL_SHA256,
     CLASSIFIER_MODEL_PATH,
+    CLASSIFIER_MODEL_SHA256,
     REGRESSOR_FEATURES,
     CLASSIFIER_FEATURES
 )
+from src.model_loader import load_verified_model
 from src.feature_engineering import validate_inference_features, predict_with_validation
 from src.explainability import get_tree_explainer, explain_single_prediction
 from src.api.schemas import (
@@ -60,8 +81,8 @@ async def lifespan(app: FastAPI):
     """Loads models and explainers into memory at startup."""
     print("[INIT] Initializing Mudra Production Inference Engine...")
     try:
-        reg_model = joblib.load(REGRESSOR_MODEL_PATH)
-        clf_model = joblib.load(CLASSIFIER_MODEL_PATH)
+        reg_model = load_verified_model(REGRESSOR_MODEL_PATH, REGRESSOR_MODEL_SHA256)
+        clf_model = load_verified_model(CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256)
 
         # Force CPU device for sub-millisecond single-row inference
         reg_model.set_params(device="cpu")
@@ -226,15 +247,16 @@ async def run_agent_trade(req: AgentTradeRequest):
 
 
 @app.get("/reconciliation/summary", response_model=ReconciliationSummaryResponse, tags=["Observability & Database"])
-async def get_reconciliation_metrics(lookback_hours: int = 168):
+async def get_reconciliation_metrics(lookback_hours: int = 168, model_version: Optional[str] = None):
     """Returns rolling delayed reconciliation accuracy metrics from Neon PostgreSQL."""
     from src.database.queries import get_reconciliation_kpis
     try:
-        return get_reconciliation_kpis(lookback_hours=lookback_hours)
+        return get_reconciliation_kpis(lookback_hours=lookback_hours, model_version=model_version)
     except Exception as e:
+        logger.error("Failed to fetch reconciliation metrics: error_type=%s", type(e).__name__)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Database query failed: {str(e)}"
+            detail="Database query failed"
         )
 
 
@@ -245,9 +267,10 @@ async def get_portfolio_metrics(current_price: float = 83000.0):
     try:
         return get_portfolio_kpis(current_price=current_price)
     except Exception as e:
+        logger.error("Failed to fetch portfolio metrics: error_type=%s", type(e).__name__)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Database query failed: {str(e)}"
+            detail="Database query failed"
         )
 
 
