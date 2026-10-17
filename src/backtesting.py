@@ -24,6 +24,7 @@ import matplotlib.pyplot as plt
 # Re-exports for backwards compatibility across empirical research experiments
 from src.data_preprocessing import load_and_clean_data
 from src.feature_engineering import create_features
+from src.model_loader import load_production_models as loader_load_production_models
 
 from config import (
     REGRESSOR_MODEL_PATH,
@@ -62,17 +63,8 @@ def load_backtest_data(
 
 
 def load_production_models() -> Tuple[Any, Any]:
-    """Loads serialized Optuna-tuned models and forces CPU execution."""
-    if not os.path.exists(REGRESSOR_MODEL_PATH):
-        raise FileNotFoundError(f"[ERROR] Regressor model not found at: {REGRESSOR_MODEL_PATH}")
-    if not os.path.exists(CLASSIFIER_MODEL_PATH):
-        raise FileNotFoundError(f"[ERROR] Classifier model not found at: {CLASSIFIER_MODEL_PATH}")
-
-    reg_model = joblib.load(REGRESSOR_MODEL_PATH)
-    clf_model = joblib.load(CLASSIFIER_MODEL_PATH)
-    reg_model.set_params(device="cpu")
-    clf_model.set_params(device="cpu")
-    return reg_model, clf_model
+    """Loads verified serialized Optuna-tuned models and forces CPU execution."""
+    return loader_load_production_models()
 
 
 def _simulate_from_signals(
