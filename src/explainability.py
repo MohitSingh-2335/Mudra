@@ -30,7 +30,9 @@ except ImportError:
 
 from config import (
     REGRESSOR_MODEL_PATH,
+    REGRESSOR_MODEL_SHA256,
     CLASSIFIER_MODEL_PATH,
+    CLASSIFIER_MODEL_SHA256,
     REGRESSOR_FEATURES,
     CLASSIFIER_FEATURES,
     FEATURED_BTC_DATA_PATH,
@@ -40,6 +42,7 @@ from config import (
     SHAP_CLASSIFIER_SUMMARY_PATH,
     SHAP_IMPORTANCE_CSV_PATH
 )
+from src.model_loader import load_verified_model
 
 
 def get_tree_explainer(model: Any) -> shap.TreeExplainer:
@@ -82,7 +85,7 @@ def generate_global_explanations() -> None:
 
     # 1. Regressor Global SHAP
     print("[INFO] Evaluating Regressor TreeSHAP values...")
-    xgbr = joblib.load(REGRESSOR_MODEL_PATH)
+    xgbr = load_verified_model(REGRESSOR_MODEL_PATH, REGRESSOR_MODEL_SHA256)
     X_reg = test_df[REGRESSOR_FEATURES]
     explainer_reg = shap.TreeExplainer(xgbr)
     shap_values_reg = explainer_reg(X_reg)
@@ -98,7 +101,7 @@ def generate_global_explanations() -> None:
 
     # 2. Classifier Global SHAP
     print("[INFO] Evaluating Classifier TreeSHAP values...")
-    xgbc = joblib.load(CLASSIFIER_MODEL_PATH)
+    xgbc = load_verified_model(CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256)
     X_clf = test_df[CLASSIFIER_FEATURES]
     explainer_clf = shap.TreeExplainer(xgbc)
     shap_values_clf = explainer_clf(X_clf)
