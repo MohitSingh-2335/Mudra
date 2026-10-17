@@ -59,46 +59,62 @@ def get_latest_market_ticks(limit: int = 100) -> pd.DataFrame:
             df = df.sort_values("timestamp").reset_index(drop=True)
             return df
     except Exception as exc:
-        logger.warning(f"Failed to fetch market ticks: {exc}")
+        logger.warning("Failed to fetch market ticks: error_type=%s", type(exc).__name__)
         return pd.DataFrame()
 
 
-def get_reconciliation_history(limit: int = 50) -> pd.DataFrame:
+def get_reconciliation_history(limit: int = 50, model_version: Optional[str] = None) -> pd.DataFrame:
     """
     Fetches the most recent N delayed reconciliation records from Neon.
-    Used for the Live Track Record Audit table. Returns empty DataFrame on failure.
+    Attributes each record to its producing model_version via MarketTick.
+    Supports optional model_version filtering while preserving records with
+    unknown model attribution when model_version is None or 'All Models'.
+    Returns empty DataFrame on failure.
     """
     try:
         with get_db() as session:
             stmt = (
-                select(Reconciliation)
-                .order_by(desc(Reconciliation.timestamp))
-                .limit(limit)
+                select(Reconciliation, MarketTick.model_version)
+                .outerjoin(MarketTick, Reconciliation.tick_id == MarketTick.id)
             )
-            records = session.execute(stmt).scalars().all()
-            if not records:
+            if model_version is not None and model_version != "All Models":
+                stmt = stmt.where(MarketTick.model_version == model_version)
+
+            stmt = stmt.order_by(desc(Reconciliation.timestamp)).limit(limit)
+            rows = session.execute(stmt).all()
+            if not rows:
                 return pd.DataFrame()
-            
-            data = [r.to_dict() for r in records]
+
+            data = []
+            for r, m_ver in rows:
+                r_dict = r.to_dict()
+                r_dict["model_version"] = m_ver if m_ver is not None else None
+                data.append(r_dict)
+
             df = pd.DataFrame(data)
             df["timestamp"] = pd.to_datetime(df["timestamp"])
             return df
     except Exception as exc:
-        logger.warning(f"Failed to fetch reconciliation history: {exc}")
+        logger.warning("Failed to fetch reconciliation history: error_type=%s", type(exc).__name__)
         return pd.DataFrame()
 
 
-def get_reconciliation_kpis(lookback_hours: int = 168) -> Dict[str, Any]:
+def get_reconciliation_kpis(lookback_hours: int = 168, model_version: Optional[str] = None) -> Dict[str, Any]:
     """
     Computes rolling accuracy KPIs (Win Rate %, MAE, MAPE, IC) across N hours.
-    Returns defensive default KPIs on failure.
+    Supports optional model_version filtering.
+    Explicitly distinguishes query success from query failure via 'query_failed' boolean flag.
+    Returns defensive default KPIs with query_failed=True on failure.
     """
     try:
         from src.engine.reconciliation import get_reconciliation_summary
         with get_db() as session:
-            return get_reconciliation_summary(session, limit=lookback_hours)
+            res = get_reconciliation_summary(session, limit=lookback_hours, model_version=model_version)
+            res["query_failed"] = False
+            res["error"] = None
+            return res
     except Exception as exc:
-        logger.warning(f"Failed to fetch reconciliation KPIs: {exc}")
+        logger.warning("Failed to fetch reconciliation KPIs: error_type=%s", type(exc).__name__)
         return {
             "total_evaluated": 0,
             "total_reconciled": 0,
@@ -112,6 +128,9 @@ def get_reconciliation_kpis(lookback_hours: int = 168) -> Dict[str, Any]:
             "black_swan_count": 0,
             "accurate_count": 0,
             "tag_breakdown": {},
+            "model_version": model_version if (model_version and model_version != "All Models") else None,
+            "query_failed": True,
+            "error": "Database query failed",
         }
 
 
@@ -137,7 +156,7 @@ def get_portfolio_history(limit: int = 100) -> pd.DataFrame:
             df["timestamp"] = pd.to_datetime(df["timestamp"])
             return df
     except Exception as exc:
-        logger.warning(f"Failed to fetch portfolio history: {exc}")
+        logger.warning("Failed to fetch portfolio history: error_type=%s", type(exc).__name__)
         return pd.DataFrame()
 
 
@@ -152,7 +171,7 @@ def get_portfolio_kpis(current_price: float) -> Dict[str, Any]:
             return get_portfolio_summary(session, current_price=current_price)
 
     except Exception as exc:
-        logger.warning(f"Failed to fetch portfolio KPIs: {exc}")
+        logger.warning("Failed to fetch portfolio KPIs: error_type=%s", type(exc).__name__)
         return {
             "cash_balance": 10000.0,
             "btc_balance": 0.0,
@@ -181,7 +200,7 @@ def get_latest_council_audit() -> Optional[Dict[str, Any]]:
             audit = session.execute(stmt).scalar_one_or_none()
             return audit.to_dict() if audit else None
     except Exception as exc:
-        logger.warning(f"Failed to fetch latest council audit: {exc}")
+        logger.warning("Failed to fetch latest council audit: error_type=%s", type(exc).__name__)
         return None
 
 
