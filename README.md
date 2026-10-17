@@ -1,14 +1,14 @@
 # Mudra: Bitcoin Quantitative ML & Autonomous Trading Terminal
 
 [![Live Terminal](https://img.shields.io/badge/Live%20Terminal-Streamlit%20Cloud-00E599?style=flat-square&logo=streamlit)](https://mudra-trading.streamlit.app)
-[![CI/CD](https://img.shields.io/badge/CI%2FCD-Passing-brightgreen?style=flat-square&logo=githubactions)](https://github.com/MohitSingh-2335/Mudra/actions)
-[![Pytest](https://img.shields.io/badge/pytest-20%20passed-brightgreen?style=flat-square&logo=pytest)](tests/)
+[![CI](https://github.com/MohitSingh-2335/Mudra/actions/workflows/ci.yml/badge.svg)](https://github.com/MohitSingh-2335/Mudra/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-pytest-blue?style=flat-square&logo=pytest)](tests/)
 [![Python](https://img.shields.io/badge/Python-3.11-blue?style=flat-square&logo=python)](https://www.python.org/)
-[![Database](https://img.shields.io/badge/Database-Neon%20PostgreSQL-blueviolet?style=flat-square&logo=postgresql)](https://neon.tech)
+[![Database](https://img.shields.io/badge/Database-PostgreSQL-blueviolet?style=flat-square&logo=postgresql)](https://neon.tech)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&logo=docker)](docker-compose.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
-Mudra is a machine learning trading platform for Bitcoin (`BTC/USDT`). It uses two tuned XGBoost models (one for price return, one for direction), a 2-node risk evaluation council, delayed prediction verification, and an automated paper trading ledger on PostgreSQL.
+Mudra is an experimental machine learning trading research and paper-trading platform for Bitcoin (`BTC/USDT`). It uses dual XGBoost models (return regression and direction classification), a 2-node risk evaluation council, delayed prediction verification, and an automated paper trading ledger backed by PostgreSQL.
 
 **Live Web Application:** [mudra-trading.streamlit.app](https://mudra-trading.streamlit.app)
 
@@ -20,14 +20,20 @@ Most machine learning models for crypto fail in real markets because of two comm
 1. **Data Leakage (Lookahead Bias):** Randomly shuffling time-series data lets future price patterns leak into training. Mudra uses a strict chronological split: training on past data (2021 to mid-2025) and testing on 7,000 out-of-sample hours (mid-2025 to 2026).
 2. **Ignoring Trading Fees:** Trading on every small signal burns capital quickly through exchange taker fees (0.05% per side) and slippage (0.02% per side, or 0.07% per fill). Mudra only enters an active trade when the model's expected return clears the canonical ~0.14% (`0.139951%`) round-trip break-even hurdle rate.
 
-### Key Results
-During the historical Phase 1 out-of-sample study (7,000 hours evaluated under a legacy 0.30% round-trip friction assumption) where Bitcoin dropped **-45.2%**, Mudra filtered out 96% of low-conviction chop trades and held USDT cash, recording **+33.55 percentage points of historical excess return (Alpha)** over Buy & Hold (historical benchmark provenance; not evidence of equivalent performance under the current canonical `0.139951%` friction).
+### Historical Backtest Results & Research Limitations
+
+The performance comparison below is a **historical, single-split research result** from the initial classical model backtesting study ([`docs/reports/classical_model_backtesting.md`](docs/reports/classical_model_backtesting.md)). It does **not** represent current live performance, verified predictive alpha, or profitable trading.
+
+* **Single-Split Backtest Context:** Over a held-out 7,000-hour test window (mid-2025 to 2026) where Bitcoin experienced a severe market drawdown (**-45.24%**), a fee-hurdle gated strategy achieved a return of **-11.69%** (a relative +33.55 percentage-point gap over Buy & Hold).
+* **Friction Assumption:** This historical run evaluated an older **0.30% round-trip friction** assumption (0.10% taker fee + 0.05% slippage per side). This legacy benchmark cannot be directly compared to runs evaluated under the current canonical ~0.14% (`0.139951%`) hurdle rate.
+* **Cash-Preservation, Not Predictive Edge:** The apparent relative advantage was substantially driven by remaining in USDT cash during a bear market (0.77% market exposure across only 49 trades), rather than market-timing precision.
+* **Walk-Forward Failure to Replicate:** When the winning high-threshold configuration was evaluated across 5 independent, non-overlapping walk-forward windows (2022–2026), the strategy beat Buy & Hold in **only 1 of 5 windows**, with a cross-window mean return of **-0.52%** (centered on zero). Raising the threshold merely reduced sample size until noise appeared as a pattern, confirming that the classical models did not exhibit a durable directional edge after transaction costs.
 
 | Strategy | Total Return | Max Drawdown | Total Trades | Exposure Time |
 | :--- | :---: | :---: | :---: | :---: |
 | **Buy & Hold Bitcoin** | -45.24% | -53.74% | 1 | 100.0% |
 | **Basic Classifier (No Fee Filter)** | -97.56% | -97.56% | 1,237 | 57.9% |
-| **Mudra (Fee Hurdle Gated)** | **-11.69%** | **-11.69%** | **49** | **0.77%** |
+| **Historical Gated Strategy (Legacy 0.30% Friction)** | **-11.69%** | **-11.69%** | **49** | **0.77%** |
 
 ![Performance Chart](artifacts/backtest_performance.png)
 
@@ -39,32 +45,32 @@ Mudra runs automatically every hour in a clean, decoupled pipeline:
 
 ```mermaid
 flowchart LR
-    CRON[Hourly Schedule<br/>GitHub Actions Cron / Webhook] --> WORKER[Worker Runner<br/>scripts/run_hourly_worker.py]
+    CRON[External Scheduler<br/>cron-job.org Webhook Dependency] --> WORKER[GitHub Actions Worker<br/>workflow_dispatch]
     WORKER --> DATA[Binance API<br/>1h Confirmed Candle]
-    DATA --> MODELS[Dual XGBoost<br/>Return + Direction]
-    MODELS --> COUNCIL[Risk Council<br/>LangGraph]
-    COUNCIL --> DB[(Neon PostgreSQL<br/>5 Tables Ledger)]
+    MODELS[Dual XGBoost<br/>joblib.load Artifacts] --> WORKER
+    WORKER --> COUNCIL[Risk Council<br/>LangGraph]
+    COUNCIL --> DB[(PostgreSQL Database<br/>Migration-Defined Schema)]
     DB --> UI[Streamlit Terminal<br/>Web Dashboard]
 ```
 
 ### How the Pipeline Works:
-1. **Trigger:** An external cron ping wakes up the worker at minute 0 of every hour.
+1. **Trigger:** The worker workflow (`.github/workflows/hourly_worker.yml`) is configured for on-demand execution (`workflow_dispatch`). Automated recurring execution relies on an external scheduler (`cron-job.org`) dispatching the GitHub Actions workflow, which is an external configuration dependency.
 2. **Data & Features:** The worker downloads the latest confirmed 1-hour candle from Binance and builds 26 regression and 39 classification features across price action, order flow, sentiment, and on-chain telemetry.
-3. **ML Inference:** The Regressor predicts next-hour percentage return and price target. The Classifier predicts price direction (`UP` / `DOWN`) and probability.
-4. **Risk Review:** A 2-node LangGraph council checks if the return clears the fee hurdle and ensures volatility is within safe limits.
+3. **ML Inference:** The API loads the regressor and classifier from configured pickle artifact paths (`artifacts/models/best_regressor_model.pkl` and `artifacts/models/best_classifier_model.pkl`) using `joblib.load`. A model-version identifier (`xgb_onnx_v1.0.0`) is exposed by the health and prediction endpoints for provenance tracking (serving utilizes scikit-learn/XGBoost, not ONNX runtime; artifact paths are statically configured rather than dynamically selected by registry query).
+4. **Risk Review:** A 2-node LangGraph council checks if the return clears the canonical fee hurdle (~0.14%) and verifies volatility limits.
 5. **Reconciliation:** The worker evaluates the prediction made in the previous hour ($T-1$) against the actual candle close at hour $T$, tagging accuracy and errors.
-6. **Database:** Ticks, audit decisions, paper portfolio balances, and reconciliation results are saved to Neon PostgreSQL.
+6. **Database Persistence:** Ticks, audit decisions, paper portfolio balances, and reconciliation results are recorded in the PostgreSQL database schema.
 
 ---
 
 ## Core Technologies
 
-* **Machine Learning:** XGBoost (tuned with Optuna Bayesian optimization across 500 walk-forward fits).
-* **Explainability:** TreeSHAP for calculating game-theoretic feature importance on every prediction.
+* **Machine Learning:** Dual XGBoost models (return regression and direction classification) tuned with Optuna Bayesian optimization, loaded from configured pickle paths via `joblib.load`.
+* **Explainability:** TreeSHAP for calculating game-theoretic feature importance on predictions.
 * **Agentic Risk Council:** LangGraph state graph with a Strategist node and a Risk Critic node.
-* **Cloud Database:** Neon Serverless PostgreSQL storing 5 tables (`MarketTick`, `ApiTelemetry`, `CouncilAudit`, `Reconciliation`, `PaperPortfolio`).
-* **Serving & Frontend:** FastAPI for REST endpoints, Streamlit for the dark-theme terminal interface.
-* **Containers:** Docker and Docker Compose for reproducible builds.
+* **Database Schema:** PostgreSQL migration specification defining 9 application tables (`market_ticks`, `api_telemetry`, `council_audits`, `reconciliations`, `paper_portfolio`, `model_registry`, `model_lifecycle_events`, `model_predictions`, `prediction_investigations`). *(Note: The 9-table schema is defined in migration scripts and validated in isolated CI testing; production database migrations have not yet been applied).*
+* **Serving & Frontend:** FastAPI for REST endpoints, Streamlit for the terminal interface.
+* **Continuous Integration & Containers:** GitHub Actions workflow running automated PyTest suites and validating Docker image builds; Docker and Docker Compose configurations for containerized runtime.
 
 ---
 
@@ -99,7 +105,9 @@ python scripts/run_hourly_worker.py --force
 ```bash
 pytest tests/ -v
 ```
-All **20 unit tests pass** across API endpoints, agent nodes, and database models.
+* **Local Working-Tree Validation:** **444 passed, 14 skipped** (the 14 skips require an active PostgreSQL connection via `TEST_DATABASE_URL`).
+* **Continuous Integration Baseline:** The GitHub Actions CI workflow (`.github/workflows/ci.yml`) executes the test suite against an isolated PostgreSQL 16 service container. In the reviewed CI baseline run at commit `d7df431`, the test job succeeded with **457 passed tests** reported (including the 14 PostgreSQL integration tests).
+* **Current Working Tree:** The current working tree contains one additional API test (`test_health_and_predict_model_version_provenance_parity` in `tests/test_api.py`), bringing the local test collection to 458 tests. This additional test has not yet been validated by a remote CI run.
 
 ---
 
@@ -160,21 +168,24 @@ Interactive documentation is available at `http://localhost:8000/docs` when runn
 
 ```text
 Mudra/
-├── .github/workflows/       # Automated CI/CD and hourly worker workflow
-├── artifacts/models/        # Tuned XGBoost regressor and classifier models
-├── data/                    # Raw and processed historical data
-├── experiments/             # Walk-forward CV & zero-shot foundation models (Chronos, TimesFM, Moirai)
+├── .github/workflows/       # Continuous integration (ci.yml) and hourly worker (hourly_worker.yml)
+├── archive/                 # Historical planning documents and blueprints
+├── artifacts/models/        # Configured XGBoost regressor and classifier pickle artifacts
+├── data/                    # Raw and processed historical datasets
+├── docs/                    # System documentation and historical research reports
+│   └── reports/             # Classical backtesting, foundation model, sentiment, and on-chain evaluations
+├── experiments/             # Walk-forward CV scripts & foundation model evaluations
 ├── src/
 │   ├── agents/              # LangGraph Strategist and Risk Critic nodes
 │   ├── api/                 # FastAPI routes and Pydantic schemas
-│   ├── database/            # Neon PostgreSQL connection and SQLAlchemy models
+│   ├── database/            # PostgreSQL connection and SQLAlchemy ORM models (9-table schema)
 │   ├── engine/              # Reconciliation engine and hourly sync logic
 │   ├── explainability.py    # TreeSHAP explainer module
 │   └── ui/                  # Plotly chart visualizers
-├── tests/                   # 20 automated unit tests (agents, API, database)
-├── scripts/                 # Ingestion and run_hourly_worker.py execution runner
+├── tests/                   # 458 automated tests (API endpoints, agent nodes, database ORM & migrations)
+├── scripts/                 # Migration scripts and run_hourly_worker.py runner
 ├── app.py                   # Streamlit web dashboard
-├── config.py                # Central project configuration and feature lists
+├── config.py                # Central project configuration and feature schemas
 ├── docker-compose.yml       # Docker Compose setup for API and UI
 └── requirements.txt         # Project dependencies
 ```
