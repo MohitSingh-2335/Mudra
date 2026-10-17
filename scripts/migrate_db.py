@@ -21,7 +21,14 @@ if str(ROOT_DIR) not in sys.path:
 
 from sqlalchemy import Engine, inspect, text
 
-from config import MIN_HURDLE_PCT, PORTFOLIO_ADVISORY_LOCK_ID
+from config import (
+    ACTIVE_MODEL_VERSION,
+    FEATURE_SCHEMA_VERSION,
+    REGRESSOR_MODEL_SHA256,
+    CLASSIFIER_MODEL_SHA256,
+    MIN_HURDLE_PCT,
+    PORTFOLIO_ADVISORY_LOCK_ID,
+)
 from src.database.connection import (
     CANONICAL_CONSTRAINTS,
     CANONICAL_FOREIGN_KEYS,
@@ -42,12 +49,12 @@ from src.database.connection import (
 MIGRATION_ADVISORY_LOCK_ID = 888002
 
 BASELINE_MODEL_SPEC: Dict[str, Any] = {
-    "model_version": "xgb_onnx_v1.0.0",
+    "model_version": ACTIVE_MODEL_VERSION,
     "regressor_artifact_path": "artifacts/models/best_regressor_model.pkl",
-    "regressor_sha256": "b44fba18cf2c7b51e3297e83a946d869392803a267e951a5e85ea052c63eb854",
+    "regressor_sha256": REGRESSOR_MODEL_SHA256,
     "classifier_artifact_path": "artifacts/models/best_classifier_model.pkl",
-    "classifier_sha256": "df139c1018ed5025b1444d6597c3d98b4d7c377a898487268d18e58d253ae684",
-    "feature_schema_version": "v1_39features",
+    "classifier_sha256": CLASSIFIER_MODEL_SHA256,
+    "feature_schema_version": FEATURE_SCHEMA_VERSION,
     "target_definition": "next_1h_close_return_pct_and_binary_direction",
     "training_dataset_path": "data/processed/featured_btc_data.csv",
     "training_dataset_sha256": "fdff3cb57bbad1ed3fd4f3bc44cc26a34efba3d72a62b5a25b78b73e4c36cf68",
