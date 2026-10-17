@@ -1,12 +1,9 @@
 # zero_shot_chronos.py
 #
-# Phase 2, step 1: cheapest possible test of a foundation model before any
-# fine-tuning investment. Pure zero-shot inference from amazon/chronos-2 —
-# no training — rolled forward over held-out test data. Same held-out split
-# as Phase 1 (chronological, last 20%), same metrics (RMSE vs naive
-# persistence baseline, directional accuracy vs the 52.49% LogisticRegression
-# benchmark from 05_PHASE1_BACKTESTING_REPORT.md), so results are directly
-# comparable.
+# Zero-shot evaluation of Amazon Chronos-2 foundation time-series model.
+# Pure zero-shot inference rolled forward over held-out test data (chronological,
+# last 20%), tracking RMSE vs naive persistence baseline and directional accuracy
+# against classical model benchmarks (docs/reports/classical_model_backtesting.md).
 #
 # Install first (optional foundation research dependency):
 #   pip install chronos-forecasting torch
@@ -113,7 +110,7 @@ def main() -> None:
     rmse = np.sqrt(np.mean((actuals - preds) ** 2))
     baseline_rmse = np.sqrt(np.mean((actuals - prev_closes) ** 2))
 
-    # Directional accuracy vs Phase 1 benchmarks (LogReg=52.49%, naive baseline=49.58%)
+    # Directional accuracy vs classical benchmarks (LogReg=52.49%, naive baseline=49.58%)
     pred_dir = (preds > prev_closes).astype(int)
     actual_dir = (actuals > prev_closes).astype(int)
     dir_acc = (pred_dir == actual_dir).mean() * 100

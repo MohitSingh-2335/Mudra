@@ -1,9 +1,9 @@
 # experiments/backtesting/zero_shot_moirai.py
 #
-# Phase 2, step 3: zero-shot evaluation of Salesforce Research's MOIRAI 2.0
+# Zero-shot evaluation of Salesforce Research's MOIRAI 2.0
 # (Universal Time-Series Foundation Model based on patch-level masked autoencoding).
 # Evaluates zero-shot rolling forecasts over the identical chronological
-# held-out test split (last 20%) used across all Phase 1 and Phase 2 benchmarks.
+# held-out test split (last 20%) used across classical and foundation benchmarks.
 #
 # Metrics tracked:
 #   1. RMSE vs naive persistence baseline (y_hat = y_{t-1})

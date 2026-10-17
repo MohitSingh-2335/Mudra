@@ -1,9 +1,9 @@
 # experiments/backtesting/zero_shot_timesfm.py
 #
-# Phase 2, step 2: zero-shot evaluation of Google Research's TimesFM 2.5
+# Zero-shot evaluation of Google Research's TimesFM 2.5
 # (200M parameter decoder-only foundation time-series model).
 # Evaluates zero-shot rolling forecasts over the identical chronological
-# held-out test split (last 20%) used across all Phase 1 and Phase 2 benchmarks.
+# held-out test split (last 20%) used across classical and foundation benchmarks.
 #
 # Metrics tracked:
 #   1. RMSE vs naive persistence baseline (y_hat = y_{t-1})
