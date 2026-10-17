@@ -24,7 +24,7 @@ if str(ROOT_DIR) not in sys.path:
 if hasattr(sys.stdout, "reconfigure") and sys.stdout.isatty():
     sys.stdout.reconfigure(encoding="utf-8")
 
-from typing import Tuple, Dict, Any, Optional
+from typing import Tuple, Dict, Any, Optional, List, Callable
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -35,6 +35,9 @@ import requests
 import plotly.graph_objects as go
 
 from config import (
+    ACTIVE_MODEL_VERSION,
+    REGRESSOR_MODEL_SHA256,
+    CLASSIFIER_MODEL_SHA256,
     REGRESSOR_FEATURES,
     CLASSIFIER_FEATURES,
     REGRESSOR_MODEL_PATH,
@@ -46,6 +49,7 @@ from config import (
     ROUND_TRIP_FRICTION_PCT,
     MIN_HURDLE_PCT,
 )
+from src.model_loader import load_verified_model
 from src.explainability import get_tree_explainer, explain_single_prediction
 from src.agents.trading_graph import run_trading_graph
 from src.engine.sync import sync_hourly_quant_cycle
@@ -91,10 +95,10 @@ st.markdown(
 # --- Cached Model & Resource Loading ---
 @st.cache_resource
 def load_models():
-    """Loads production XGBoost regressor and TreeSHAP explainer."""
+    """Loads production XGBoost regressor and TreeSHAP explainer with cryptographic hash verification."""
     try:
-        reg = joblib.load(REGRESSOR_MODEL_PATH)
-        clf = joblib.load(CLASSIFIER_MODEL_PATH)
+        reg = load_verified_model(REGRESSOR_MODEL_PATH, REGRESSOR_MODEL_SHA256)
+        clf = load_verified_model(CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256)
         reg.set_params(device="cpu")
         clf.set_params(device="cpu")
         explainer = get_tree_explainer(clf)
@@ -402,7 +406,7 @@ def build_model_pedigree_markdown() -> str:
         "| Parameter | Active Value | Rationale |\n"
         "| :--- | :--- | :--- |\n"
         "| **Model Architecture** | `XGBRegressor (CPU)` | Sub-millisecond single-row latency |\n"
-        "| **Model Checkpoint** | `xgb_onnx_v1.0.0` | Optuna 50 Bayesian trial champion |\n"
+        f"| **Model Checkpoint** | `{ACTIVE_MODEL_VERSION}` | Optuna 50 Bayesian trial champion |\n"
         "| **Cross-Validation RMSE**| `$396.22` | Chronological walk-forward split |\n"
         "| **Directional Accuracy**| `53.17%` | Out-of-sample test set |\n"
         f"| **Historical Backtest Friction** | `0.30% (Historical)` | Legacy Phase 1 report assumption (7,000h study); current canonical friction is `{ROUND_TRIP_FRICTION_PCT:.2f}%` (`{TOTAL_FRICTION_PER_SIDE_PCT:.2f}%` per side) |\n"
@@ -835,6 +839,196 @@ with tab2:
                     st.markdown(f"- [VETO] `{v}`")
 
 
+TAB3_MODEL_SELECTOR_OPTIONS: List[str] = ["All Models", ACTIVE_MODEL_VERSION]
+
+
+def filter_reconciliation_records(df: pd.DataFrame, selected_model: str) -> pd.DataFrame:
+    """
+    Filters reconciliation records for the selected model version.
+    If selected_model is 'All Models' or None, returns all records.
+    Preserves unknown attribution records under 'All Models'.
+    """
+    if df.empty or "model_version" not in df.columns:
+        return df.copy()
+    if selected_model and selected_model != "All Models":
+        return df[df["model_version"] == selected_model].copy()
+    return df.copy()
+
+
+def prepare_reconciliation_table_display(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Prepares reconciliation audit records for UI table rendering.
+    Maps null/missing model_version to 'UNKNOWN' and preserves DataFrame integrity.
+    """
+    if df.empty:
+        return df.copy()
+    disp_df = df.copy()
+    if "model_version" in disp_df.columns:
+        disp_df["Model Version"] = disp_df["model_version"].fillna("UNKNOWN")
+    else:
+        disp_df["Model Version"] = "UNKNOWN"
+    return disp_df
+
+
+def compute_fallback_reconciliation_kpis(df: pd.DataFrame, model_version: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Computes rolling performance metrics directly from loaded DataFrame records.
+    Used as a fallback when database KPI query fails, ensuring filtered client records
+    are used rather than leaking unfiltered database-wide KPIs.
+    """
+    if df.empty:
+        return {
+            "total_evaluated": 0,
+            "total_reconciled": 0,
+            "directional_accuracy_pct": None,
+            "win_rate_pct": None,
+            "mae_usd": None,
+            "mape_pct": None,
+            "information_coefficient": None,
+            "information_coefficient_ic": None,
+            "black_swans_filtered": 0,
+            "black_swan_count": 0,
+            "accurate_count": 0,
+            "tag_breakdown": {},
+            "model_version": model_version,
+            "is_fallback": True,
+        }
+
+    total = len(df)
+    if "direction_correct" in df.columns:
+        correct = int(df["direction_correct"].sum())
+    elif {"direction_predicted", "direction_realized"}.issubset(df.columns):
+        correct = int((df["direction_predicted"] == df["direction_realized"]).sum())
+    else:
+        correct = 0
+
+    win_rate = round((correct / total) * 100.0, 2) if total > 0 else 0.0
+    mae = round(float(df["absolute_error_usd"].mean()), 2) if "absolute_error_usd" in df.columns else 0.0
+    mape = round(float(df["percentage_error"].mean() * 100.0), 4) if "percentage_error" in df.columns else 0.0
+
+    ic = 0.0
+    if len(df) > 1 and {"predicted_return_pct", "actual_return_pct"}.issubset(df.columns):
+        if float(df["actual_return_pct"].std()) > 0 and float(df["predicted_return_pct"].std()) > 0:
+            corr = df["predicted_return_pct"].corr(df["actual_return_pct"])
+            ic = round(float(corr), 3) if not np.isnan(corr) else 0.0
+
+    black_swans = int(df["is_black_swan"].sum()) if "is_black_swan" in df.columns else 0
+    accurate = int((df["error_attribution_tag"] == "ACCURATE").sum()) if "error_attribution_tag" in df.columns else 0
+    tag_counts = df["error_attribution_tag"].value_counts().to_dict() if "error_attribution_tag" in df.columns else {}
+
+    return {
+        "total_evaluated": total,
+        "total_reconciled": total,
+        "directional_accuracy_pct": win_rate,
+        "win_rate_pct": win_rate,
+        "mae_usd": mae,
+        "mape_pct": mape,
+        "information_coefficient": ic,
+        "information_coefficient_ic": ic,
+        "black_swans_filtered": black_swans,
+        "black_swan_count": black_swans,
+        "accurate_count": accurate,
+        "tag_breakdown": tag_counts,
+        "model_version": model_version,
+        "is_fallback": True,
+    }
+
+
+def resolve_tab3_reconciliation_kpis(
+    selected_model: str,
+    base_kpis: Dict[str, Any],
+    filtered_df: pd.DataFrame,
+    kpi_fetcher: Optional[Callable[[int, Optional[str]], Dict[str, Any]]] = None,
+) -> Tuple[Dict[str, Any], Optional[str]]:
+    """
+    Resolves the KPI metrics dictionary for Tab 3 based on selected model.
+    If 'All Models', returns (base_kpis, None) unless base_kpis itself failed.
+    If a specific model is selected:
+      - Attempts to fetch model-specific KPIs via kpi_fetcher.
+      - Explicitly distinguishes query success from query failure via query_failed/error flags
+        or thrown exceptions, never assuming a dictionary indicates success.
+      - If the query genuinely succeeded with zero records, returns the valid zero-valued metrics.
+      - If the query failed, computes fallback KPIs from filtered_df if records exist,
+        or returns a defensive unavailable KPI structure with an error message.
+    Under NO circumstance does this return unfiltered base_kpis when a specific model is selected.
+
+    Returns:
+        (kpi_dict, warning_message_or_none)
+    """
+    if selected_model == "All Models" or not selected_model:
+        if base_kpis and (base_kpis.get("query_failed") or base_kpis.get("error")):
+            if not filtered_df.empty:
+                fallback_kpis = compute_fallback_reconciliation_kpis(filtered_df, model_version="All Models")
+                warning_msg = (
+                    f"Database KPI query failed. "
+                    f"Displaying fallback KPIs computed from {len(filtered_df)} loaded client records."
+                )
+                return fallback_kpis, warning_msg
+            unavailable_kpis = {
+                "total_evaluated": 0,
+                "total_reconciled": 0,
+                "directional_accuracy_pct": None,
+                "win_rate_pct": None,
+                "mae_usd": None,
+                "mape_pct": None,
+                "information_coefficient": None,
+                "information_coefficient_ic": None,
+                "black_swans_filtered": 0,
+                "black_swan_count": 0,
+                "accurate_count": 0,
+                "tag_breakdown": {},
+                "model_version": None,
+                "kpi_unavailable": True,
+            }
+            return unavailable_kpis, "Reconciliation KPIs are currently unavailable due to a database error."
+        return base_kpis, None
+
+    # Specific model selected: query filtered KPIs
+    query_succeeded = False
+    fetched_kpis = None
+    if kpi_fetcher is not None:
+        try:
+            res = kpi_fetcher(168, selected_model)
+            if isinstance(res, dict) and not res.get("query_failed") and not res.get("error"):
+                fetched_kpis = res
+                query_succeeded = True
+        except Exception:
+            query_succeeded = False
+
+    # Valid successful query result (including genuinely empty 0-record results)
+    if query_succeeded and fetched_kpis is not None:
+        return fetched_kpis, None
+
+    # Query failed or was unavailable: fallback to filtered DataFrame
+    if not filtered_df.empty:
+        fallback_kpis = compute_fallback_reconciliation_kpis(filtered_df, model_version=selected_model)
+        warning_msg = (
+            f"Database KPI query failed for model '{selected_model}'. "
+            f"Displaying fallback KPIs computed from {len(filtered_df)} loaded client records."
+        )
+        return fallback_kpis, warning_msg
+
+    # No records and query failed: unavailable state
+    unavailable_kpis = {
+        "total_evaluated": 0,
+        "total_reconciled": 0,
+        "directional_accuracy_pct": None,
+        "win_rate_pct": None,
+        "mae_usd": None,
+        "mape_pct": None,
+        "information_coefficient": None,
+        "information_coefficient_ic": None,
+        "black_swans_filtered": 0,
+        "black_swan_count": 0,
+        "accurate_count": 0,
+        "tag_breakdown": {},
+        "model_version": selected_model,
+        "kpi_unavailable": True,
+    }
+    warning_msg = f"Model-specific KPIs for '{selected_model}' are currently unavailable."
+    return unavailable_kpis, warning_msg
+
+
 # -------------------------------------------------------------------------------------
 # TAB 3: LIVE TRACK RECORD & DELAYED RECONCILIATION (NEON DB SSOT)
 # -------------------------------------------------------------------------------------
@@ -842,26 +1036,48 @@ with tab3:
     st.subheader("Live Prediction Track Record & Delayed Ground Truth Ledger")
     st.caption("Delayed ground truth reconciliation evaluates prediction at T against confirmed candle close at T+1. All records stored permanently in Neon PostgreSQL.")
 
-    rec_df = db_state["rec_df"]
-    rec_kpis = db_state["rec_kpis"]
+    # Read-only Model Version Selector
+    selected_model = st.selectbox(
+        "Filter Delayed Track Record by Model",
+        options=TAB3_MODEL_SELECTOR_OPTIONS,
+        key="tab3_model_selector",
+    )
+
+    rec_df = db_state.get("rec_df", pd.DataFrame())
+    base_kpis = db_state.get("rec_kpis", {})
+
+    # Filter reconciliation records and resolve KPIs safely
+    filtered_rec_df = filter_reconciliation_records(rec_df, selected_model)
+    rec_kpis, kpi_warning = resolve_tab3_reconciliation_kpis(
+        selected_model=selected_model,
+        base_kpis=base_kpis,
+        filtered_df=filtered_rec_df,
+        kpi_fetcher=get_reconciliation_kpis if db_state.get("db_ok", False) else None,
+    )
+    if kpi_warning:
+        st.warning(f"⚠️ {kpi_warning}")
 
     # Rolling Metrics Ribbon
     m_col1, m_col2, m_col3, m_col4, m_col5 = st.columns(5)
     with m_col1:
         st.metric("Total Evaluated Hours", f"{rec_kpis.get('total_reconciled') or rec_kpis.get('total_evaluated', 0)}")
     with m_col2:
-        st.metric("Directional Win Rate", f"{float(rec_kpis.get('directional_accuracy_pct') or rec_kpis.get('win_rate_pct', 0.0)):.1f}%")
+        val = rec_kpis.get("directional_accuracy_pct") or rec_kpis.get("win_rate_pct")
+        st.metric("Directional Win Rate", f"{float(val):.1f}%" if val is not None else "N/A")
     with m_col3:
-        st.metric("Mean Absolute Error (MAE)", f"${float(rec_kpis.get('mae_usd', 0.0)):,.2f}")
+        val = rec_kpis.get("mae_usd")
+        st.metric("Mean Absolute Error (MAE)", f"${float(val):,.2f}" if val is not None else "N/A")
     with m_col4:
-        st.metric("Mean Error (MAPE)", f"{float(rec_kpis.get('mape_pct', 0.0)):.2f}%")
+        val = rec_kpis.get("mape_pct")
+        st.metric("Mean Error (MAPE)", f"{float(val):.2f}%" if val is not None else "N/A")
     with m_col5:
-        st.metric("Information Coeff (IC)", f"{float(rec_kpis.get('information_coefficient_ic') or rec_kpis.get('information_coefficient', 0.0)):.3f}")
+        val = rec_kpis.get("information_coefficient_ic") or rec_kpis.get("information_coefficient")
+        st.metric("Information Coeff (IC)", f"{float(val):.3f}" if val is not None else "N/A")
 
     # Hit / Miss Scatter Chart
-    if not rec_df.empty:
+    if not filtered_rec_df.empty:
         st.markdown("### Realized Price vs. Predicted Price Accuracy Chart")
-        st.plotly_chart(create_reconciliation_scatter(rec_df), use_container_width=True)
+        st.plotly_chart(create_reconciliation_scatter(filtered_rec_df), use_container_width=True)
 
         st.markdown("### Historical Delayed Reconciliation Audit Table")
         with st.expander("📘 How to Read This Delayed Prediction Report Card (Plain-English Guide)", expanded=False):
@@ -877,7 +1093,7 @@ with tab3:
             )
 
         # Format table for display
-        disp_df = rec_df.copy()
+        disp_df = prepare_reconciliation_table_display(filtered_rec_df)
 
         # 1. Plain-English Direction Columns (Strict binary UP / DOWN based on returns, healing historical 'FLAT' entries)
         def _get_dir_pred(row):
@@ -938,6 +1154,7 @@ with tab3:
 
         display_cols = [
             "Time (UTC)",
+            "Model Version",
             "Predicted Direction",
             "Actual Direction",
             "Direction Result",
@@ -953,7 +1170,7 @@ with tab3:
             hide_index=True,
         )
     else:
-        st.info("[INFO] Delayed reconciliation runs automatically every hour as candles close. First evaluated predictions will appear on the next hourly candle close.")
+        st.info(f"[INFO] No delayed reconciliation records found for selection '{selected_model}'. Delayed reconciliation runs automatically every hour as candles close.")
 
 
 # -------------------------------------------------------------------------------------
