@@ -1,5 +1,5 @@
 # tests/test_api.py - Mudra Automated REST API Test Suite
-from src.api.main import app
+from src.api.main import ACTIVE_MODEL_VERSION, app
 
 import os
 import pytest
@@ -19,7 +19,13 @@ from config import (
 )
 from src.database.models import Base, MarketTick, Reconciliation
 from src.engine.paper_portfolio import execute_paper_order
-from src.api.schemas import ReconciliationSummaryResponse, PortfolioSummaryResponse
+from src.api.schemas import (
+    ACTIVE_MODEL_VERSION as SCHEMA_ACTIVE_MODEL_VERSION,
+    HealthResponse,
+    PredictResponse,
+    ReconciliationSummaryResponse,
+    PortfolioSummaryResponse,
+)
 
 
 @pytest.fixture(scope="session")
@@ -50,24 +56,64 @@ def sample_features_payload():
 
 
 def test_health_check(client):
-    """Verify that the health check probe returns 200 and correct model version."""
+    """Verify that the health check probe returns 200 and canonical production model version."""
     response = client.get("/health")
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ok"
-    assert data["model_version"] == "optuna_tuned_xgboost_v1"
+    assert data["model_version"] == "xgb_onnx_v1.0.0"
+    assert data["model_version"] == ACTIVE_MODEL_VERSION
+    assert "timestamp" in data
 
 
 def test_predict_valid_features(client, sample_features_payload):
-    """Verify that /predict produces valid numeric and directional forecasts."""
+    """Verify that /predict produces valid numeric, directional, and model-version provenance fields."""
     response = client.post("/predict", json=sample_features_payload)
     assert response.status_code == 200
     data = response.json()
 
+    assert data["current_price"] == pytest.approx(sample_features_payload["current_price"])
     assert data["predicted_price"] > 0
     assert isinstance(data["predicted_return"], float)
     assert data["directional_movement"] in ["Upward 📈", "Downward 📉"]
     assert data["movement_code"] in [0, 1]
+    assert data["model_version"] == "xgb_onnx_v1.0.0"
+    assert data["model_version"] == ACTIVE_MODEL_VERSION
+    assert "timestamp" in data
+
+
+def test_health_and_predict_model_version_provenance_parity(client, sample_features_payload):
+    """
+    Verify that /health, /predict, and Pydantic schema defaults report the exact same
+    canonical production model version ('xgb_onnx_v1.0.0') while preserving backward-compatible
+    PredictResponse construction when model_version is omitted by internal callers.
+    """
+    assert ACTIVE_MODEL_VERSION == "xgb_onnx_v1.0.0"
+    assert SCHEMA_ACTIVE_MODEL_VERSION == "xgb_onnx_v1.0.0"
+
+    health_resp = client.get("/health")
+    predict_resp = client.post("/predict", json=sample_features_payload)
+    assert health_resp.status_code == 200
+    assert predict_resp.status_code == 200
+
+    health_version = health_resp.json()["model_version"]
+    predict_version = predict_resp.json()["model_version"]
+    assert health_version == "xgb_onnx_v1.0.0"
+    assert predict_version == "xgb_onnx_v1.0.0"
+    assert health_version == predict_version
+
+    # Verify schema default and backward-compatible instantiation without explicit model_version
+    default_health = HealthResponse()
+    assert default_health.model_version == "xgb_onnx_v1.0.0"
+
+    compat_predict = PredictResponse(
+        current_price=65000.0,
+        predicted_price=65100.0,
+        predicted_return=0.001538,
+        directional_movement="Upward 📈",
+        movement_code=1,
+    )
+    assert compat_predict.model_version == "xgb_onnx_v1.0.0"
 
 
 def test_predict_missing_features(client):
