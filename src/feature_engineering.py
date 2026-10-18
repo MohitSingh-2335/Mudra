@@ -201,8 +201,9 @@ def extract_features_for_inference(df: pd.DataFrame) -> dict:
     out["high"] = float(latest["high"])
     out["low"] = float(latest["low"])
     out["volume"] = float(latest["volume"])
+    # Convert timestamp to ISO string format so it can be safely stored as JSON
     if "timestamp" in latest and pd.notna(latest["timestamp"]):
-        out["timestamp"] = latest["timestamp"]
+        out["timestamp"] = pd.to_datetime(latest["timestamp"]).isoformat()
     if "number_of_trades" in latest and pd.notna(latest["number_of_trades"]) and latest["number_of_trades"] > 0:
         out["number_of_trades"] = int(latest["number_of_trades"])
     else:
