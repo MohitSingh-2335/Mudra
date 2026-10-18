@@ -32,7 +32,7 @@ from config import (
     ROUND_TRIP_FRICTION_PCT,
 )
 from src.agents.graph_state import AgentState
-from src.agents.market_analyst_agent import _get_gemini_api_key, _clean_json_response
+from src.agents.market_analyst_agent import _get_gemini_api_key, _clean_json_response, generate_with_gemini_fallback
 
 ALLOWED_TRADE_ACTIONS = ("HOLD", "BUY", "SELL")
 
@@ -361,10 +361,6 @@ def risk_critic_node(state: AgentState) -> AgentState:
     api_key = _get_gemini_api_key()
     if api_key and not state.get("circuit_breaker_active", False):
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-1.5-flash")
-
             prompt = f"""You are the Chief Risk Officer at Mudra.
 The Quantitative Strategist proposed a {action} order with conviction {conviction}/10 at ${current_price:,.2f}.
 Risk Parameters:
@@ -376,10 +372,11 @@ Risk Parameters:
 
 Provide a concise 2-sentence formal risk critique authorizing this trade."""
 
-            resp = model.generate_content(prompt)
-            critique_text = resp.text.strip()
+            critique_text = generate_with_gemini_fallback(api_key, prompt)
             state["risk_critic_critique"] = critique_text
             return state
+        except AssertionError:
+            raise
         except Exception:
             pass
 
