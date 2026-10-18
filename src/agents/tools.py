@@ -293,15 +293,21 @@ def get_model_return_forecast(features: Optional[Dict[str, Any]] = None) -> Dict
 @tool
 def query_macro_sentiment_rag(query: str = "Bitcoin macroeconomic market sentiment and regime") -> str:
     """
-    Queries the ChromaDB vector database to retrieve historically similar macroeconomic news,
-    regulatory developments, and institutional sentiment precedents.
+    Queries the ChromaDB vector database to retrieve foundational market regime knowledge,
+    recent episodic prediction error memories, and live derivatives funding context.
     """
     try:
-        from src.agents.rag_agent import get_rag_agent
+        from src.agents.rag_agent import get_rag_agent, query_similar_error_memories
         rag = get_rag_agent()
-        docs = rag.retrieve_market_context(query, n_results=2)
-        if docs and len(docs) > 0:
-            return " | ".join(docs)
+        docs = rag.retrieve_market_context(query, n_results=2) or []
+        err_memories = query_similar_error_memories(query_text=query, n_results=2) or []
+        parts: List[str] = []
+        if docs:
+            parts.append(" | ".join(docs))
+        if err_memories:
+            parts.append("Recent Error Memory: " + " ; ".join(err_memories))
+        if parts:
+            return " || ".join(parts)
         return "Market regime: Standard institutional spot ETF liquidity with balanced macro interest rate expectations."
     except Exception as e:
         return f"Macro context unavailable (ChromaDB offline): {str(e)}"
