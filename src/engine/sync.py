@@ -869,6 +869,9 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
         regime = "HIGH_VOL_CHOP" if volatility > 3.8 else ("BULL_MOMENTUM" if (clears_hurdle and pred_return > 0) else ("BEAR_DISTRIBUTION" if (clears_hurdle and pred_return < 0) else "SIDEWAYS_RANGE"))
 
         # 2. Record or Update MarketTick
+        # Convert any timestamps or numpy types into JSON-safe standard Python types
+        safe_features = json.loads(json.dumps(signals_output, default=str)) if signals_output else None
+
         if is_existing_tick:
             current_tick = existing
             if force:
@@ -876,7 +879,7 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
                 current_tick.predicted_return_1h = pred_return
                 current_tick.predicted_price_1h = pred_price
                 current_tick.model_confidence = confidence
-                current_tick.features = signals_output
+                current_tick.features = safe_features
                 current_tick.model_version = ACTIVE_MODEL_VERSION
                 current_tick.feature_schema_version = FEATURE_SCHEMA_VERSION
                 session.flush()
@@ -894,7 +897,7 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
                 predicted_return_1h=pred_return,
                 predicted_price_1h=pred_price,
                 model_confidence=confidence,
-                features=signals_output,
+                features=safe_features,
             )
             session.add(current_tick)
             session.flush()
