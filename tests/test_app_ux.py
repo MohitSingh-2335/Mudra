@@ -1,5 +1,5 @@
 """
-Automated unit tests for Stage 5 UX refinements in app.py.
+Automated unit tests for dashboard UX and formatting contracts in app.py.
 
 Verifies:
 1. Risk level formatting helper (format_risk_levels) handles HOLD, BUY, SELL, and vetoed states safely.
