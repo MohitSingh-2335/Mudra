@@ -145,16 +145,24 @@ def get_spot_and_futures_trade_plan(
     conviction_score: int = 5,
     volatility_range_pct: float = 1.0,
     risk_approved: bool = True,
+    clears_hurdle: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Returns both the Spot 'Hold-Until-Net-Profit' state machine decision
     and the 3x Isolated Margin Futures execution plan.
     """
+    from config import MIN_HURDLE_PCT
     from src.engine.paper_portfolio import (
         evaluate_spot_hold_until_profit_decision,
         evaluate_futures_long_short_plan,
     )
     from src.database.connection import get_db
+
+    clears = (
+        bool(clears_hurdle)
+        if clears_hurdle is not None
+        else (abs(float(expected_return_pct)) >= float(MIN_HURDLE_PCT))
+    )
 
     spot_plan = None
     try:
@@ -164,7 +172,7 @@ def get_spot_and_futures_trade_plan(
                 current_price=current_price,
                 predicted_direction=predicted_direction,
                 proposed_action="BUY" if predicted_direction == "UP" else "SELL",
-                clears_hurdle=abs(expected_return_pct) >= 0.139951,
+                clears_hurdle=clears,
             )
     except Exception:
         spot_plan = {
@@ -177,7 +185,7 @@ def get_spot_and_futures_trade_plan(
         current_price=current_price,
         predicted_direction=predicted_direction,
         expected_return_pct=expected_return_pct,
-        clears_hurdle=abs(expected_return_pct) >= 0.139951,
+        clears_hurdle=clears,
         volatility_range_pct=volatility_range_pct,
         risk_approved=risk_approved,
         conviction_score=conviction_score,
@@ -187,6 +195,8 @@ def get_spot_and_futures_trade_plan(
     return {
         "spot_plan": spot_plan,
         "futures_plan": futures_plan,
+        "spot_hold_until_profit_plan": spot_plan,
+        "futures_3x_isolated_plan": futures_plan,
     }
 
 
