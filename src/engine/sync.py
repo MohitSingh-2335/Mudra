@@ -946,10 +946,25 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
         if is_existing_tick and already_executed:
             print(f"[PAPER] Trade already executed for tick #{current_tick.id}. Financial execution deduplicated (zero fees charged).")
         else:
+            effective_action = decision
             order_notes = f"Executed {decision} ({verdict}) at BTC ${candle['close']:,.2f}."
+            if str(decision).upper() == "SELL":
+                try:
+                    from src.engine.paper_portfolio import evaluate_spot_hold_until_profit_decision
+                    spot_guard = evaluate_spot_hold_until_profit_decision(
+                        session=session,
+                        current_price=float(candle["close"]),
+                        predicted_direction=str(ml_forecast.get("direction", "DOWN")),
+                        proposed_action=decision,
+                        clears_hurdle=bool(ml_forecast.get("clears_hurdle", False)),
+                    )
+                    effective_action = spot_guard.get("final_spot_action", decision)
+                    order_notes = spot_guard.get("reason", order_notes)
+                except Exception:
+                    pass
             execute_paper_order(
                 session=session,
-                action=decision,
+                action=effective_action,
                 current_price=candle["close"],
                 kelly_fraction=kelly,
                 notes=order_notes,
