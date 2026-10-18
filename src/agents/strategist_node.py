@@ -28,7 +28,7 @@ from src.agents.tools import (
     get_model_return_forecast,
     query_macro_sentiment_rag
 )
-from src.agents.market_analyst_agent import _get_gemini_api_key, _clean_json_response
+from src.agents.market_analyst_agent import _get_gemini_api_key, _clean_json_response, generate_with_gemini_fallback
 
 
 def strategist_node(state: AgentState) -> AgentState:
@@ -110,10 +110,6 @@ def strategist_node(state: AgentState) -> AgentState:
 
     if api_key:
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-1.5-flash")
-
             prompt = f"""You are the Lead Quantitative Strategist at Mudra.
 Analyze the following telemetry and return strict JSON:
 - Symbol: {symbol}
@@ -122,18 +118,18 @@ Analyze the following telemetry and return strict JSON:
 - Directional Prediction: {direction} ({direction_badge}) | Up Probability: {prob_up:.1f}%
 - Fee Hurdle Status: {'CLEARED (>=' + f'{MIN_HURDLE_PCT:.2f}%)' if clears_hurdle else 'SUB-HURDLE'}
 - Taker Buy Ratio: {taker_ratio:.4f}
-- Macro RAG Context: {state['rag_context'][:300]}
+- Macro RAG & Error Memory Context: {state['rag_context'][:450]}
 
 Respond ONLY with valid JSON with these keys:
 {{
   "trade_action": "BUY" or "SELL" or "HOLD",
   "conviction_score": integer 1 to 10,
-  "executive_summary": "2 sentence strategic summary",
+  "executive_summary": "2 sentence strategic summary in plain English with dollar amounts",
   "strategist_thesis": "Full quantitative rationale"
 }}"""
 
-            response = model.generate_content(prompt)
-            clean_text = _clean_json_response(response.text)
+            raw_llm_text = generate_with_gemini_fallback(api_key, prompt)
+            clean_text = _clean_json_response(raw_llm_text)
             parsed = json.loads(clean_text)
 
             raw_action = str(parsed.get("trade_action", "HOLD")).strip().upper()
