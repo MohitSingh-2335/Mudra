@@ -70,7 +70,7 @@ from src.ui.charts import (
 )
 
 # --- Plain English Feature Names for Signal Attribution ---
-FEATURE_PLAIN_NAMES: dict[str, str] = {
+FEATURE_PLAIN_NAMES: Dict[str, str] = {
     "taker_buy_ratio": "Buyer vs. Seller Volume",
     "vol_mean_6h": "Average 6-Hour Price Swing ($)",
     "vol_std_6h": "6-Hour Swing Change ($)",
@@ -285,38 +285,6 @@ def generate_live_forecast(
         "hurdle_badge_text": hurdle_badge_text,
         "current_price": current_price,
     }
-
-
-FEATURE_PLAIN_NAMES: Dict[str, str] = {
-    "taker_buy_ratio": "Buyer vs. Seller Volume",
-    "vol_mean_6h": "Average 6-Hour Price Swing ($)",
-    "vol_std_6h": "6-Hour Swing Change ($)",
-    "vol_max_6h": "Largest 1h Swing in Last 6h ($)",
-    "vol_min_6h": "Smallest 1h Swing in Last 6h ($)",
-    "vol_1h": "1-Hour High–Low Price Range ($)",
-    "high_low_spread": "1-Hour High–Low Price Range ($)",
-    "Price Change": "1-Hour Price Change ($)",
-    "close_open_diff": "1-Hour Price Change ($)",
-    "close_lag_1": "Previous Hour Closing Price ($)",
-    "Rolling_Mean_Close": "10-Hour Average Price ($)",
-    "Rolling_Std_Close": "10-Hour Price Swing ($)",
-    "return_1h": "1-Hour Price Trend",
-    "return_3h": "3-Hour Price Trend",
-    "return_6h": "6-Hour Price Trend",
-    "rsi": "Price Momentum (RSI)",
-    "macd": "Trend Direction (MACD)",
-    "macd_signal": "Trend Direction (MACD)",
-    "bb_high": "Price Range Band (Bollinger)",
-    "bb_low": "Price Range Band (Bollinger)",
-    "ema_10": "Short vs. Long Price Trend (EMA)",
-    "ema_30": "Short vs. Long Price Trend (EMA)",
-    "ema_10_30_diff": "Short vs. Long Price Trend (EMA)",
-    "volume": "Trading Volume",
-    "Volume_Change": "Trading Volume",
-    "number_of_trades": "Number of Trades",
-    "fng_value": "Market Sentiment (Fear & Greed)",
-    "fng_mean_3d": "Market Sentiment (Fear & Greed)",
-}
 
 
 FEATURE_HUMAN_NAMES: Dict[str, str] = {
@@ -561,7 +529,7 @@ def build_model_pedigree_markdown() -> str:
         f"| **Model Checkpoint** | `{ACTIVE_MODEL_VERSION}` | Optuna 50 Bayesian trial champion |\n"
         "| **Cross-Validation RMSE**| `$396.22` | Chronological walk-forward split |\n"
         "| **Directional Accuracy**| `53.17%` | Out-of-sample test set |\n"
-        f"| **Historical Backtest Friction** | `0.30% (Historical)` | Legacy backtest report assumption (7,000h study); current canonical friction is `{ROUND_TRIP_FRICTION_PCT:.2f}%` (`{TOTAL_FRICTION_PER_SIDE_PCT:.2f}%` per side) |\n"
+        f"| **Historical Backtest Friction** | `0.30% (Historical)` | Legacy Phase 1 report assumption (7,000h study); current canonical friction is `{ROUND_TRIP_FRICTION_PCT:.2f}%` (`{TOTAL_FRICTION_PER_SIDE_PCT:.2f}%` per side) |\n"
         f"| **Net Strategy Alpha (Historical)** | `+33.55 pp (Historical)` | Measured under the historical `0.30%` friction assumption; not evidence of equivalent performance under current canonical `{ROUND_TRIP_FRICTION_PCT:.2f}%` friction |"
     )
 
@@ -1226,9 +1194,21 @@ with tab2:
             leverage=3.0,
         )
 
+        # Count historical Spot BUY and SELL trades from the database portfolio ledger
+        port_df_tab2 = db_state.get("port_df", pd.DataFrame())
+        port_kpis_tab2 = db_state.get("port_kpis", {})
+        live_cash_bal = float(port_kpis_tab2.get("cash_balance", 10000.0) or 10000.0)
+        live_btc_bal = float(port_kpis_tab2.get("btc_balance", 0.0) or 0.0)
+        buy_count = 0
+        sell_count = 0
+        if not port_df_tab2.empty and "action" in port_df_tab2.columns:
+            actions_upper = port_df_tab2["action"].astype(str).str.upper().str.strip()
+            buy_count = int((actions_upper == "BUY").sum())
+            sell_count = int((actions_upper == "SELL").sum())
+
         f_col1, f_col2 = st.columns(2)
         with f_col1:
-            st.markdown("#### Spot 'Hold-Until-Net-Profit' Safety Check")
+            st.markdown("#### 1x Spot Trading Status (Plain-English Tracker)")
             spot_eval = None
             try:
                 with get_db() as s:
@@ -1240,17 +1220,85 @@ with tab2:
                         clears_hurdle=fc_hurdle,
                     )
             except Exception:
-                pass
+                spot_eval = None
 
-            if spot_eval:
-                st.markdown(f"**Spot Action:** `{spot_eval['final_spot_action']}` ({spot_eval['position_state']})")
-                st.markdown(f"**Break-Even Entry (incl. fees):** `${spot_eval['avg_entry_with_fees']:,.2f}`")
-                st.markdown(f"**Net Exit Price (after sell fees):** `${spot_eval['net_exit_price']:,.2f}`")
-                st.markdown(f"**Estimated Net P&L:** `${spot_eval['estimated_net_pnl_usd']:+,.2f}`")
-                st.info(spot_eval["reason"])
+            if not spot_eval:
+                if act == "BUY" and vrd == "APPROVED" and fc_hurdle:
+                    spot_eval = {
+                        "final_spot_action": "BUY",
+                        "position_state": "ENTERING_LONG_SPOT",
+                        "btc_held": live_btc_bal,
+                        "avg_entry_with_fees": round(current_price * (1.0 + (TOTAL_FRICTION_PER_SIDE_PCT / 100.0)), 2),
+                        "net_exit_price": round(current_price * (1.0 - (TOTAL_FRICTION_PER_SIDE_PCT / 100.0)), 2),
+                        "estimated_net_pnl_usd": 0.0,
+                        "reason": (
+                            f"Buying 1x Spot BTC at ${current_price:,.2f} because the model predicts UP and clears the trading fee hurdle."
+                        ),
+                    }
+                else:
+                    spot_eval = {
+                        "final_spot_action": "HOLD",
+                        "position_state": "FLAT_HOLDING_CASH",
+                        "btc_held": live_btc_bal,
+                        "avg_entry_with_fees": 0.0,
+                        "net_exit_price": round(current_price * (1.0 - (TOTAL_FRICTION_PER_SIDE_PCT / 100.0)), 2),
+                        "estimated_net_pnl_usd": 0.0,
+                        "reason": "Waiting for a strong UP signal that clears the round-trip fee cost.",
+                    }
+
+            hurdle_usd = current_price * (MIN_HURDLE_PCT / 100.0)
+            pred_move_usd = current_price * (fc_ret / 100.0)
+            btc_held_now = float(spot_eval.get("btc_held", live_btc_bal) or 0.0)
+
+            # Clear Answer to "Did Any Spot Trade Happen?"
+            st.markdown(
+                f"**Completed Spot Trades So Far:** `{buy_count} Buys` | `{sell_count} Sells` "
+                f"*(Account: `${live_cash_bal:,.2f} Cash`, `{btc_held_now:.4f} BTC`)*"
+            )
+
+            if btc_held_now <= 1e-8:
+                # STATE 1: HOLDING 100% CASH (NO BITCOIN OWNED YET)
+                if spot_eval["final_spot_action"] == "BUY":
+                    st.success(f"Spot Action Now: BUY BITCOIN (~${trade_dollar_amount:,.0f})")
+                else:
+                    st.info("Spot Status: WAITING IN CASH (No Bitcoin Owned Yet — $0 Fees Paid)")
+
+                chk1 = "[PASS] Predicting UP" if fc_dir == "UP" else "[WAIT] Predicting DOWN (Spot only buys on UP)"
+                chk2 = (
+                    f"[PASS] Move (${pred_move_usd:+,.2f}) > ${hurdle_usd:,.0f} Fee"
+                    if fc_hurdle
+                    else f"[WAIT] Move (${pred_move_usd:+,.2f}) is smaller than ${hurdle_usd:,.0f} Fee"
+                )
+                chk3 = "[PASS] Normal Swing (<3.8%)" if fc_spread <= 3.8 else f"[BLOCKED] Big Swing ({fc_spread:.2f}% > 3.8%)"
+
+                st.markdown("**3 Checks Required to Trigger a Spot BUY:**")
+                st.markdown(
+                    f"1. **Direction Check:** `{chk1}`\n"
+                    f"2. **Fee Hurdle Check (`${hurdle_usd:,.0f}` min move):** `{chk2}`\n"
+                    f"3. **Price Swing Check:** `{chk3}`"
+                )
+                st.caption(
+                    "What happens AFTER we buy BTC? Once we own BTC, the bot holds it at $0 fee while predictions stay UP, "
+                    "and only sells on a DOWN prediction after the price is high enough to lock in a net dollar profit after fees "
+                    "(with a -3.5% emergency stop-loss if the market crashes)."
+                )
             else:
-                st.markdown(f"**Spot Action:** `{act}`")
-                st.caption("Spot state machine evaluation active on local paper portfolio.")
+                # STATE 2: HOLDING BITCOIN (IN AN ACTIVE SPOT TRADE)
+                be_price = float(spot_eval.get("avg_entry_with_fees") or current_price)
+                net_exit = float(spot_eval.get("net_exit_price") or current_price)
+                net_pnl = float(spot_eval.get("estimated_net_pnl_usd") or 0.0)
+                emerg_stop = round(be_price * (1.0 - 0.035), 2)
+
+                st.success(
+                    f"Spot Status: IN AN ACTIVE TRADE — Holding {btc_held_now:.4f} BTC | "
+                    f"Action This Hour: {spot_eval['final_spot_action']}"
+                )
+                st.markdown(
+                    f"- **Your Break-Even Price (incl. fees):** `${be_price:,.2f}`\n"
+                    f"- **If Sold Right Now (after fees):** `${net_exit:,.2f}` (**Net Profit/Loss: `${net_pnl:+,.2f}`**)\n"
+                    f"- **Emergency Crash Stop (-3.5%):** `${emerg_stop:,.2f}`"
+                )
+                st.caption(spot_eval["reason"])
 
         with f_col2:
             st.markdown("#### 3x Isolated Margin Futures Simulation")
@@ -1702,6 +1750,28 @@ with tab4:
     btc_balance = float(port_kpis.get("btc_balance", 0.0) or 0.0)
     benchmark_btc_equity = float(port_kpis.get("benchmark_btc_equity", 10000.0) or 10000.0)
     alpha_usd = float(port_kpis.get("alpha_usd", 0.0) or 0.0)
+
+    # Clear top-level Spot Trade Counter Banner in Tab 4
+    t4_buys = 0
+    t4_sells = 0
+    t4_holds = 0
+    if not port_df.empty and "action" in port_df.columns:
+        act_series = port_df["action"].astype(str).str.upper().str.strip()
+        t4_buys = int((act_series == "BUY").sum())
+        t4_sells = int((act_series == "SELL").sum())
+        t4_holds = int((act_series == "HOLD").sum())
+
+    hurdle_usd_t4 = current_price * (MIN_HURDLE_PCT / 100.0)
+    if btc_balance > 1e-8:
+        st.success(
+            f"Spot Trade Tracker: ACTIVE POSITION OPEN ({btc_balance:.4f} BTC held) | "
+            f"Completed Spot Trades: {t4_buys} Buys, {t4_sells} Sells ({t4_holds} hours held)"
+        )
+    else:
+        st.info(
+            f"Spot Trade Tracker: 100% IN CASH ($10,000 protected) — {t4_buys} Buys, {t4_sells} Sells, {t4_holds} Hours Skipped | "
+            f"Why no Buy yet? Model 1's predicted 1h moves are smaller than the ~${hurdle_usd_t4:,.0f} ({MIN_HURDLE_PCT:.2f}%) fee cost."
+        )
 
     p_col1, p_col2, p_col3, p_col4, p_col5 = st.columns(5)
     with p_col1:
