@@ -204,7 +204,48 @@ def generate_live_forecast(
         "prob_down": prob_down,
         "taker": taker,
         "spread_pct": spread_pct,
+        "current_price": current_price,
     }
+
+
+FEATURE_HUMAN_NAMES: Dict[str, str] = {
+    "vol_mean_6h": "6-Hour Average Volume",
+    "taker_buy_ratio": "Buyer vs. Seller Volume Ratio",
+    "rsi": "Relative Strength Index (RSI Momentum)",
+    "macd": "MACD Trend Momentum",
+    "macd_signal": "MACD Signal Line",
+    "macd_hist": "MACD Histogram Divergence",
+    "bb_high": "Bollinger Upper Band Boundary",
+    "bb_low": "Bollinger Lower Band Boundary",
+    "bb_mid": "Bollinger 20-Period Basis",
+    "fng_value": "Crypto Fear & Greed Index Sentiment",
+    "close_lag_1": "Previous Hour Close Price",
+    "close_lag_2": "2-Hours-Ago Close Price",
+    "close_lag_3": "3-Hours-Ago Close Price",
+    "volume_change": "Hourly Volume Growth Rate",
+    "realized_vol_24h": "24-Hour Realized Price Volatility",
+    "spread_pct": "1-Hour High–Low Price Swing %",
+    "price_spread": "1-Hour High–Low Price Spread ($)",
+    "ret_1h": "1-Hour Price Return %",
+    "ret_3h": "3-Hour Cumulative Return %",
+    "ret_6h": "6-Hour Cumulative Return %",
+    "ret_12h": "12-Hour Cumulative Return %",
+    "ret_24h": "24-Hour Cumulative Return %",
+    "ema_20": "20-Hour Exponential Moving Average",
+    "ema_50": "50-Hour Exponential Moving Average",
+    "atr_14": "14-Hour Average True Range (Volatility)",
+    "obv": "On-Balance Volume (Cumulative Flow)",
+    "funding_rate": "Perpetual Contract Funding Rate",
+    "open_interest": "Derivatives Open Interest",
+}
+
+
+def get_human_feature_label(feat_name: str) -> str:
+    """Returns a descriptive plain-English label alongside the technical feature code."""
+    desc = FEATURE_HUMAN_NAMES.get(feat_name)
+    if desc:
+        return f"{feat_name} ({desc})"
+    return feat_name
 
 
 def generate_live_shap_attribution(
@@ -485,7 +526,12 @@ st.sidebar.title("Mudra Intelligence")
 st.sidebar.caption("Institutional Quantitative Cryptocurrency Platform")
 
 # On-Demand Hourly Quant Deliberation & Sync Trigger
-if st.sidebar.button("Sync Latest Hourly Candle Now", use_container_width=True):
+if st.sidebar.button(
+    "Sync Latest Hourly Candle Now",
+    use_container_width=True,
+    help="Fetches the latest confirmed 1-hour Bitcoin candle from Binance, updates past forecast evaluations in Neon, and runs the AI trading council.",
+):
+    st.sidebar.caption("Fetches latest 1h candle, updates past forecast evaluations, and runs the council.")
     with st.spinner("Streaming candle, calculating signals, and deliberating..."):
         try:
             synced, sync_msg, _ = sync_hourly_quant_cycle(force=True)
@@ -498,7 +544,12 @@ if st.sidebar.button("Sync Latest Hourly Candle Now", use_container_width=True):
         except Exception as exc:
             st.sidebar.error(f"Sync error: {exc}")
 
-if st.sidebar.button("Refresh Terminal Feeds", use_container_width=True):
+if st.sidebar.button(
+    "Refresh Terminal Feeds",
+    use_container_width=True,
+    help="Clears the 60-second local dashboard cache and reloads the latest market data and portfolio metrics from the database.",
+):
+    st.sidebar.caption("Clears the 60-second cache and reloads all terminal data.")
     st.cache_data.clear()
     st.rerun()
 
@@ -516,25 +567,28 @@ is_stale_fallback, stale_age_hours = check_feed_staleness(live_market_df)
 db_state = fetch_cloud_database_state(current_price=current_price)
 
 if db_state["db_ok"]:
-    st.sidebar.success(f"**Neon Cloud:** Connected ({db_state['db_lat']:.0f}ms)")
+    st.sidebar.success(f"**Neon Cloud:** Connected ({db_state['db_lat']:.0f}ms round-trip)")
 else:
     st.sidebar.error("**Neon Cloud:** Disconnected (SQLite test fallback)")
 
 if is_stale_fallback:
     st.sidebar.warning(f"**Market Feed:** Offline Replay ({stale_age_hours:.0f}h lag)")
+    st.sidebar.caption("Live feed unreachable or >3h old; live predictions paused for safety.")
 elif not live_market_df.empty:
     feed_src = str(live_market_df.attrs.get("source", "Live")).title()
     st.sidebar.success(f"**Market Feed:** {feed_src} Confirmed Closed")
+    st.sidebar.caption("Using the most recent completed 1-hour candle from Binance.")
 else:
     st.sidebar.error("**Market Feed:** Feed Offline")
 st.sidebar.markdown("---")
 st.sidebar.markdown(
     """
     **Quant Architecture:**
-    - Single Source of Truth: Neon PostgreSQL
-    - Inference: Tuned XGBoost Regressor
-    - Multi-Agent: LangGraph 2-Node Council
-    - Forward Ledger: $10,000 Portfolio
+    - Single Source of Truth: Neon Cloud PostgreSQL
+    - Return Forecasting: 26-feature XGBoost Regressor (`xgb_onnx_v1.0.0`)
+    - Direction Classification: 39-feature XGBoost Classifier (`xgb_onnx_v1.0.0`)
+    - Multi-Agent Deliberation: LangGraph 2-Node Council (Lead Strategist + Risk Critic)
+    - Forward Ledger: $10,000 Paper Portfolio (0.14% round-trip friction)
     """
 )
 
@@ -613,12 +667,12 @@ price_24h_ago = float(live_market_df["close"].iloc[-24]) if len(live_market_df) 
 delta_24h_pct = ((current_price - price_24h_ago) / price_24h_ago) * 100.0
 
 with kpi1:
-    spot_label = "BTC Spot Price [OFFLINE REPLAY]" if is_stale_fallback else "BTC Spot Price"
+    spot_label = "BTC Spot Price (1h Close) [OFFLINE REPLAY]" if is_stale_fallback else "BTC Spot Price (1h Close)"
     st.metric(
         spot_label,
         f"${current_price:,.2f}",
         f"{delta_24h_pct:+.2f}% (24h)",
-        help="Real-time BTC/USDT spot price streamed from Binance candles, with 24-hour percentage price change.",
+        help="Latest confirmed 1-hour candle close price in USD; delta measures 24-hour price change. The top banner ticker streams live 1-second ticks directly from Binance in your browser.",
     )
 
 with kpi2:
@@ -629,7 +683,7 @@ with kpi2:
         "Multi-Agent Verdict",
         f"{action_badge}",
         f"Critic: {verdict}",
-        help="Autonomous decision from the 2-Node Multi-Agent Council (Lead Strategist proposal audited by Reflexion Risk Critic).",
+        help="Latest hourly trading decision (BUY, SELL, or HOLD) from the 2-Node Multi-Agent Council. Risk Critic confirms whether safety rules were APPROVED or VETOED.",
     )
 
 with kpi3:
@@ -645,10 +699,10 @@ with kpi3:
         else rec_kpis.get("total_evaluated", 0)
     )
     st.metric(
-        "Recent Direction Accuracy (7d)",
+        "7-Day Direction Accuracy",
         f"{win_rate:.1f}%",
         f"{total_eval} evaluated hours",
-        help="Percentage of hourly forecasts in the last 7 days (168 hours) where the model's predicted direction (UP or DOWN) matched the realized market close.",
+        help="Percentage of evaluated 1-hour predictions over the last 7 days (168 hours lookback) where the model's forecasted direction (UP or DOWN) matched the realized market close.",
     )
 
 with kpi4:
@@ -656,22 +710,29 @@ with kpi4:
     equity = float(port.get("total_equity_usd", 10000.0))
     ret_pct = float(port.get("cumulative_return_pct", 0.0))
     st.metric(
-        "Portfolio Equity",
+        "Simulated Portfolio Equity",
         f"${equity:,.2f}",
         f"{ret_pct:+.2f}% vs $10k",
-        help="Total marked-to-market value of the simulated forward paper-trading account (Cash + Bitcoin Inventory) from the $10,000 initial bankroll.",
+        help="Current marked-to-market value of the simulated $10,000 paper-trading account (Cash + Bitcoin holdings) and cumulative % return since starting with $10,000.00 virtual cash.",
     )
 
 with kpi5:
     alpha = float(port.get("alpha_usd", 0.0))
     alpha_pct = float(port.get("alpha_pct", 0.0))
     st.metric(
-        "Excess Alpha",
+        "Net Excess Return (Alpha)",
         f"${alpha:+,.2f}",
         f"{alpha_pct:+.2f}% over B&H",
-        help="Dollar and percentage outperformance of the Mudra strategy relative to a passive Bitcoin Buy & Hold benchmark over the paper-trading period.",
+        help="Dollar and percentage outperformance of the simulated paper portfolio compared to a simple Bitcoin Buy & Hold benchmark started at the exact same time ($10k base).",
     )
 
+st.caption(
+    "💡 **Executive KPI Guide:** **BTC Spot Price:** Latest confirmed 1-hour close (top banner streams live 1-second ticks) • "
+    "**Multi-Agent Verdict:** Hourly decision from the 2-Node Council (Lead Strategist + Risk Critic) • "
+    "**7-Day Direction Accuracy:** Up/down win rate over evaluated hours (168h lookback) • "
+    "**Simulated Portfolio Equity:** Total value of the $10,000 forward paper account • "
+    "**Net Excess Return (Alpha):** Dollar & % outperformance vs. passive Buy & Hold benchmark."
+)
 st.markdown("---")
 
 
@@ -753,39 +814,60 @@ with tab1:
                 st.metric(
                     "Predicted Direction",
                     forecast_result["direction_badge"],
-                    f"Up Prob: {forecast_result['prob_up']:.1f}%",
-                    help="The model's forecasted market direction for the next 60 minutes based on machine learning classification probabilities.",
+                    f"Up: {forecast_result['prob_up']:.1f}% | Down: {forecast_result['prob_down']:.1f}%",
+                    help="Model-estimated probability of closing higher vs. lower in the next 60 minutes. Note that probabilities are statistical estimates and never certainties; low conviction (<55%) indicates chop.",
                 )
             with f_col2:
                 st.metric(
-                    "Expected 1h Move",
+                    "Expected 1h Return",
                     f"{forecast_result['pred_ret_pct']:+.3f}%",
                     f"Cleared {MIN_HURDLE_PCT:.2f}% Hurdle [PASS]" if forecast_result["cleared_hurdle"] else "Below Fee Hurdle [SKIP]",
-                    help=f"Forecasted percentage price return over the next hour. To justify execution fees and slippage, the absolute expected move must clear the {MIN_HURDLE_PCT:.2f}% hurdle threshold.",
+                    help=f"Expected percentage return over the next hour. To overcome trading fees (0.10% taker fee + 0.04% estimated slippage = 0.14% round-trip), the absolute expected move must clear {MIN_HURDLE_PCT:.2f}%; otherwise trades are skipped to protect capital.",
                 )
             with f_col3:
                 st.metric(
-                    "Target Close Price",
+                    "Predicted 1h Target Price",
                     f"${forecast_result['pred_target']:,.2f}",
                     f"${forecast_result['pred_dollar_move']:+,.2f}",
-                    help="The absolute dollar price target predicted for the next hourly candle close, along with the expected dollar change from current price.",
+                    help="The predicted Bitcoin price 1 hour from now (Reference Price + Dollar Move). If expected return is below the 0.14% trading cost hurdle, no trade is executed even if a target is projected.",
                 )
             with f_col4:
                 taker = forecast_result["taker"]
                 st.metric(
                     "Buyer Aggression (Taker Ratio)",
                     f"{taker:.4f}",
-                    "Order Flow: " + ("Buyer Pressure (+)" if taker > 0.52 else ("Seller Pressure (-)" if taker < 0.48 else "Balanced (0)")),
-                    help="Share of hourly volume triggered by market buyers (> 0.52 indicates buyer dominance; < 0.48 indicates seller dominance).",
+                    "Buyer Dominance (> 0.52)" if taker > 0.52 else ("Seller Dominance (< 0.48)" if taker < 0.48 else "Balanced (0.48–0.52)"),
+                    help="Taker Buy Ratio: share of volume initiated by market buyers taking liquidity from the order book. Values > 0.52 indicate aggressive buyer demand; < 0.48 indicate aggressive market selling.",
                 )
             with f_col5:
                 spread_pct = forecast_result["spread_pct"]
                 st.metric(
-                    "Hourly Volatility Spread",
+                    "1-Hour High–Low Range",
                     f"{spread_pct:.2f}%",
-                    "Regime: " + ("Extreme Flush [ALERT]" if spread_pct > 3.8 else "Controlled [NORMAL]"),
-                    help="The high-low price range as a percentage of close price over the last completed hourly candle (> 3.8% triggers high-volatility circuit breaker warnings).",
+                    "Extreme Volatility (> 3.8%)" if spread_pct > 3.8 else "Controlled Volatility",
+                    help="The high-low price range as a percentage of close over the last 1-hour candle. This measures recent candle volatility, not order-book bid-ask slippage. Values > 3.8% trigger risk vetoes.",
                 )
+
+            ref_price = forecast_result.get("current_price", current_price)
+            hurdle_status_str = "CLEARED (PASS)" if forecast_result["cleared_hurdle"] else "BELOW FEE HURDLE (SKIP)"
+            st.info(
+                f"📊 **Forecast Summary & Execution Hurdle Analysis:**\n\n"
+                f"• **Reference Price (Candle Close):** `${ref_price:,.2f}`\n\n"
+                f"• **Predicted 1h Return:** `{forecast_result['pred_ret_pct']:+.3f}%` "
+                f"(Expected Dollar Move: `{forecast_result['pred_dollar_move']:+,.2f}`)\n\n"
+                f"• **Predicted 1h Target Price:** `${forecast_result['pred_target']:,.2f}`\n\n"
+                f"• **Trading Cost Hurdle Check:** `{hurdle_status_str}` — "
+                f"Mudra enforces a minimum expected move of **±{MIN_HURDLE_PCT:.2f}%** (approx. **±${ref_price * (MIN_HURDLE_PCT / 100.0):,.2f}**) "
+                f"to cover round-trip exchange fees and slippage (0.14%). "
+                f"{'Because the expected return exceeds this threshold, the trade is eligible for council deliberation.' if forecast_result['cleared_hurdle'] else 'Because the expected return is below this threshold, trading is skipped to prevent capital erosion from exchange fees.'}"
+            )
+            st.caption(
+                "💡 **Direction & Status Guide:** "
+                "**SIDEWAYS (CHOP):** Expected return is smaller than ±0.14% fee hurdle (even if probability leans UP/DOWN, trade is skipped) • "
+                "**BULLISH (UP):** Upward return clears +0.14% fee hurdle with >50% probability • "
+                "**BEARISH (DOWN):** Downward return clears -0.14% fee hurdle with >50% probability • "
+                "**[PASS]:** Clears transaction cost hurdle • **[SKIP]:** Filtered out to avoid fees."
+            )
 
 
 def format_risk_levels(
@@ -929,6 +1011,16 @@ with tab2:
                 st.markdown("**Breached Invariants:**")
                 for v in vetoes:
                     st.markdown(f"- [VETO] `{v}`")
+
+    st.info(
+        "🛡️ **Multi-Agent Risk Architecture Guide:**\n\n"
+        "• **Deliberation Scenarios:** Convene the council on live market data, or simulate edge cases:\n"
+        "  - **Stress: Bullish Breakout:** Simulates strong technical breakout with >0.14% return to test Kelly capital sizing.\n"
+        "  - **Stress: Volatility Flush Veto:** Injects high volatility (>3.8% candle spread) to verify the Risk Critic triggers an automatic veto.\n"
+        "  - **Stress: Sub-Hurdle Chop Veto:** Injects low expected return (<0.14%) to verify trades are rejected to prevent fee churn.\n\n"
+        "• **Sizing & Capital Preservation:** Kelly fraction determines allocation only when the Risk Critic issues an `[APPROVED]` verdict. "
+        "When an order is `[VETOED]` or action is `HOLD`, capital allocation is **0.0%** and stop-loss / take-profit orders are not opened, leaving 100% in safe cash USD."
+    )
 
 
 TAB3_MODEL_SELECTOR_OPTIONS: List[str] = ["All Models", ACTIVE_MODEL_VERSION]
@@ -1187,6 +1279,12 @@ with tab3:
             help="Measures how well the size of predicted moves tracks actual moves (-1.0 to +1.0; above +0.02 shows useful signal).",
         )
 
+    st.caption(
+        "💡 **Delayed Track Record Guide:** **Direction Accuracy:** Evaluated over 168 hours; >50% indicates positive statistical edge • "
+        "**MAE:** Mean Absolute Error in dollars • **MAPE:** Percentage error relative to price • "
+        "**Forecast Correlation (IC):** Information Coefficient rank correlation between predicted and realized return magnitude (>+0.02 is significant)."
+    )
+
     # Hit / Miss Scatter Chart
     if not filtered_rec_df.empty:
         st.markdown("### Realized Price vs. Predicted Price Accuracy Chart")
@@ -1402,6 +1500,13 @@ with tab4:
             f"{float(port_kpis.get('alpha_pct', 0.0)):+.2f}% vs B&H",
             help="Excess dollar and percentage return generated by the active strategy over the passive Buy & Hold benchmark.",
         )
+
+    st.caption(
+        "💡 **Forward Ledger Guide:** **Total Equity:** Combined liquid cash + marked-to-market Bitcoin inventory • "
+        "**Cash Balance:** Available USDT reserve • **BTC Inventory:** Current Bitcoin position • "
+        "**Buy & Hold Benchmark:** Simulated value if initial $10,000 had bought BTC passively at inception • "
+        "**Strategy Alpha:** Net dollar and percentage outperformance after deducting 0.14% exchange fee & slippage per trade."
+    )
 
     # Strategy Equity Curve vs Buy & Hold Benchmark
     if not port_df.empty:
