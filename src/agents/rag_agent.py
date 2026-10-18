@@ -28,7 +28,10 @@ os.environ["ANONYMIZED_TELEMETRY"] = "False"
 logging.getLogger("chromadb.telemetry").setLevel(logging.ERROR)
 logging.getLogger("chromadb.telemetry.posthog").setLevel(logging.ERROR)
 
-import google.generativeai as genai
+try:
+    import google.generativeai as genai
+except ImportError:
+    genai = None  # type: ignore
 import chromadb
 from chromadb.config import Settings
 from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
@@ -47,6 +50,8 @@ __all__ = [
 
 def _get_gemini_api_key() -> Optional[str]:
     """Retrieves the Gemini API key across .env, st.secrets, and secrets.toml."""
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return None
     # 1. Environment variables
     key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if key and key != "your_gemini_api_key_here":
@@ -102,17 +107,28 @@ class GeminiEmbeddingFunction(EmbeddingFunction):
             # Fallback if no API key is configured
             return [[0.0] * 768 for _ in input]
 
-        try:
-            res = genai.embed_content(
-                model=self.model_name,
-                content=input,
-                output_dimensionality=768,
-                task_type="retrieval_document"
-            )
-            return res["embedding"]
-        except Exception as e:
-            print(f"[WARNING] Gemini Embedding API error ({e}), utilizing defensive fallback.")
+        if genai is None:
             return [[0.0] * 768 for _ in input]
+        embed_candidates = (self.model_name, "models/gemini-embedding-001", "models/text-embedding-004")
+        seen = []
+        for m_cand in embed_candidates:
+            if m_cand not in seen:
+                seen.append(m_cand)
+        last_err = None
+        for m_cand in seen:
+            try:
+                res = genai.embed_content(
+                    model=m_cand,
+                    content=input,
+                    output_dimensionality=768,
+                    task_type="retrieval_document",
+                )
+                return res["embedding"]
+            except Exception as e:
+                last_err = e
+                continue
+        print(f"[WARNING] Gemini Embedding API error ({last_err}), utilizing defensive fallback.")
+        return [[0.0] * 768 for _ in input]
 
 
 # Foundational domain knowledge to pre-seed the vector store
