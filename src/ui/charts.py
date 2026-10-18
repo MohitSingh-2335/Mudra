@@ -173,6 +173,7 @@ def create_alpha_equity_curve(df: pd.DataFrame) -> go.Figure:
                 mode="lines",
                 name="Bitcoin Buy & Hold Benchmark ($)",
                 line=dict(color="#F7931A", width=1.8, dash="dash"),
+                hovertemplate="Time: %{x}<br>Buy & Hold Value: $%{y:,.2f}<extra></extra>",
             )
         )
 
@@ -185,6 +186,7 @@ def create_alpha_equity_curve(df: pd.DataFrame) -> go.Figure:
             name="Mudra Strategy Equity ($)",
             line=dict(color="#00F2FE", width=2.8),
             marker=dict(size=5, color="#00C087"),
+            hovertemplate="Time: %{x}<br>Strategy Equity: $%{y:,.2f}<extra></extra>",
         )
     )
 
@@ -247,6 +249,7 @@ def create_reconciliation_scatter(df: pd.DataFrame) -> go.Figure:
             mode="lines",
             name="Actual Realized Market Close",
             line=dict(color="#FFFFFF", width=1.5),
+            hovertemplate="Time: %{x}<br>Actual Close: $%{y:,.2f}<extra></extra>",
         )
     )
 
