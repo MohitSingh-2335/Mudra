@@ -1,5 +1,5 @@
 """
-Regression test suite for Stage 5: Prediction-Failure Investigations & Reliability Controls.
+Regression test suite for Prediction-Failure Investigations & Reliability Controls.
 
 Verifies:
 1. Exact table, column, and constraint alignment for `prediction_investigations` in Neon/SQLite.
