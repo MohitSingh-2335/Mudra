@@ -837,6 +837,7 @@ st.markdown("---")
 # =====================================================================================
 # 5 INSTITUTIONAL TABS
 # =====================================================================================
+forecast_result = None
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Live Price & 1h Prediction",
     "AI Trade Decision",
@@ -1110,6 +1111,61 @@ with tab2:
                 st.markdown("**Risk Veto Reasons:**")
                 for v in vetoes:
                     st.markdown(f"- `{v}`")
+
+    with st.expander("Spot Hold-Until-Profit Check & 3x Isolated Futures Simulation", expanded=False):
+        from src.engine.paper_portfolio import evaluate_spot_hold_until_profit_decision, evaluate_futures_long_short_plan
+        from src.database.connection import get_db
+
+        fc_dir = forecast_result.get("direction_label", "UP") if forecast_result else "UP"
+        fc_ret = forecast_result.get("pred_ret_pct", 0.0) if forecast_result else 0.0
+        fc_hurdle = forecast_result.get("cleared_hurdle", False) if forecast_result else False
+        fc_spread = forecast_result.get("spread_pct", 1.0) if forecast_result else 1.0
+
+        f_plan = evaluate_futures_long_short_plan(
+            current_price=current_price,
+            predicted_direction=fc_dir,
+            expected_return_pct=fc_ret,
+            clears_hurdle=fc_hurdle,
+            volatility_range_pct=fc_spread,
+            risk_approved=(vrd == "APPROVED"),
+            conviction_score=conv,
+            leverage=3.0,
+        )
+
+        f_col1, f_col2 = st.columns(2)
+        with f_col1:
+            st.markdown("#### Spot 'Hold-Until-Net-Profit' Safety Check")
+            spot_eval = None
+            try:
+                with get_db() as s:
+                    spot_eval = evaluate_spot_hold_until_profit_decision(
+                        session=s,
+                        current_price=current_price,
+                        predicted_direction=fc_dir,
+                        proposed_action=act,
+                        clears_hurdle=fc_hurdle,
+                    )
+            except Exception:
+                pass
+
+            if spot_eval:
+                st.markdown(f"**Spot Action:** `{spot_eval['final_spot_action']}` ({spot_eval['position_state']})")
+                st.markdown(f"**Break-Even Entry (incl. fees):** `${spot_eval['avg_entry_with_fees']:,.2f}`")
+                st.markdown(f"**Net Exit Price (after sell fees):** `${spot_eval['net_exit_price']:,.2f}`")
+                st.markdown(f"**Estimated Net P&L:** `${spot_eval['estimated_net_pnl_usd']:+,.2f}`")
+                st.info(spot_eval["reason"])
+            else:
+                st.markdown(f"**Spot Action:** `{act}`")
+                st.caption("Spot state machine evaluation active on local paper portfolio.")
+
+        with f_col2:
+            st.markdown("#### 3x Isolated Margin Futures Simulation")
+            st.markdown(f"**Futures Position:** `{f_plan['futures_Position']}`")
+            st.markdown(f"**Isolated Margin:** `${f_plan['margin_allocated_usd']:,.0f}` (Notional: `${f_plan['notional_exposure_usd']:,.0f}`)")
+            if f_plan["liquidation_price"]:
+                st.markdown(f"**Liquidation Price:** `${f_plan['liquidation_price']:,.2f}`")
+                st.markdown(f"**Stop-Loss:** `${f_plan['stop_loss_price']:,.2f}` | **Take-Profit:** `${f_plan['take_profit_price']:,.2f}`")
+            st.caption(f_plan["summary"])
 
 
 TAB3_MODEL_SELECTOR_OPTIONS: List[str] = ["All Models", ACTIVE_MODEL_VERSION]
