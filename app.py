@@ -614,30 +614,63 @@ delta_24h_pct = ((current_price - price_24h_ago) / price_24h_ago) * 100.0
 
 with kpi1:
     spot_label = "BTC Spot Price [OFFLINE REPLAY]" if is_stale_fallback else "BTC Spot Price"
-    st.metric(spot_label, f"${current_price:,.2f}", f"{delta_24h_pct:+.2f}% (24h)")
+    st.metric(
+        spot_label,
+        f"${current_price:,.2f}",
+        f"{delta_24h_pct:+.2f}% (24h)",
+        help="Real-time BTC/USDT spot price streamed from Binance candles, with 24-hour percentage price change.",
+    )
 
 with kpi2:
     audit = db_state["latest_audit"]
     action_badge = audit.get("final_decision", "HOLD") if audit else "HOLD"
     verdict = audit.get("risk_verdict", "APPROVED") if audit else "APPROVED"
-    st.metric("Multi-Agent Verdict", f"{action_badge}", f"Critic: {verdict}")
+    st.metric(
+        "Multi-Agent Verdict",
+        f"{action_badge}",
+        f"Critic: {verdict}",
+        help="Autonomous decision from the 2-Node Multi-Agent Council (Lead Strategist proposal audited by Reflexion Risk Critic).",
+    )
 
 with kpi3:
     rec_kpis = db_state["rec_kpis"]
-    win_rate = float(rec_kpis.get("directional_accuracy_pct") or rec_kpis.get("win_rate_pct", 0.0))
-    total_eval = int(rec_kpis.get("total_reconciled") or rec_kpis.get("total_evaluated", 0))
-    st.metric("All-Time Win Rate", f"{win_rate:.1f}%", f"{total_eval} evaluated hours")
+    win_rate = float(
+        rec_kpis.get("directional_accuracy_pct")
+        if rec_kpis.get("directional_accuracy_pct") is not None
+        else rec_kpis.get("win_rate_pct", 0.0)
+    )
+    total_eval = int(
+        rec_kpis.get("total_reconciled")
+        if rec_kpis.get("total_reconciled") is not None
+        else rec_kpis.get("total_evaluated", 0)
+    )
+    st.metric(
+        "Recent Direction Accuracy (7d)",
+        f"{win_rate:.1f}%",
+        f"{total_eval} evaluated hours",
+        help="Percentage of hourly forecasts in the last 7 days (168 hours) where the model's predicted direction (UP or DOWN) matched the realized market close.",
+    )
 
 with kpi4:
     port = db_state["port_kpis"]
     equity = float(port.get("total_equity_usd", 10000.0))
     ret_pct = float(port.get("cumulative_return_pct", 0.0))
-    st.metric("Portfolio Equity", f"${equity:,.2f}", f"{ret_pct:+.2f}% vs $10k")
+    st.metric(
+        "Portfolio Equity",
+        f"${equity:,.2f}",
+        f"{ret_pct:+.2f}% vs $10k",
+        help="Total marked-to-market value of the simulated forward paper-trading account (Cash + Bitcoin Inventory) from the $10,000 initial bankroll.",
+    )
 
 with kpi5:
     alpha = float(port.get("alpha_usd", 0.0))
     alpha_pct = float(port.get("alpha_pct", 0.0))
-    st.metric("Excess Alpha", f"${alpha:+,.2f}", f"{alpha_pct:+.2f}% over B&H")
+    st.metric(
+        "Excess Alpha",
+        f"${alpha:+,.2f}",
+        f"{alpha_pct:+.2f}% over B&H",
+        help="Dollar and percentage outperformance of the Mudra strategy relative to a passive Bitcoin Buy & Hold benchmark over the paper-trading period.",
+    )
 
 st.markdown("---")
 
@@ -659,7 +692,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 # -------------------------------------------------------------------------------------
 with tab1:
     st.subheader("BTC/USDT Real-Time Streaming Candlestick Terminal")
-    st.caption("Official TradingView live Binance feed • Millisecond WebSocket streaming, real-time volume & interactive timeframes.")
+    st.caption("Live market price action, technical momentum ribbons (EMA-20 / EMA-50), and machine-learning next-hour price forecasts.")
 
     # Live Real-Time Binance Candlestick Widget via TradingView
     components.html(
@@ -701,6 +734,7 @@ with tab1:
 
     # Next-Hour Forecast Panel
     st.markdown("### Next-Hour Model Forecast Breakdown")
+    st.caption("Single-row forward inference produced by the active XGBoost model (`xgb_onnx_v1.0.0`) evaluated at the latest confirmed candle close.")
     if is_stale_fallback:
         st.warning(
             f"⚠️ Live market feed unavailable (offline replay active, {stale_age_hours:.0f}h lag). "
@@ -716,21 +750,33 @@ with tab1:
         if forecast_result:
             f_col1, f_col2, f_col3, f_col4, f_col5 = st.columns(5)
             with f_col1:
-                st.metric("Predicted Direction", forecast_result["direction_badge"], f"Up Prob: {forecast_result['prob_up']:.1f}%")
+                st.metric(
+                    "Predicted Direction",
+                    forecast_result["direction_badge"],
+                    f"Up Prob: {forecast_result['prob_up']:.1f}%",
+                    help="The model's forecasted market direction for the next 60 minutes based on machine learning classification probabilities.",
+                )
             with f_col2:
                 st.metric(
                     "Expected 1h Move",
                     f"{forecast_result['pred_ret_pct']:+.3f}%",
                     f"Cleared {MIN_HURDLE_PCT:.2f}% Hurdle [PASS]" if forecast_result["cleared_hurdle"] else "Below Fee Hurdle [SKIP]",
+                    help=f"Forecasted percentage price return over the next hour. To justify execution fees and slippage, the absolute expected move must clear the {MIN_HURDLE_PCT:.2f}% hurdle threshold.",
                 )
             with f_col3:
-                st.metric("Target Close Price", f"${forecast_result['pred_target']:,.2f}", f"${forecast_result['pred_dollar_move']:+,.2f}")
+                st.metric(
+                    "Target Close Price",
+                    f"${forecast_result['pred_target']:,.2f}",
+                    f"${forecast_result['pred_dollar_move']:+,.2f}",
+                    help="The absolute dollar price target predicted for the next hourly candle close, along with the expected dollar change from current price.",
+                )
             with f_col4:
                 taker = forecast_result["taker"]
                 st.metric(
-                    "Taker Buy Ratio",
+                    "Buyer Aggression (Taker Ratio)",
                     f"{taker:.4f}",
                     "Order Flow: " + ("Buyer Pressure (+)" if taker > 0.52 else ("Seller Pressure (-)" if taker < 0.48 else "Balanced (0)")),
+                    help="Share of hourly volume triggered by market buyers (> 0.52 indicates buyer dominance; < 0.48 indicates seller dominance).",
                 )
             with f_col5:
                 spread_pct = forecast_result["spread_pct"]
@@ -738,7 +784,40 @@ with tab1:
                     "Hourly Volatility Spread",
                     f"{spread_pct:.2f}%",
                     "Regime: " + ("Extreme Flush [ALERT]" if spread_pct > 3.8 else "Controlled [NORMAL]"),
+                    help="The high-low price range as a percentage of close price over the last completed hourly candle (> 3.8% triggers high-volatility circuit breaker warnings).",
                 )
+
+
+def format_risk_levels(
+    action: str,
+    verdict: str,
+    current_price: float,
+    council_state: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, str]:
+    """
+    Returns plain-English Stop-Loss and Take-Profit strings.
+    When trade is not approved or action is HOLD, displays 'None (No active trade opened — cash preserved)'.
+    When BUY is approved, displays stop loss (-1.5%) and target take-profit (+2.5%).
+    When SELL is approved, displays stop loss (+1.5%) and target take-profit (-2.5%).
+    """
+    c_state = council_state or {}
+    act = str(action).upper().strip()
+    vrd = str(verdict).upper().strip()
+    if vrd != "APPROVED" or act == "HOLD":
+        no_trade_msg = "None (No active trade opened — cash preserved)"
+        return no_trade_msg, no_trade_msg
+
+    if act == "BUY":
+        sl = float(c_state.get("stop_loss_price") or (current_price * 0.985))
+        tp = float(c_state.get("take_profit_price") or (current_price * 1.025))
+        return f"${sl:,.2f} (-1.5%)", f"${tp:,.2f} (+2.5%)"
+    elif act == "SELL":
+        sl = float(c_state.get("stop_loss_price") or (current_price * 1.015))
+        tp = float(c_state.get("take_profit_price") or (current_price * 0.975))
+        return f"${sl:,.2f} (+1.5%)", f"${tp:,.2f} (-2.5%)"
+
+    no_trade_msg = "None (No active trade opened — cash preserved)"
+    return no_trade_msg, no_trade_msg
 
 
 # -------------------------------------------------------------------------------------
@@ -795,7 +874,13 @@ with tab2:
             "strategist_conviction": audit.get("strategist_conviction", 5),
             "kelly_fraction": audit.get("kelly_fraction", 0.10),
             "veto_reasons": audit.get("veto_reasons", []),
-            "thesis": audit.get("execution_notes", "Awaiting live deliberation or click scenario button above."),
+            "thesis": (
+                audit.get("execution_notes")
+                or audit.get("thesis")
+                or audit.get("strategist_thesis")
+                or audit.get("executive_summary")
+                or "Awaiting live deliberation or click scenario button above."
+            ),
         }
     elif not council_state:
         council_state = {
@@ -824,15 +909,22 @@ with tab2:
     with col_s1:
         with st.expander("Node 1: Lead Quantitative Strategist Thesis", expanded=True):
             st.markdown(f"**Proposed Action:** `{council_state.get('strategist_action', 'HOLD')}` (Conviction: {conv}/10)")
-            st.markdown(f"**Executive Thesis:**\n\n{council_state.get('thesis', 'Thesis unavailable')}")
+            thesis_text = (
+                council_state.get("thesis")
+                or council_state.get("strategist_thesis")
+                or council_state.get("executive_summary")
+                or "Thesis unavailable"
+            )
+            st.markdown(f"**Executive Thesis:**\n\n{thesis_text}")
             if council_state.get("circuit_breaker_active"):
                 st.caption("*Running in Deterministic Circuit Breaker Mode.*")
     with col_s2:
         with st.expander("Node 2: Reflexion Risk Critic Veto Audit", expanded=True):
             st.markdown(f"**Critic Verdict:** `{vrd}`")
             st.markdown(f"**Allocated Sizing Fraction:** `{kelly_pct:.1f}%` of available cash")
-            st.markdown(f"**Stop-Loss:** `${current_price * 0.985:,.2f}` (-1.5%)")
-            st.markdown(f"**Target Take-Profit:** `${current_price * 1.025:,.2f}` (+2.5%)")
+            sl_str, tp_str = format_risk_levels(action=act, verdict=vrd, current_price=current_price, council_state=council_state)
+            st.markdown(f"**Stop-Loss:** `{sl_str}`")
+            st.markdown(f"**Target Take-Profit:** `{tp_str}`")
             if vetoes:
                 st.markdown("**Breached Invariants:**")
                 for v in vetoes:
@@ -1060,19 +1152,40 @@ with tab3:
     # Rolling Metrics Ribbon
     m_col1, m_col2, m_col3, m_col4, m_col5 = st.columns(5)
     with m_col1:
-        st.metric("Total Evaluated Hours", f"{rec_kpis.get('total_reconciled') or rec_kpis.get('total_evaluated', 0)}")
+        tot_val = rec_kpis.get("total_reconciled") if rec_kpis.get("total_reconciled") is not None else rec_kpis.get("total_evaluated", 0)
+        st.metric(
+            "Total Evaluated Hours",
+            f"{tot_val}",
+            help="Total number of historical 1-hour candles where an advance prediction was delayed and evaluated against realized close.",
+        )
     with m_col2:
-        val = rec_kpis.get("directional_accuracy_pct") or rec_kpis.get("win_rate_pct")
-        st.metric("Directional Win Rate", f"{float(val):.1f}%" if val is not None else "N/A")
+        val = rec_kpis.get("directional_accuracy_pct") if rec_kpis.get("directional_accuracy_pct") is not None else rec_kpis.get("win_rate_pct")
+        st.metric(
+            "Direction Accuracy (Up/Down)",
+            f"{float(val):.1f}%" if val is not None else "N/A",
+            help="How often the model correctly predicted whether Bitcoin would close higher or lower 1 hour later.",
+        )
     with m_col3:
         val = rec_kpis.get("mae_usd")
-        st.metric("Mean Absolute Error (MAE)", f"${float(val):,.2f}" if val is not None else "N/A")
+        st.metric(
+            "Avg Dollar Error (MAE)",
+            f"${float(val):,.2f}" if val is not None else "N/A",
+            help="The average dollar difference between the forecasted price and the actual closing price.",
+        )
     with m_col4:
         val = rec_kpis.get("mape_pct")
-        st.metric("Mean Error (MAPE)", f"{float(val):.2f}%" if val is not None else "N/A")
+        st.metric(
+            "Mean Percentage Error (MAPE)",
+            f"{float(val):.2f}%" if val is not None else "N/A",
+            help="Mean absolute percentage error between the forecasted price and actual market price.",
+        )
     with m_col5:
-        val = rec_kpis.get("information_coefficient_ic") or rec_kpis.get("information_coefficient")
-        st.metric("Information Coeff (IC)", f"{float(val):.3f}" if val is not None else "N/A")
+        val = rec_kpis.get("information_coefficient_ic") if rec_kpis.get("information_coefficient_ic") is not None else rec_kpis.get("information_coefficient")
+        st.metric(
+            "Forecast Correlation (IC)",
+            f"{float(val):.3f}" if val is not None else "N/A",
+            help="Measures how well the size of predicted moves tracks actual moves (-1.0 to +1.0; above +0.02 shows useful signal).",
+        )
 
     # Hit / Miss Scatter Chart
     if not filtered_rec_df.empty:
@@ -1128,7 +1241,9 @@ with tab3:
 
         # 3. Plain-English AI Diagnosis Sentence
         def _generate_diagnosis(row):
-            is_match = row["Predicted Direction"] == row["Actual Direction"]
+            pred_dir = str(row.get("Predicted Direction", "")).upper()
+            act_dir = str(row.get("Actual Direction", "")).upper()
+            is_match = (pred_dir == act_dir) and bool(pred_dir)
             diff = float(row.get("absolute_error_usd", 0.0) or 0.0)
             pred_ret = float(row.get("predicted_return_pct", 0.0) or 0.0)
             act_ret = float(row.get("actual_return_pct", 0.0) or 0.0)
@@ -1140,10 +1255,16 @@ with tab3:
             if is_match:
                 if diff <= 150.0 or tag == "ACCURATE":
                     return f"Target Hit: Accurate directional call within ${diff:,.2f} variance."
-                elif abs(act_ret) > abs(pred_ret):
-                    return f"Stronger Rally: Market moved upward faster than anticipated (+${diff:,.2f})."
-                else:
-                    return f"Weaker Move: Upward breakout was smaller than forecasted (-${diff:,.2f})."
+                elif act_dir == "DOWN":
+                    if abs(act_ret) > abs(pred_ret):
+                        return f"Stronger Drop: Market fell further than forecasted (-${diff:,.2f})."
+                    else:
+                        return f"Smaller Drop: Downward move was smaller than forecasted (+${diff:,.2f})."
+                else:  # UP
+                    if abs(act_ret) > abs(pred_ret):
+                        return f"Stronger Rally: Market moved upward faster than anticipated (+${diff:,.2f})."
+                    else:
+                        return f"Weaker Move: Upward breakout was smaller than forecasted (-${diff:,.2f})."
             else:
                 if diff <= 150.0 or tag == "SIDEWAYS_DRIFT":
                     return f"Target Drift: Sideways range chop drifted by ${diff:,.2f}."
@@ -1172,28 +1293,115 @@ with tab3:
     else:
         st.info(f"[INFO] No delayed reconciliation records found for selection '{selected_model}'. Delayed reconciliation runs automatically every hour as candles close.")
 
+    # Read-Only Forecast Error Investigation Explorer (Stage 5 Audit Surface)
+    st.markdown("---")
+    with st.expander("🔍 Forecast Error Investigations & Root-Cause Audit Log", expanded=False):
+        st.caption(
+            "Read-only diagnostic audit log exploring prediction anomalies, regime shifts, and causal hypotheses. "
+            "Strictly distinguishes suspected root causes (unverified hypotheses) from confirmed ground-truth causes."
+        )
+        inv_col1, inv_col2 = st.columns([3, 2])
+        with inv_col1:
+            search_kw = st.text_input(
+                "Search News Headlines / Macro Catalysts",
+                value="",
+                placeholder="e.g. CPI, ETF, liquidation, Fed",
+                key="investigation_headline_search",
+            )
+        with inv_col2:
+            status_opt = st.selectbox(
+                "Filter by Verification Status",
+                options=["ALL", "UNVERIFIED_HYPOTHESIS", "CONFIRMED_CAUSE", "REFUTED", "APPROVED_FOR_TRAINING"],
+                key="investigation_status_filter",
+            )
+
+        try:
+            from src.database.connection import get_db
+            from src.database.investigations import get_prediction_investigations
+            filter_status = None if status_opt == "ALL" else status_opt
+            with get_db() as inv_session:
+                inv_records = get_prediction_investigations(
+                    inv_session,
+                    headline_search=search_kw.strip() if search_kw.strip() else None,
+                    status=filter_status,
+                    limit=30,
+                )
+            if inv_records:
+                inv_display = []
+                for inv in inv_records:
+                    st_badge = {
+                        "UNVERIFIED_HYPOTHESIS": "🟡 Unverified Hypothesis",
+                        "CONFIRMED_CAUSE": "🟢 Confirmed Cause",
+                        "REFUTED": "🔴 Refuted Hypothesis",
+                        "APPROVED_FOR_TRAINING": "🔵 Approved for Training",
+                    }.get(inv.get("verification_status"), inv.get("verification_status"))
+
+                    inv_display.append({
+                        "ID": inv.get("id"),
+                        "Status": st_badge,
+                        "Suspected Cause": inv.get("suspected_cause_category"),
+                        "Confidence": f"{float(inv.get('diagnostic_confidence', 0.0)):.1%}",
+                        "Headline": inv.get("headline") or "N/A",
+                        "Model Version": inv.get("model_version"),
+                        "Ground Truth Label": inv.get("verified_ground_truth_label") or "Pending Verification",
+                        "Verified By": inv.get("verified_by") or "—",
+                        "Created (UTC)": pd.to_datetime(inv.get("created_at")).strftime("%Y-%m-%d %H:%M") if inv.get("created_at") else "—",
+                    })
+                st.dataframe(pd.DataFrame(inv_display), use_container_width=True, hide_index=True)
+            else:
+                st.info("No recorded prediction investigations match your query. Investigations are logged when significant prediction residuals or anomalies are analyzed.")
+        except Exception:
+            st.info("Diagnostic investigations database is currently operating in local test mode. Delayed reconciliation logs will populate when live anomalies occur.")
+
 
 # -------------------------------------------------------------------------------------
 # TAB 4: $10,000 PAPER TRADING PORTFOLIO LEDGER (NEON DB SSOT)
 # -------------------------------------------------------------------------------------
 with tab4:
     st.subheader("Forward $10,000 Paper Trading Portfolio & Alpha Attribution")
-    st.caption(f"Live forward execution accounting for {TAKER_FEE_PCT:.2f}% taker fee and {SLIPPAGE_PCT:.2f}% slippage ({TOTAL_FRICTION_PER_SIDE_PCT:.2f}% per side). Proves excess Alpha over Bitcoin Buy & Hold benchmark.")
+    st.caption(
+        f"Forward paper-trading simulation ledger on a $10,000 initial bankroll, automatically deducting "
+        f"{TAKER_FEE_PCT:.2f}% taker fee and {SLIPPAGE_PCT:.2f}% slippage ({TOTAL_FRICTION_PER_SIDE_PCT:.2f}% per side, "
+        f"{ROUND_TRIP_FRICTION_PCT:.2f}% round-trip). Simulated paper-trading performance demonstrates execution accounting "
+        f"and fee-hurdle discipline, but does not guarantee future live trading results or standalone statistical model edge."
+    )
 
     port_df = db_state["port_df"]
     port_kpis = db_state["port_kpis"]
 
     p_col1, p_col2, p_col3, p_col4, p_col5 = st.columns(5)
     with p_col1:
-        st.metric("Total Portfolio Equity", f"${float(port_kpis.get('total_equity_usd', 10000.0)):,.2f}", f"{float(port_kpis.get('cumulative_return_pct', 0.0)):+.2f}%")
+        st.metric(
+            "Total Portfolio Equity",
+            f"${float(port_kpis.get('total_equity_usd', 10000.0)):,.2f}",
+            f"{float(port_kpis.get('cumulative_return_pct', 0.0)):+.2f}%",
+            help="Combined cash and marked-to-market Bitcoin inventory value in the simulated $10,000 forward paper-trading account.",
+        )
     with p_col2:
-        st.metric("Cash Balance", f"${float(port_kpis.get('cash_balance', 10000.0)):,.2f}")
+        st.metric(
+            "Cash Balance",
+            f"${float(port_kpis.get('cash_balance', 10000.0)):,.2f}",
+            help="Available USDT cash balance held in reserve when cash-preservation rules or risk vetos prevent market orders.",
+        )
     with p_col3:
-        st.metric("BTC Inventory", f"{float(port_kpis.get('btc_balance', 0.0)):.6f} BTC")
+        st.metric(
+            "BTC Inventory",
+            f"{float(port_kpis.get('btc_balance', 0.0)):.6f} BTC",
+            help="Quantity of Bitcoin currently held in the forward simulation portfolio.",
+        )
     with p_col4:
-        st.metric("Buy & Hold Benchmark", f"${float(port_kpis.get('benchmark_btc_equity', 10000.0)):,.2f}")
+        st.metric(
+            "Buy & Hold Benchmark",
+            f"${float(port_kpis.get('benchmark_btc_equity', 10000.0)):,.2f}",
+            help="What the initial $10,000 would be worth if 100% had been invested in Bitcoin at portfolio inception without active management.",
+        )
     with p_col5:
-        st.metric("Strategy Alpha", f"${float(port_kpis.get('alpha_usd', 0.0)):+,.2f}", f"{float(port_kpis.get('alpha_pct', 0.0)):+.2f}% vs B&H")
+        st.metric(
+            "Strategy Alpha",
+            f"${float(port_kpis.get('alpha_usd', 0.0)):+,.2f}",
+            f"{float(port_kpis.get('alpha_pct', 0.0)):+.2f}% vs B&H",
+            help="Excess dollar and percentage return generated by the active strategy over the passive Buy & Hold benchmark.",
+        )
 
     # Strategy Equity Curve vs Buy & Hold Benchmark
     if not port_df.empty:
@@ -1319,17 +1527,38 @@ with tab5:
         st.markdown("#### Anti-Leakage Chronological Split Boundary")
         st.markdown(
             """
-            ```
-            TRAIN PERIOD (80% Chronological):
-            ├── 2023-01-01 00:00:00 UTC
-            └── 2024-03-31 23:00:00 UTC (No future data visible)
-            
-            TEST PERIOD (20% Out-Of-Sample):
-            ├── 2024-04-01 00:00:00 UTC
-            └── 2024-10-31 23:00:00 UTC (Pure out-of-sample forward test)
+            ```text
+            CLEAN DATASET (34,990 Total 1-Hour Candles):
+            ├── Range: 2022-07-08 13:00 UTC to 2026-07-06 08:00 UTC
+            └── Note: 1 irregular exchange-halt row (2023-03-24 12:00 UTC) removed
+
+            TRAIN PERIOD (80% Chronological — 27,991 Hours):
+            ├── Start: 2022-07-08 13:00:00 UTC
+            └── End:   2025-09-17 17:00:00 UTC (No future market data visible to model)
+
+            PURGE BUFFER (1-Hour Causality Guard — 1 Hour):
+            └── Excluded: 2025-09-17 18:00:00 UTC (Prevents T+1h target leakage across boundary)
+
+            OUT-OF-SAMPLE TEST PERIOD (20% Holdout — 6,998 Hours):
+            ├── Start: 2025-09-17 19:00:00 UTC
+            └── End:   2026-07-06 08:00:00 UTC (Pure out-of-sample forward evaluation)
             ```
             """
         )
+
+    st.markdown("#### Controlled Model Benchmark & Rejection Rationale")
+    st.markdown(
+        """
+        | Model Version | Regressor RMSE (USD) | Direction Hit Rate | Classifier Accuracy | Classifier Macro F1 | Governance Status |
+        | :--- | :--- | :--- | :--- | :--- | :--- |
+        | **Naive Persistence** | **$398.77** | *Baseline* | *Baseline* | *Baseline* | Reference Benchmark |
+        | **`xgb_onnx_v1.0.0`** *(Active)* | $399.47 | **50.50%** | **53.26%** | **0.5297** | **ACTIVE PRODUCTION** |
+        | **`p1_controlled_candidate_v1`** | $399.37 | 50.36% | 53.03% | 0.5280 | **REJECTED CANDIDATE** |
+
+        **Governance Rejection Rationale:**
+        *Why was candidate `p1_controlled_candidate_v1` rejected?* While the candidate regressor price RMSE was marginally lower ($399.37 vs $399.47), both models underperformed naive persistence ($398.77). More importantly, the candidate had a lower directional hit rate (50.36% vs 50.50%), lower classification accuracy (53.03% vs 53.26%), and lower macro F1. In accordance with Mudra's model governance policy, candidates that fail to beat the active baseline across key trading metrics are permanently rejected and blocked from production deployment.
+        """
+    )
 
     st.markdown("---")
     st.markdown("#### Live TreeSHAP Shapley Factor Attribution")
