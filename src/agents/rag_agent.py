@@ -34,6 +34,16 @@ from chromadb.config import Settings
 from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 from config import CHROMADB_DIR, CHROMA_COLLECTION_NAME
 
+__all__ = [
+    "MarketKnowledgeRAG",
+    "get_rag_agent",
+    "get_rag_collection",
+    "initialize_knowledge_base",
+    "retrieve_rag_context",
+    "index_reconciled_outcome_memory",
+    "query_similar_error_memories",
+]
+
 
 def _get_gemini_api_key() -> Optional[str]:
     """Retrieves the Gemini API key across .env, st.secrets, and secrets.toml."""
@@ -201,6 +211,99 @@ def get_rag_agent() -> MarketKnowledgeRAG:
     if _rag_instance is None:
         _rag_instance = MarketKnowledgeRAG()
     return _rag_instance
+
+
+def get_rag_collection():
+    """Returns the underlying ChromaDB collection instance safely."""
+    try:
+        agent = get_rag_agent()
+        return agent.collection
+    except Exception as exc:
+        print(f"[WARN] Failed to get RAG collection: {exc}")
+        return None
+
+
+def initialize_knowledge_base() -> MarketKnowledgeRAG:
+    """Initializes or retrieves the persistent ChromaDB RAG vector store."""
+    return get_rag_agent()
+
+
+def retrieve_rag_context(query: str, n_results: int = 3) -> List[str]:
+    """Retrieves relevant semantic domain excerpts from ChromaDB."""
+    return get_rag_agent().retrieve_market_context(query=query, n_results=n_results)
+
+
+def index_reconciled_outcome_memory(
+    tick_id: int,
+    timestamp_iso: str,
+    market_regime: str,
+    direction_predicted: str,
+    direction_realized: str,
+    direction_correct: bool,
+    predicted_dollar_move: float,
+    actual_dollar_move: float,
+    absolute_error_usd: float,
+    error_attribution_tag: str,
+    plain_english_notes: str,
+) -> bool:
+    """
+    Stores a reconciled hourly prediction outcome into ChromaDB as an episodic memory document
+    so the LangGraph Strategist & Risk Critic can retrieve similar past mistakes before trading.
+    """
+    collection = get_rag_collection()
+    if collection is None:
+        return False
+
+    doc_id = f"reconciled_tick_{int(tick_id)}"
+    doc_text = (
+        f"[{timestamp_iso}] Regime: {market_regime} | Predicted: {direction_predicted} "
+        f"(${predicted_dollar_move:+,.2f}) | Actual: {direction_realized} (${actual_dollar_move:+,.2f}) | "
+        f"Correct: {direction_correct} | Tag: {error_attribution_tag} | Summary: {plain_english_notes}"
+    )
+    metadata = {
+        "type": "episodic_outcome",
+        "tick_id": int(tick_id),
+        "regime": str(market_regime or "UNKNOWN"),
+        "direction_predicted": str(direction_predicted or "UP"),
+        "direction_realized": str(direction_realized or "UP"),
+        "direction_correct": bool(direction_correct),
+        "error_attribution_tag": str(error_attribution_tag or "ACCURATE"),
+        "absolute_error_usd": float(absolute_error_usd or 0.0),
+    }
+    try:
+        collection.upsert(
+            ids=[doc_id],
+            documents=[doc_text],
+            metadatas=[metadata],
+        )
+        return True
+    except Exception as exc:
+        print(f"[WARN] Failed to upsert episodic outcome into ChromaDB: {exc}")
+        return False
+
+
+def query_similar_error_memories(query_text: str, n_results: int = 3) -> List[Dict[str, Any]]:
+    """
+    Queries past episodic prediction outcomes from ChromaDB that match the current market situation.
+    """
+    collection = get_rag_collection()
+    if collection is None:
+        return []
+    try:
+        results = collection.query(
+            query_texts=[query_text],
+            n_results=n_results,
+            where={"type": "episodic_outcome"},
+        )
+        docs = results.get("documents", [[]])[0]
+        metas = results.get("metadatas", [[]])[0]
+        memories = []
+        for d, m in zip(docs, metas):
+            memories.append({"document": d, "metadata": m})
+        return memories
+    except Exception as exc:
+        print(f"[WARN] Failed to query episodic memories: {exc}")
+        return []
 
 
 if __name__ == '__main__':
