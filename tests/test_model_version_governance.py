@@ -1,6 +1,6 @@
 # tests/test_model_version_governance.py
 """
-Focused Stage 4 model-version governance, cryptographic verification,
+Focused model-version governance, cryptographic verification,
 reconciliation provenance, and dashboard selector isolation tests.
 """
 
