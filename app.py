@@ -561,7 +561,7 @@ def build_model_pedigree_markdown() -> str:
         f"| **Model Checkpoint** | `{ACTIVE_MODEL_VERSION}` | Optuna 50 Bayesian trial champion |\n"
         "| **Cross-Validation RMSE**| `$396.22` | Chronological walk-forward split |\n"
         "| **Directional Accuracy**| `53.17%` | Out-of-sample test set |\n"
-        f"| **Historical Backtest Friction** | `0.30% (Historical)` | Legacy Phase 1 report assumption (7,000h study); current canonical friction is `{ROUND_TRIP_FRICTION_PCT:.2f}%` (`{TOTAL_FRICTION_PER_SIDE_PCT:.2f}%` per side) |\n"
+        f"| **Historical Backtest Friction** | `0.30% (Historical)` | Legacy backtest report assumption (7,000h study); current canonical friction is `{ROUND_TRIP_FRICTION_PCT:.2f}%` (`{TOTAL_FRICTION_PER_SIDE_PCT:.2f}%` per side) |\n"
         f"| **Net Strategy Alpha (Historical)** | `+33.55 pp (Historical)` | Measured under the historical `0.30%` friction assumption; not evidence of equivalent performance under current canonical `{ROUND_TRIP_FRICTION_PCT:.2f}%` friction |"
     )
 
@@ -686,6 +686,17 @@ elif not live_market_df.empty:
     st.sidebar.success("Market Data: Live (1h Confirmed Candles)")
 else:
     st.sidebar.error("Market Data: Offline")
+
+try:
+    from src.agents.market_analyst_agent import get_gemini_status
+    _gem_info = get_gemini_status()
+    if _gem_info["configured"]:
+        st.sidebar.success(_gem_info["label"])
+    else:
+        st.sidebar.info(_gem_info["label"])
+except Exception:
+    pass
+st.sidebar.success("FastMCP Server: 4 Quant Tools Ready")
 
 with st.sidebar.expander("System Info", expanded=False):
     st.markdown(
@@ -959,6 +970,70 @@ with tab1:
                     help="Share of volume initiated by market buyers taking liquidity from the order book.",
                 )
 
+    # 3-Angle Model Consensus & Next-Hour Dollar Price Range + FastMCP Derivatives Pulse (Always visible on Tab 1)
+    if not live_market_df.empty:
+        from src.engine.model_consensus import (
+            estimate_next_hour_price_range_usd,
+            evaluate_multi_angle_consensus,
+        )
+        from src.mcp.mudra_mcp_server import get_live_btc_derivatives_pulse
+
+        range_est = estimate_next_hour_price_range_usd(live_market_df, current_price=current_price)
+        c_dir = forecast_result["direction_label"] if forecast_result else "UP"
+        c_prob = forecast_result["prob_up"] if forecast_result else 50.0
+        c_move = forecast_result["pred_dollar_move"] if forecast_result else 0.0
+        consensus_info = evaluate_multi_angle_consensus(
+            current_price=current_price,
+            primary_direction=c_dir,
+            primary_prob_up=c_prob,
+            primary_pred_dollar_move=c_move,
+            predicted_range_usd=range_est["predicted_range_usd"],
+        )
+        deriv_pulse = get_live_btc_derivatives_pulse()
+
+        st.markdown("#### 3-Angle Model Consensus & Next-Hour Price Range ($)")
+        ang_c1, ang_c2, ang_c3, ang_c4 = st.columns(4)
+        with ang_c1:
+            st.metric(
+                "Angle 1: Direction Vote",
+                consensus_info["agreement_badge"],
+                f"Consensus: {consensus_info['consensus_direction']}",
+                delta_color="off",
+                help="Multi-model directional vote across active and shadow classifiers.",
+            )
+        with ang_c2:
+            range_ok_text = (
+                f"Clears ${consensus_info['hurdle_dollar_min']:,.0f} Fee Hurdle"
+                if consensus_info["range_clears_fees"]
+                else "Tight Chop Range"
+            )
+            st.metric(
+                "Angle 2: Predicted 1h Range (High - Low)",
+                f"${range_est['predicted_range_usd']:,.2f}",
+                range_ok_text,
+                delta_color="normal" if consensus_info["range_clears_fees"] else "off",
+                help="Forecasted next-hour High-Low dollar swing using volatility clustering (45% 1h + 35% 6h EMA + 20% 24h mean).",
+            )
+        with ang_c3:
+            st.metric(
+                "Predicted 1h High / Low Band",
+                f"${range_est['predicted_high_1h']:,.0f} / ${range_est['predicted_low_1h']:,.0f}",
+                f"±${range_est['predicted_range_usd'] / 2.0:,.0f} around spot",
+                delta_color="off",
+                help="Expected upper and lower price boundaries for the next 1-hour candle.",
+            )
+        with ang_c4:
+            funding_pct = float(deriv_pulse.get("funding_rate_8h_pct", 0.01))
+            mark_p = float(deriv_pulse.get("mark_price_usd", 0.0))
+            mark_label = f"${mark_p:,.2f}" if mark_p > 0 else deriv_pulse.get("derivatives_regime", "Neutral")
+            st.metric(
+                "BTC Futures Pulse (FastMCP)",
+                mark_label,
+                f"8h Funding: {funding_pct:+.4f}% ({deriv_pulse.get('status', 'LIVE')})",
+                delta_color="off",
+                help="Live Binance USDS-M BTCUSDT Perpetual Futures Mark Price and 8-hour funding rate via Mudra FastMCP.",
+            )
+
 
 def format_risk_levels(
     action: str,
@@ -1112,14 +1187,33 @@ with tab2:
                 for v in vetoes:
                     st.markdown(f"- `{v}`")
 
-    with st.expander("Spot Hold-Until-Profit Check & 3x Isolated Futures Simulation", expanded=False):
+    with st.expander("Spot Hold-Until-Profit Check & 3x Isolated Futures Simulation", expanded=True):
         from src.engine.paper_portfolio import evaluate_spot_hold_until_profit_decision, evaluate_futures_long_short_plan
         from src.database.connection import get_db
 
-        fc_dir = forecast_result.get("direction_label", "UP") if forecast_result else "UP"
-        fc_ret = forecast_result.get("pred_ret_pct", 0.0) if forecast_result else 0.0
-        fc_hurdle = forecast_result.get("cleared_hurdle", False) if forecast_result else False
-        fc_spread = forecast_result.get("spread_pct", 1.0) if forecast_result else 1.0
+        cs_ml = council_state.get("ml_forecast") if isinstance(council_state, dict) else None
+        cs_ef = council_state.get("engineered_features") if isinstance(council_state, dict) else None
+
+        if isinstance(cs_ml, dict) and "expected_return_pct" in cs_ml:
+            fc_ret = float(cs_ml.get("expected_return_pct", 0.0))
+            raw_cs_dir = str(cs_ml.get("direction", "")).upper()
+            fc_dir = raw_cs_dir if raw_cs_dir in ("UP", "DOWN") else ("UP" if fc_ret >= 0.0 else "DOWN")
+            fc_hurdle = bool(cs_ml.get("clears_hurdle", abs(fc_ret) >= MIN_HURDLE_PCT))
+        elif forecast_result:
+            fc_dir = forecast_result.get("direction_label", "UP")
+            fc_ret = float(forecast_result.get("pred_ret_pct", 0.0))
+            fc_hurdle = bool(forecast_result.get("cleared_hurdle", False))
+        else:
+            fc_dir = "UP" if act != "SELL" else "DOWN"
+            fc_ret = 0.25 if act == "BUY" else (-0.25 if act == "SELL" else 0.0)
+            fc_hurdle = act in ("BUY", "SELL")
+
+        if isinstance(cs_ef, dict) and "volatility_range_pct" in cs_ef:
+            fc_spread = float(cs_ef.get("volatility_range_pct", 1.0))
+        elif forecast_result:
+            fc_spread = float(forecast_result.get("spread_pct", 1.0))
+        else:
+            fc_spread = 1.0
 
         f_plan = evaluate_futures_long_short_plan(
             current_price=current_price,
@@ -1528,7 +1622,7 @@ with tab3:
     else:
         st.info(f"[INFO] No delayed reconciliation records found for selection '{selected_model}'. Delayed reconciliation runs automatically every hour as candles close.")
 
-    # Read-Only Forecast Error Investigation Explorer (Stage 5 Audit Surface)
+    # Read-Only Forecast Error Investigation Explorer
     st.markdown("---")
     with st.expander("Inspect Specific Prediction Error Details (Forecast Error Investigations & Root-Cause Audit Log)", expanded=False):
         st.caption(
