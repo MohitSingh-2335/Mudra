@@ -7,6 +7,7 @@ and excess Alpha attribution over Buy & Hold benchmark.
 import sys
 import logging
 from pathlib import Path
+import math
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
@@ -28,6 +29,7 @@ from config import (
     SLIPPAGE_RATE,
     TAKER_FEE_PCT,
     SLIPPAGE_PCT,
+    MIN_HURDLE_PCT,
 )
 
 __all__ = [
@@ -35,6 +37,8 @@ __all__ = [
     "get_portfolio_summary",
     "get_latest_portfolio_state",
     "get_average_entry_price",
+    "evaluate_spot_hold_until_profit_decision",
+    "evaluate_futures_long_short_plan",
     "INITIAL_CAPITAL_USD",
     "PORTFOLIO_ADVISORY_LOCK_ID",
     "TAKER_FEE_RATE",
@@ -347,6 +351,219 @@ def get_portfolio_summary(session: Session, current_price: float) -> Dict[str, A
         "total_fees_usd": round(float(total_fees), 2),
         "drawdown_pct": round(float(latest.drawdown_pct), 2),
         "total_trades": trade_count,
+    }
+
+
+def evaluate_spot_hold_until_profit_decision(
+    session: Session,
+    current_price: float,
+    predicted_direction: str,
+    proposed_action: str,
+    clears_hurdle: bool = True,
+    max_stop_loss_pct: float = 3.5,
+) -> Dict[str, Any]:
+    """
+    Implements the Spot 'Buy on UP, Hold Until Net Profit After Fees on DOWN'
+    state machine with a Triple-Barrier emergency stop-loss floor:
+    1. Flat (btc_balance == 0):
+       - If proposed_action == 'BUY' and clears_hurdle: execute BUY.
+       - Otherwise: HOLD cash ($0 fee).
+    2. Holding BTC (btc_balance > 0):
+       - Compute fee-inclusive break-even entry price via get_average_entry_price(include_fees=True)
+         and net exit price after sell-side slippage (0.02%) and taker fee (0.05%).
+       - If predicted_direction == 'UP' and proposed_action == 'BUY':
+         Keep holding existing BTC position (HOLD_POSITION, $0 fee) or add only if cash allows.
+       - If predicted_direction == 'DOWN' or proposed_action == 'SELL':
+         * If net_exit_price > avg_entry_with_fees (Net Profit > $0 after all BUY+SELL fees):
+           Approve SELL to lock in net profit!
+         * Else if unrealized_loss_pct >= max_stop_loss_pct (Emergency Triple-Barrier Stop-Loss):
+           Approve SELL to protect account from deep crash!
+         * Else (Net Profit <= $0 after fees and within safe drawdown band):
+           Override SELL -> HOLD ('HOLDING_UNTIL_PROFIT') so we never lock in a fee-drag loss!
+    """
+    latest = get_latest_portfolio_state(session)
+    btc_held = float(latest.btc_balance) if latest else 0.0
+    cash_bal = float(latest.cash_balance) if latest else INITIAL_CAPITAL_USD
+
+    norm_dir = str(predicted_direction or "").strip().upper()
+    norm_act = str(proposed_action or "HOLD").strip().upper()
+
+    if btc_held <= 1e-8:
+        if norm_act == "BUY" and clears_hurdle:
+            return {
+                "final_spot_action": "BUY",
+                "position_state": "ENTERING_LONG_SPOT",
+                "btc_held": 0.0,
+                "avg_entry_with_fees": 0.0,
+                "net_exit_price": round(current_price * (1.0 - SLIPPAGE_RATE) * (1.0 - TAKER_FEE_RATE), 2),
+                "estimated_net_pnl_usd": 0.0,
+                "reason": (
+                    f"Spot Entry: Model predicts UP and clears the {MIN_HURDLE_PCT:.2f}% fee hurdle. "
+                    f"Buying BTC at ${current_price:,.2f}."
+                ),
+            }
+        return {
+            "final_spot_action": "HOLD",
+            "position_state": "FLAT_HOLDING_CASH",
+            "btc_held": 0.0,
+            "avg_entry_with_fees": 0.0,
+            "net_exit_price": round(current_price * (1.0 - SLIPPAGE_RATE) * (1.0 - TAKER_FEE_RATE), 2),
+            "estimated_net_pnl_usd": 0.0,
+            "reason": "Spot Flat: No BTC held and signal does not warrant a new BUY. Keeping cash safe ($0 fee).",
+        }
+
+    # We currently hold BTC: calculate exact fee-adjusted cost basis and net exit proceeds
+    avg_entry_with_fees = get_average_entry_price(session, target_btc=btc_held, include_fees=True)
+    if avg_entry_with_fees <= 0.0:
+        avg_entry_with_fees = current_price
+
+    exec_sell_price = current_price * (1.0 - SLIPPAGE_RATE)
+    net_exit_price = exec_sell_price * (1.0 - TAKER_FEE_RATE)
+    estimated_net_pnl_usd = (net_exit_price - avg_entry_with_fees) * btc_held
+    unrealized_return_pct = ((net_exit_price - avg_entry_with_fees) / avg_entry_with_fees) * 100.0
+
+    # Case A: Next hour predicted UP -> Keep holding BTC (0 fees)
+    if norm_dir == "UP" and norm_act != "SELL":
+        return {
+            "final_spot_action": "HOLD",
+            "position_state": "HOLDING_BTC_ON_UP",
+            "btc_held": btc_held,
+            "avg_entry_with_fees": round(avg_entry_with_fees, 2),
+            "net_exit_price": round(net_exit_price, 2),
+            "estimated_net_pnl_usd": round(estimated_net_pnl_usd, 2),
+            "reason": (
+                f"Spot Hold (Riding UP Trend): Holding {btc_held:.6f} BTC (break-even entry "
+                f"${avg_entry_with_fees:,.2f} incl. fees; current net exit ${net_exit_price:,.2f}, "
+                f"net P&L ${estimated_net_pnl_usd:+,.2f}). Model predicts UP, so we keep holding at $0 fee."
+            ),
+        }
+
+    # Case B: Next hour predicted DOWN (or SELL proposed) -> Check net profit after all fees
+    if estimated_net_pnl_usd > 0.0:
+        return {
+            "final_spot_action": "SELL",
+            "position_state": "TAKING_NET_PROFIT_ON_DOWN",
+            "btc_held": btc_held,
+            "avg_entry_with_fees": round(avg_entry_with_fees, 2),
+            "net_exit_price": round(net_exit_price, 2),
+            "estimated_net_pnl_usd": round(estimated_net_pnl_usd, 2),
+            "reason": (
+                f"Spot Profit-Take SELL: Model predicts DOWN and net exit price (${net_exit_price:,.2f} "
+                f"after 0.07% sell friction) is ABOVE fee-adjusted entry (${avg_entry_with_fees:,.2f}). "
+                f"Selling now locks in +${estimated_net_pnl_usd:,.2f} net profit after all fees."
+            ),
+        }
+
+    # Case C: Emergency Triple-Barrier Stop-Loss check
+    if unrealized_return_pct <= -abs(max_stop_loss_pct):
+        return {
+            "final_spot_action": "SELL",
+            "position_state": "EMERGENCY_STOP_LOSS_EXIT",
+            "btc_held": btc_held,
+            "avg_entry_with_fees": round(avg_entry_with_fees, 2),
+            "net_exit_price": round(net_exit_price, 2),
+            "estimated_net_pnl_usd": round(estimated_net_pnl_usd, 2),
+            "reason": (
+                f"Spot Emergency Stop-Loss SELL: Position drawdown ({unrealized_return_pct:+.2f}%) breached "
+                f"the -{abs(max_stop_loss_pct):.2f}% Triple-Barrier safety floor. Exiting to protect capital."
+            ),
+        }
+
+    # Case D: Predicted DOWN, but selling now would lose money after fees -> Hold until profitable!
+    needed_price = avg_entry_with_fees / ((1.0 - SLIPPAGE_RATE) * (1.0 - TAKER_FEE_RATE))
+    return {
+        "final_spot_action": "HOLD",
+        "position_state": "HOLDING_BTC_UNTIL_NET_PROFIT",
+        "btc_held": btc_held,
+        "avg_entry_with_fees": round(avg_entry_with_fees, 2),
+        "net_exit_price": round(net_exit_price, 2),
+        "estimated_net_pnl_usd": round(estimated_net_pnl_usd, 2),
+        "reason": (
+            f"Spot Hold-Until-Profit Guard: Model predicts DOWN, but selling at ${current_price:,.2f} "
+            f"(net exit ${net_exit_price:,.2f}) is below break-even entry ${avg_entry_with_fees:,.2f} "
+            f"(would realize ${estimated_net_pnl_usd:+,.2f} loss). Holding BTC until price clears "
+            f"${needed_price:,.2f} (safety stop at -{abs(max_stop_loss_pct):.1f}%)."
+        ),
+    }
+
+
+def evaluate_futures_long_short_plan(
+    current_price: float,
+    predicted_direction: str,
+    expected_return_pct: float,
+    clears_hurdle: bool,
+    volatility_range_pct: float,
+    risk_approved: bool,
+    conviction_score: int = 5,
+    account_equity_usd: float = INITIAL_CAPITAL_USD,
+    leverage: float = 3.0,
+    maintenance_margin_rate: float = 0.004,
+) -> Dict[str, Any]:
+    """
+    Computes an institutional Binance USDS-M Isolated Margin Long/Short Futures plan
+    (including exact Isolated Margin Liquidation Price, Stop-Loss, Take-Profit, and Dollar Range)
+    without mutating the Spot PaperPortfolio table.
+    """
+    if current_price <= 0.0 or not math.isfinite(current_price):
+        current_price = 65000.0
+    lev = max(1.0, min(float(leverage), 10.0))
+    mmr = max(0.001, float(maintenance_margin_rate))
+    norm_dir = str(predicted_direction or "").strip().upper()
+
+    expected_range_usd = round(current_price * (max(volatility_range_pct, 0.25) / 100.0), 2)
+
+    if not risk_approved or not clears_hurdle or abs(expected_return_pct) < MIN_HURDLE_PCT or conviction_score < 5:
+        return {
+            "futures_Position": "FLAT (NO POSITION)",
+            "leverage": f"{lev:.0f}x Isolated",
+            "margin_allocated_usd": 0.0,
+            "notional_exposure_usd": 0.0,
+            "entry_price": round(current_price, 2),
+            "liquidation_price": None,
+            "stop_loss_price": None,
+            "take_profit_price": None,
+            "expected_1h_range_usd": expected_range_usd,
+            "summary": (
+                f"FLAT (No Futures Trade) — Expected move ({expected_return_pct:+.2f}%) or risk check "
+                f"does not justify opening a leveraged Long/Short position."
+            ),
+        }
+
+    margin_pct = min(0.20, max(0.05, (conviction_score - 4) * 0.04))
+    margin_usd = round(account_equity_usd * margin_pct, 2)
+    notional_usd = round(margin_usd * lev, 2)
+    stop_dist_pct = max(0.012, min(0.025, (volatility_range_pct / 100.0) * 1.2))
+    tp_dist_pct = stop_dist_pct * 2.0
+
+    if norm_dir == "UP" and expected_return_pct > 0:
+        pos_side = "LONG (BUY FUTURES)"
+        # Binance Isolated Margin Long Liquidation approximation: Entry * (1 - 1/L + MMR)
+        liq_price = round(current_price * (1.0 - (1.0 / lev) + mmr), 2)
+        sl_price = round(current_price * (1.0 - stop_dist_pct), 2)
+        tp_price = round(current_price * (1.0 + tp_dist_pct), 2)
+    else:
+        pos_side = "SHORT (SELL FUTURES)"
+        # Binance Isolated Margin Short Liquidation approximation: Entry * (1 + 1/L - MMR)
+        liq_price = round(current_price * (1.0 + (1.0 / lev) - mmr), 2)
+        sl_price = round(current_price * (1.0 + stop_dist_pct), 2)
+        tp_price = round(current_price * (1.0 - tp_dist_pct), 2)
+
+    return {
+        "futures_Position": pos_side,
+        "leverage": f"{lev:.0f}x Isolated",
+        "margin_allocated_usd": margin_usd,
+        "notional_exposure_usd": notional_usd,
+        "entry_price": round(current_price, 2),
+        "liquidation_price": liq_price,
+        "stop_loss_price": sl_price,
+        "take_profit_price": tp_price,
+        "expected_1h_range_usd": expected_range_usd,
+        "summary": (
+            f"{pos_side} ({lev:.0f}x Isolated) | Margin: ${margin_usd:,.0f} "
+            f"(Notional: ${notional_usd:,.0f}) | Entry: ${current_price:,.2f} | "
+            f"Stop-Loss: ${sl_price:,.2f} | Take-Profit: ${tp_price:,.2f} | "
+            f"Liquidation Price: ${liq_price:,.2f}"
+        ),
     }
 
 
