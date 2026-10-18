@@ -25,6 +25,7 @@ logger = logging.getLogger("mudra.reconciliation")
 __all__ = [
     "reconcile_pending_ticks",
     "get_reconciliation_summary",
+    "build_plain_english_reconciliation_story",
 ]
 
 
@@ -154,7 +155,44 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
         session.add(rec)
         reconciled_records.append(rec)
 
-        # 7. Audit Risk Critic Veto Quality (if CouncilAudit exists for this prior tick)
+        # 7. Index plain-English outcome into ChromaDB episodic memory
+        try:
+            from src.agents.rag_agent import index_reconciled_outcome_memory
+            story = build_plain_english_reconciliation_story(
+                pred_tick=prior_tick,
+                outcome_tick=outcome_candle,
+                pred_price=predicted_price,
+                actual_price=actual_price,
+                pred_ret_pct=predicted_return_pct,
+                actual_ret_pct=actual_return_pct,
+                dir_pred=dir_pred,
+                dir_real=dir_real,
+                dir_correct=direction_correct,
+                abs_err_usd=absolute_error_usd,
+                tag=tag,
+            )
+            regime = "NORMAL"
+            if prior_tick.features and isinstance(prior_tick.features, dict):
+                regime = str(prior_tick.features.get("market_regime", "NORMAL"))
+
+            t_iso = outcome_candle.timestamp.isoformat() if hasattr(outcome_candle.timestamp, "isoformat") else str(outcome_candle.timestamp)
+            index_reconciled_outcome_memory(
+                tick_id=prior_tick.id,
+                timestamp_iso=t_iso,
+                market_regime=regime,
+                direction_predicted=dir_pred,
+                direction_realized=dir_real,
+                direction_correct=direction_correct,
+                predicted_dollar_move=predicted_price - base_price,
+                actual_dollar_move=actual_price - base_price,
+                absolute_error_usd=absolute_error_usd,
+                error_attribution_tag=tag,
+                plain_english_notes=story["hypothesis_notes"],
+            )
+        except Exception as rag_err:
+            logger.debug("ChromaDB episodic memory indexing skipped: %s", rag_err)
+
+        # 8. Audit Risk Critic Veto Quality (if CouncilAudit exists for this prior tick)
         audit = session.execute(
             select(CouncilAudit)
             .where(CouncilAudit.tick_id == prior_tick.id)
@@ -178,6 +216,76 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
 
     session.flush()
     return reconciled_records
+
+
+def build_plain_english_reconciliation_story(
+    pred_tick: MarketTick,
+    outcome_tick: MarketTick,
+    pred_price: float,
+    actual_price: float,
+    pred_ret_pct: float,
+    actual_ret_pct: float,
+    dir_pred: str,
+    dir_real: str,
+    dir_correct: bool,
+    abs_err_usd: float,
+    tag: str,
+) -> Dict[str, str]:
+    """
+    Generates a clear, plain-English post-mortem explanation of what the model predicted,
+    what Bitcoin actually did 1 hour later, and why the prediction succeeded or missed.
+    """
+    start_price = float(pred_tick.close)
+    pred_dollar_move = pred_price - start_price
+    actual_dollar_move = actual_price - start_price
+    candle_range_usd = float(outcome_tick.high - outcome_tick.low)
+
+    result_word = "CORRECT" if dir_correct else "WRONG"
+    headline = (
+        f"[{result_word}] Predicted {dir_pred} ({pred_dollar_move:+,.2f}$ to ${pred_price:,.2f}) | "
+        f"Actual {dir_real} ({actual_dollar_move:+,.2f}$ to ${actual_price:,.2f})"
+    )
+
+    if tag == "BLACK_SWAN_OUTLIER":
+        why_text = (
+            f"Big Market Swing Alert: Bitcoin moved ${actual_dollar_move:+,.2f} ({actual_ret_pct:+.2f}%) "
+            f"with a ${candle_range_usd:,.2f} high-low range in 1 hour, driven by a sudden macro shock or liquidation cascade."
+        )
+    elif dir_correct and tag == "ACCURATE":
+        why_text = (
+            f"Spot-On Forecast: Both direction ({dir_pred}) and target price were accurate within ${abs_err_usd:,.2f}."
+        )
+    elif dir_correct and tag == "MOMENTUM_UNDERESTIMATED":
+        why_text = (
+            f"Direction Right ({dir_pred}), Stronger Move Than Expected: Bitcoin moved ${actual_dollar_move:+,.2f} "
+            f"vs predicted ${pred_dollar_move:+,.2f} (error ${abs_err_usd:,.2f})."
+        )
+    elif dir_correct:
+        why_text = (
+            f"Direction Right ({dir_pred}), Smaller Move Than Expected: Bitcoin moved ${actual_dollar_move:+,.2f} "
+            f"vs predicted ${pred_dollar_move:+,.2f} (error ${abs_err_usd:,.2f})."
+        )
+    elif tag == "SIDEWAYS_DRIFT":
+        why_text = (
+            f"Small Chop Flip: Model predicted {dir_pred} (${pred_dollar_move:+,.2f}), but Bitcoin drifted "
+            f"${actual_dollar_move:+,.2f} ({dir_real}). Price difference was only ${abs_err_usd:,.2f} inside normal noise."
+        )
+    else:
+        why_text = (
+            f"Trend Reversal Miss: Model predicted {dir_pred} (${pred_dollar_move:+,.2f}), but sellers/buyers reversed "
+            f"the candle to {dir_real} (${actual_dollar_move:+,.2f}), missing by ${abs_err_usd:,.2f}."
+        )
+
+    notes = (
+        f"Hour T Close: ${start_price:,.2f} -> Predicted T+1h: ${pred_price:,.2f} ({dir_pred}, {pred_dollar_move:+,.2f}$) | "
+        f"Actual T+1h Close: ${actual_price:,.2f} ({dir_real}, {actual_dollar_move:+,.2f}$) | "
+        f"Dollar Error: ${abs_err_usd:,.2f} | 1h High-Low Range: ${candle_range_usd:,.2f} | Diagnosis: {why_text}"
+    )
+    return {
+        "headline": headline[:500],
+        "hypothesis_notes": notes,
+        "suspected_cause_category": tag,
+    }
 
 
 def get_reconciliation_summary(session: Session, limit: int = 168, model_version: Optional[str] = None) -> Dict[str, Any]:
