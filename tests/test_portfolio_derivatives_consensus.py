@@ -217,3 +217,55 @@ def test_plain_english_reconciliation_story_and_mcp_fallback(monkeypatch):
     monkeypatch.setattr(requests, "get", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline")))
     pulse = get_live_btc_derivatives_pulse()
     assert pulse["status"] == "OFFLINE_FALLBACK"
+
+
+def test_gemini_model_fallback_and_mcp_trade_plan(monkeypatch):
+    """Verifies automatic Gemini model fallback (2.5 -> 2.0 -> 1.5) and FastMCP trade plan tool."""
+    import sys
+    import types
+    from src.agents.market_analyst_agent import generate_with_gemini_fallback, get_gemini_status
+    from src.mcp.mudra_mcp_server import get_spot_and_futures_trade_plan
+
+    called_models = []
+
+    class _DummyGenerativeModel:
+        def __init__(self, model_name=None, **kwargs):
+            self.m = model_name or kwargs.get("model_name")
+            called_models.append(self.m)
+
+        def generate_content(self, prompt):
+            if self.m == "gemini-2.5-flash":
+                raise RuntimeError("404 Model gemini-2.5-flash not found")
+            return types.SimpleNamespace(text="Approved by fallback Gemini model.")
+
+    dummy_genai = types.ModuleType("google.generativeai")
+    dummy_genai.configure = lambda **kwargs: None
+    dummy_genai.GenerativeModel = _DummyGenerativeModel
+
+    google_pkg = sys.modules.get("google")
+    if google_pkg is None:
+        google_pkg = types.ModuleType("google")
+        google_pkg.__path__ = []
+        monkeypatch.setitem(sys.modules, "google", google_pkg)
+
+    monkeypatch.setitem(sys.modules, "google.generativeai", dummy_genai)
+    monkeypatch.setattr(google_pkg, "generativeai", dummy_genai, raising=False)
+
+    res_text = generate_with_gemini_fallback("test-api-key", "Test prompt")
+    assert res_text == "Approved by fallback Gemini model."
+    assert called_models[:2] == ["gemini-2.5-flash", "gemini-2.0-flash"]
+
+    status_info = get_gemini_status()
+    assert "configured" in status_info
+    assert "fallback_models" in status_info
+
+    plan_res = get_spot_and_futures_trade_plan(
+        current_price=82000.0,
+        predicted_direction="UP",
+        expected_return_pct=0.35,
+        clears_hurdle=True,
+        volatility_range_pct=1.2,
+        risk_approved=True,
+        conviction_score=8,
+    )
+    assert plan_res["futures_3x_isolated_plan"]["futures_Position"] == "LONG (BUY FUTURES)"
