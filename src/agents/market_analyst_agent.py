@@ -49,16 +49,28 @@ class MarketAnalystReport(BaseModel):
     key_risks: List[str] = Field(description="Specific risk factors that would invalidate the thesis")
 
 
-def _get_gemini_api_key() -> Optional[str]:
+GEMINI_MODEL_CANDIDATES = (
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+)
+
+
+def _read_raw_gemini_api_key() -> Optional[str]:
     """
     Retrieves the Gemini API key with multi-tiered resolution:
     1. Environment variables: GEMINI_API_KEY or GOOGLE_API_KEY (.env)
     2. Active Streamlit runtime: st.secrets['Google']['api_key'] / st.secrets['gemini']['api_key']
     3. Standalone file fallback: direct reading of .streamlit/secrets.toml via Python 3.11's tomllib
     """
+    try:
+        load_dotenv(".env")
+    except Exception:
+        pass
+
     # 1. Environment variables
     key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if key and key != "your_gemini_api_key_here":
+    if key and key.strip() and key.strip() != "your_gemini_api_key_here":
         return key.strip()
 
     # 2. Active Streamlit session
@@ -67,11 +79,14 @@ def _get_gemini_api_key() -> Optional[str]:
         if hasattr(st, "secrets"):
             for section in ["Google", "google", "gemini", "Gemini"]:
                 if section in st.secrets and "api_key" in st.secrets[section]:
-                    return str(st.secrets[section]["api_key"]).strip()
-            if "GEMINI_API_KEY" in st.secrets:
-                return str(st.secrets["GEMINI_API_KEY"]).strip()
-            if "GOOGLE_API_KEY" in st.secrets:
-                return str(st.secrets["GOOGLE_API_KEY"]).strip()
+                    val = str(st.secrets[section]["api_key"]).strip()
+                    if val and val != "your_gemini_api_key_here":
+                        return val
+            for sec_name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+                if sec_name in st.secrets:
+                    val = str(st.secrets[sec_name]).strip()
+                    if val and val != "your_gemini_api_key_here":
+                        return val
     except Exception:
         pass
 
@@ -84,15 +99,97 @@ def _get_gemini_api_key() -> Optional[str]:
                 data = tomllib.load(f)
             for section in ["Google", "google", "gemini", "Gemini"]:
                 if section in data and "api_key" in data[section]:
-                    return str(data[section]["api_key"]).strip()
-            if "GEMINI_API_KEY" in data:
-                return str(data["GEMINI_API_KEY"]).strip()
-            if "GOOGLE_API_KEY" in data:
-                return str(data["GOOGLE_API_KEY"]).strip()
+                    val = str(data[section]["api_key"]).strip()
+                    if val and val != "your_gemini_api_key_here":
+                        return val
+            for sec_name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+                if sec_name in data:
+                    val = str(data[sec_name]).strip()
+                    if val and val != "your_gemini_api_key_here":
+                        return val
     except Exception:
         pass
 
     return None
+
+
+def _get_gemini_api_key() -> Optional[str]:
+    """
+    Safely retrieves GEMINI_API_KEY or GOOGLE_API_KEY from OS env, .env, or Streamlit secrets.
+    During automated pytest execution (PYTEST_CURRENT_TEST), returns None unless explicitly
+    monkeypatched by a test so deterministic unit tests never make live external API calls.
+    """
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return None
+    return _read_raw_gemini_api_key()
+
+
+def get_gemini_status() -> Dict[str, Any]:
+    """Returns diagnostic status of the Google Gemini API configuration for UI display."""
+    raw_key = _read_raw_gemini_api_key()
+    preferred_model = os.getenv("GEMINI_MODEL_NAME", GEMINI_MODEL_CANDIDATES[0])
+    if raw_key:
+        masked = f"{raw_key[:4]}...{raw_key[-4:]}" if len(raw_key) > 8 else "Configured"
+        return {
+            "configured": True,
+            "masked_key": masked,
+            "preferred_model": preferred_model,
+            "fallback_models": list(GEMINI_MODEL_CANDIDATES),
+            "label": f"Gemini AI: Active ({preferred_model})",
+        }
+    return {
+        "configured": False,
+        "masked_key": None,
+        "preferred_model": preferred_model,
+        "fallback_models": list(GEMINI_MODEL_CANDIDATES),
+        "label": "Gemini AI: Rule Engine Fallback (No API Key)",
+    }
+
+
+def generate_with_gemini_fallback(
+    api_key: str,
+    prompt: str,
+    system_instruction: Optional[str] = None,
+) -> str:
+    """
+    Calls Google Gemini using google.generativeai with automatic model-version fallback
+    (gemini-2.5-flash -> gemini-2.0-flash -> gemini-1.5-flash) so retired model endpoints
+    (404 Not Found) seamlessly upgrade to active Gemini models while preserving unit test mocks.
+    """
+    import google.generativeai as genai
+    genai.configure(api_key=api_key)
+
+    custom_model = os.getenv("GEMINI_MODEL_NAME")
+    candidates = (
+        (custom_model,) + tuple(m for m in GEMINI_MODEL_CANDIDATES if m != custom_model)
+        if custom_model
+        else GEMINI_MODEL_CANDIDATES
+    )
+
+    last_exc: Optional[Exception] = None
+    for idx, model_name in enumerate(candidates):
+        try:
+            if system_instruction and idx == 0:
+                try:
+                    model = genai.GenerativeModel(
+                        model_name=model_name,
+                        system_instruction=system_instruction,
+                    )
+                except TypeError:
+                    model = genai.GenerativeModel(model_name)
+            else:
+                model = genai.GenerativeModel(model_name)
+            resp = model.generate_content(prompt)
+            text_out = getattr(resp, "text", None)
+            if text_out and str(text_out).strip():
+                return str(text_out).strip()
+        except AssertionError:
+            raise
+        except Exception as exc:
+            last_exc = exc
+            continue
+
+    raise RuntimeError(f"All Gemini model candidates failed. Last error: {last_exc}")
 
 
 def _clean_json_response(raw_text: str) -> str:
@@ -188,10 +285,7 @@ def generate_market_commentary(
 
     # 3. Call Gemini with Structured Prompt
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        # Gemini model invocation handled via generate_with_gemini_fallback
 
         pos_str = ", ".join([f"{d['feature']}: SHAP={d['shap']:+.4f}" for d in top_pos_drivers]) or "None"
         neg_str = ", ".join([f"{d['feature']}: SHAP={d['shap']:+.4f}" for d in top_neg_drivers]) or "None"
@@ -228,8 +322,8 @@ Return a strictly valid JSON object conforming exactly to this schema:
 }}
 Do not include any explanation outside the JSON object.
 """
-        response = model.generate_content(prompt)
-        cleaned_json = _clean_json_response(response.text)
+        raw_text = generate_with_gemini_fallback(api_key, prompt)
+        cleaned_json = _clean_json_response(raw_text)
         report_data = json.loads(cleaned_json)
 
         # Defensive clamping and normalization
