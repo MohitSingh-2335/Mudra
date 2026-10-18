@@ -76,7 +76,7 @@ def create_tradingview_candlestick(df: pd.DataFrame) -> go.Figure:
                 x=x_axis,
                 y=df_plot["ema_20"],
                 mode="lines",
-                name="EMA 20",
+                name="EMA 20 (Short-Term Trend)",
                 line=dict(color="#2962FF", width=1.5),
             ),
             row=1,
@@ -88,7 +88,7 @@ def create_tradingview_candlestick(df: pd.DataFrame) -> go.Figure:
                 x=x_axis,
                 y=df_plot["ema_50"],
                 mode="lines",
-                name="EMA 50",
+                name="EMA 50 (Medium-Term Trend)",
                 line=dict(color="#FF9800", width=1.5),
             ),
             row=1,
@@ -101,7 +101,7 @@ def create_tradingview_candlestick(df: pd.DataFrame) -> go.Figure:
             go.Bar(
                 x=x_axis,
                 y=df_plot["volume"],
-                name="Volume",
+                name="Volume (BTC)",
                 marker=dict(color=vol_colors, opacity=0.7),
             ),
             row=2,
@@ -111,10 +111,16 @@ def create_tradingview_candlestick(df: pd.DataFrame) -> go.Figure:
     # Layout Styling (Deep Dark Institutional Bloomberg/TradingView Theme)
     fig.update_layout(
         template="plotly_dark",
+        title=dict(
+            text="Bitcoin (BTC/USDT) Hourly Price Action & Trading Volume",
+            font=dict(size=14, color="#EAECEF"),
+            x=0.01,
+            y=0.99,
+        ),
         paper_bgcolor="#0E1117",
         plot_bgcolor="#131722",
         xaxis_rangeslider_visible=False,
-        margin=dict(l=40, r=40, t=30, b=20),
+        margin=dict(l=40, r=40, t=40, b=20),
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -128,8 +134,8 @@ def create_tradingview_candlestick(df: pd.DataFrame) -> go.Figure:
     )
 
     fig.update_yaxes(title_text="Price (USD)", row=1, col=1, gridcolor="#222733")
-    fig.update_yaxes(title_text="Volume", row=2, col=1, gridcolor="#222733")
-    fig.update_xaxes(gridcolor="#222733")
+    fig.update_yaxes(title_text="Volume (BTC)", row=2, col=1, gridcolor="#222733")
+    fig.update_xaxes(title_text="Time (UTC)", row=2, col=1, gridcolor="#222733")
 
     return fig
 
@@ -165,7 +171,7 @@ def create_alpha_equity_curve(df: pd.DataFrame) -> go.Figure:
                 x=x_axis,
                 y=df_plot["benchmark_btc_equity"],
                 mode="lines",
-                name="Bitcoin Buy & Hold Benchmark",
+                name="Bitcoin Buy & Hold Benchmark ($)",
                 line=dict(color="#F7931A", width=1.8, dash="dash"),
             )
         )
@@ -176,7 +182,7 @@ def create_alpha_equity_curve(df: pd.DataFrame) -> go.Figure:
             x=x_axis,
             y=df_plot["total_equity_usd"],
             mode="lines+markers",
-            name="Mudra Strategy Equity",
+            name="Mudra Strategy Equity ($)",
             line=dict(color="#00F2FE", width=2.8),
             marker=dict(size=5, color="#00C087"),
         )
@@ -184,9 +190,15 @@ def create_alpha_equity_curve(df: pd.DataFrame) -> go.Figure:
 
     fig.update_layout(
         template="plotly_dark",
+        title=dict(
+            text="Paper-Trading Strategy Equity vs. Buy & Hold Benchmark ($10,000 Base)",
+            font=dict(size=14, color="#EAECEF"),
+            x=0.01,
+            y=0.99,
+        ),
         paper_bgcolor="#0E1117",
         plot_bgcolor="#131722",
-        margin=dict(l=40, r=40, t=30, b=20),
+        margin=dict(l=40, r=40, t=40, b=20),
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -233,7 +245,7 @@ def create_reconciliation_scatter(df: pd.DataFrame) -> go.Figure:
             x=x_axis,
             y=df_plot["actual_price_at_t_plus_1"],
             mode="lines",
-            name="Actual Market Close",
+            name="Actual Realized Market Close",
             line=dict(color="#FFFFFF", width=1.5),
         )
     )
@@ -243,21 +255,26 @@ def create_reconciliation_scatter(df: pd.DataFrame) -> go.Figure:
     actual_series = df_plot["actual_price_at_t_plus_1"].fillna(0.0)
     error_series = df_plot.get("absolute_error_usd", pd.Series(0.0, index=df_plot.index)).fillna(0.0)
     tag_series = df_plot.get("error_attribution_tag", pd.Series("UNSETTLED", index=df_plot.index)).fillna("UNSETTLED")
+    time_labels = [
+        pd.to_datetime(t).strftime("%Y-%m-%d %H:%M UTC") if pd.notnull(t) else str(t)
+        for t in x_axis
+    ]
+    is_correct_list = df_plot.get("direction_correct", [True] * len(df_plot))
 
     fig.add_trace(
         go.Scatter(
             x=x_axis,
             y=pred_series,
             mode="markers",
-            name="Model Predicted Price",
+            name="Forecast Target (Green = Correct, Red = Miss)",
             marker=dict(
                 size=9,
                 color=colors,
                 line=dict(width=1, color="#FFFFFF"),
             ),
             text=[
-                f"Pred: ${p:,.2f}<br>Actual: ${a:,.2f}<br>Error: ${e:,.2f}<br>Tag: {t}"
-                for p, a, e, t in zip(pred_series, actual_series, error_series, tag_series)
+                f"Time: {t_str}<br>Forecast Target: ${p:,.2f}<br>Realized Close: ${a:,.2f}<br>Abs Error: ${e:,.2f}<br>Attribution: {t}<br>Result: {'HIT (Direction Matched)' if c else 'MISS (Direction Reversal)'}"
+                for t_str, p, a, e, t, c in zip(time_labels, pred_series, actual_series, error_series, tag_series, is_correct_list)
             ],
             hoverinfo="text",
         )
@@ -265,9 +282,15 @@ def create_reconciliation_scatter(df: pd.DataFrame) -> go.Figure:
 
     fig.update_layout(
         template="plotly_dark",
+        title=dict(
+            text="Delayed Forecast Reconciliation (Market Close vs. Predicted Target)",
+            font=dict(size=14, color="#EAECEF"),
+            x=0.01,
+            y=0.99,
+        ),
         paper_bgcolor="#0E1117",
         plot_bgcolor="#131722",
-        margin=dict(l=40, r=40, t=30, b=20),
+        margin=dict(l=40, r=40, t=40, b=20),
         legend=dict(
             orientation="h",
             yanchor="bottom",
