@@ -46,6 +46,7 @@ archive/planning/*.docx
 archive/planning/*.txt
 docs/reference/*.docx
 docs/reference/BOT-requirement.txt
+aiml_workspace/Research_material/
 
 #Real env
 .env
