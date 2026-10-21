@@ -165,6 +165,8 @@ def run_backtest_simulation(
     return_threshold: float = 0.002,
     taker_fee_rate: Optional[float] = None,
     slippage_rate: Optional[float] = None,
+    clf_features: Optional[List[str]] = None,
+    reg_features: Optional[List[str]] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Simulates hourly trade execution across the holdout test period.
@@ -173,11 +175,13 @@ def run_backtest_simulation(
       - 'classifier': Long when classifier predicts 1 (Upward), Flat otherwise.
       - 'fused': Long when classifier predicts 1 AND regressor return >= return_threshold.
     """
-    X_clf = test_df[CLASSIFIER_FEATURES]
+    feature_clf = CLASSIFIER_FEATURES if clf_features is None else clf_features
+    X_clf = test_df[feature_clf]
     clf_preds = clf_model.predict(X_clf)
 
     if strategy_mode == "fused" and reg_model is not None:
-        X_reg = test_df[REGRESSOR_FEATURES]
+        feature_reg = REGRESSOR_FEATURES if reg_features is None else reg_features
+        X_reg = test_df[feature_reg]
         reg_preds = reg_model.predict(X_reg)
         signals = ((clf_preds == 1) & (reg_preds >= return_threshold)).astype(int)
     else:
@@ -195,12 +199,14 @@ def run_backtest(
     threshold: float = 0.5,
     taker_fee_rate: Optional[float] = None,
     slippage_rate: Optional[float] = None,
+    feature_cols: Optional[List[str]] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Backwards-compatible interface supporting empirical research scripts
     with optional feature scalers and probability thresholds.
     """
-    feature_cols = [c for c in CLASSIFIER_FEATURES if c in test_df.columns]
+    if feature_cols is None:
+        feature_cols = [c for c in CLASSIFIER_FEATURES if c in test_df.columns]
     X = test_df[feature_cols]
 
     if scaler is not None:
