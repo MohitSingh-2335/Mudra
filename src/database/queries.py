@@ -63,7 +63,7 @@ def get_latest_market_ticks(limit: int = 100) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def get_reconciliation_history(limit: int = 50, model_version: Optional[str] = None) -> pd.DataFrame:
+def get_reconciliation_history(limit: int = 500, model_version: Optional[str] = None) -> pd.DataFrame:
     """
     Fetches the most recent N delayed reconciliation records from Neon.
     Attributes each record to its producing model_version via MarketTick.
@@ -99,9 +99,9 @@ def get_reconciliation_history(limit: int = 50, model_version: Optional[str] = N
         return pd.DataFrame()
 
 
-def get_reconciliation_kpis(lookback_hours: int = 168, model_version: Optional[str] = None) -> Dict[str, Any]:
+def get_reconciliation_kpis(lookback_hours: Optional[int] = 168, model_version: Optional[str] = None) -> Dict[str, Any]:
     """
-    Computes rolling accuracy KPIs (Win Rate %, MAE, MAPE, IC) across N hours.
+    Computes rolling accuracy KPIs (Win Rate %, MAE, MAPE, IC) across N hours or all-time (if lookback_hours is None).
     Supports optional model_version filtering.
     Explicitly distinguishes query success from query failure via 'query_failed' boolean flag.
     Returns defensive default KPIs with query_failed=True on failure.
@@ -118,6 +118,7 @@ def get_reconciliation_kpis(lookback_hours: int = 168, model_version: Optional[s
         return {
             "total_evaluated": 0,
             "total_reconciled": 0,
+            "total_lifetime_evaluated": 0,
             "win_rate_pct": 0.0,
             "directional_accuracy_pct": 0.0,
             "mae_usd": 0.0,
@@ -134,7 +135,7 @@ def get_reconciliation_kpis(lookback_hours: int = 168, model_version: Optional[s
         }
 
 
-def get_portfolio_history(limit: int = 100) -> pd.DataFrame:
+def get_portfolio_history(limit: int = 500) -> pd.DataFrame:
     """
     Fetches the chronological paper portfolio ledger from Neon.
     Used for plotting Strategy Equity vs. Buy & Hold Benchmark Alpha curves.
