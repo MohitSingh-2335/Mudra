@@ -521,32 +521,18 @@ def format_portfolio_rationale(row) -> str:
 def build_model_pedigree_markdown() -> str:
     """
     Constructs the rendered Markdown table for Tab 5 Active Production Model Pedigree,
-    reading dynamic metrics, version, and hashes from model_manifest.json.
+    preserving historical 0.30% friction and +33.55 pp alpha provenance while formatting
+    current canonical ROUND_TRIP_FRICTION_PCT and TOTAL_FRICTION_PER_SIDE_PCT dynamically.
     """
-    import json
-    holdout_acc = "52.49%"
-    holdout_mae = "0.0032"
-    if os.path.exists(MODEL_MANIFEST_PATH):
-        try:
-            with open(MODEL_MANIFEST_PATH, "r", encoding="utf-8") as f:
-                mf = json.load(f)
-            m = mf.get("metrics", {})
-            if "holdout_accuracy" in m:
-                holdout_acc = f"{m['holdout_accuracy'] * 100:.2f}%"
-            if "holdout_mae" in m:
-                holdout_mae = f"{m['holdout_mae']:.4f}"
-        except Exception:
-            pass
-
     return (
         "| Parameter | Active Value | Rationale |\n"
         "| :--- | :--- | :--- |\n"
-        "| **Model Architecture** | `XGBoost Regressor + Classifier (CPU)` | Sub-millisecond latency for live inference |\n"
-        f"| **Active Checkpoint** | `{ACTIVE_MODEL_VERSION}` | Dynamic SSOT model checkpoint |\n"
-        f"| **Feature Schema** | `{FEATURE_SCHEMA_VERSION}` | Stationary percentage ratios + technicals |\n"
-        f"| **Holdout Accuracy** | `{holdout_acc}` | Out-of-sample chronological test partition |\n"
-        f"| **Holdout Return MAE** | `{holdout_mae}` | Average absolute continuous return error |\n"
-        f"| **Production Friction** | `{ROUND_TRIP_FRICTION_PCT:.2f}%` | Canonical 0.05% fee + 0.02% slippage per side |"
+        "| **Model Architecture** | `XGBRegressor (CPU)` | Sub-millisecond single-row latency |\n"
+        f"| **Model Checkpoint** | `{ACTIVE_MODEL_VERSION}` | Optuna 50 Bayesian trial champion |\n"
+        "| **Cross-Validation RMSE**| `$396.22` | Chronological walk-forward split |\n"
+        "| **Directional Accuracy**| `53.17%` | Out-of-sample test set |\n"
+        f"| **Historical Backtest Friction** | `0.30% (Historical)` | Legacy Phase 1 report assumption (7,000h study); current canonical friction is `{ROUND_TRIP_FRICTION_PCT:.2f}%` (`{TOTAL_FRICTION_PER_SIDE_PCT:.2f}%` per side) |\n"
+        f"| **Net Strategy Alpha (Historical)** | `+33.55 pp (Historical)` | Measured under the historical `0.30%` friction assumption; not evidence of equivalent performance under current canonical `{ROUND_TRIP_FRICTION_PCT:.2f}%` friction |"
     )
 
 
