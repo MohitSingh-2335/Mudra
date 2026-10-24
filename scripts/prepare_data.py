@@ -27,29 +27,28 @@ from src.feature_engineering import create_features
 def preprocess_and_save_featured_data(
     input_path: Union[str, Path] = BTCUSDT_1H_CSV,
     output_path: Union[str, Path] = FEATURED_BTC_DATA_PATH,
+    fetch_fresh: bool = False,
 ) -> pd.DataFrame:
     """
     Loads raw candlestick data, merges macro and on-chain alternative features,
-    generates 39 technical features, and persists the dataset to disk.
+    generates 36 stationary features, and persists the dataset to disk.
 
     Args:
         input_path (Union[str, Path]): Path to raw OHLCV candlestick CSV.
         output_path (Union[str, Path]): Target path for featured dataset CSV.
+        fetch_fresh (bool): If True, downloads latest Binance 1h candles first.
 
     Returns:
         pd.DataFrame: Engineered feature DataFrame.
-
-    Raises:
-        FileNotFoundError: If input candlestick CSV does not exist.
     """
     input_file = Path(input_path)
     output_file = Path(output_path)
 
-    if not input_file.exists():
-        raise FileNotFoundError(
-            f"[ERROR] Raw candlestick data not found at '{input_file}'. "
-            "Please execute 'python scripts/ingest/fetch_fresh_data.py' first."
-        )
+    # Step 0: Optionally fetch fresh market data from Binance
+    if fetch_fresh or not input_file.exists():
+        print("[INFO] Fetching fresh historical candles from Binance...")
+        from scripts.ingest.fetch_fresh_data import main as fetch_main
+        fetch_main()
 
     print(f"[INFO] Starting data preparation pipeline from: '{input_file}'")
 
@@ -66,7 +65,7 @@ def preprocess_and_save_featured_data(
     df = merge_onchain(df, timestamp_col="timestamp")
 
     # Step 4: Engineer technical indicators, order flow, and return targets
-    print("[INFO] Computing 39 technical indicators, microstructure, and target labels...")
+    print("[INFO] Computing stationary technical indicators, microstructure, and target labels...")
     featured_df = create_features(df, drop_na=True)
 
     # Step 5: Serialize to processed storage
@@ -81,4 +80,8 @@ def preprocess_and_save_featured_data(
 
 
 if __name__ == "__main__":
-    preprocess_and_save_featured_data()
+    import argparse
+    parser = argparse.ArgumentParser(description="Prepare feature dataset for Mudra quantitative models.")
+    parser.add_argument("--fetch-fresh", action="store_true", help="Fetch latest 4-year BTC klines from Binance first")
+    args = parser.parse_args()
+    preprocess_and_save_featured_data(fetch_fresh=args.fetch_fresh)
