@@ -12,7 +12,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
 import numpy as np
 from sqlalchemy.orm import Session
-from sqlalchemy import select, and_, desc
+from sqlalchemy import select, and_, desc, func
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
@@ -303,26 +303,34 @@ def get_reconciliation_summary(session: Session, limit: int = 168, model_version
     Returns:
         Dictionary containing win rate, MAE, MAPE, IC, sample counts, and applied model_version filter.
     """
+    # Query total lifetime evaluations across all records in Neon DB
+    total_lifetime = session.execute(select(func.count(Reconciliation.id))).scalar() or 0
+
+    # Build query for the requested window and model
     if model_version is not None and model_version != "All Models":
         stmt = (
             select(Reconciliation)
             .join(MarketTick, Reconciliation.tick_id == MarketTick.id)
             .where(MarketTick.model_version == model_version)
             .order_by(desc(Reconciliation.timestamp))
-            .limit(limit)
         )
     else:
         stmt = (
             select(Reconciliation)
             .order_by(desc(Reconciliation.timestamp))
-            .limit(limit)
         )
+
+    # Apply rolling window limit only when positive integer is provided
+    if limit is not None and limit > 0:
+        stmt = stmt.limit(limit)
+
     records = session.execute(stmt).scalars().all()
 
     if not records:
         return {
             "total_evaluated": 0,
             "total_reconciled": 0,
+            "total_lifetime_evaluated": total_lifetime,
             "win_rate_pct": 0.0,
             "directional_accuracy_pct": 0.0,
             "mae_usd": 0.0,
@@ -359,6 +367,7 @@ def get_reconciliation_summary(session: Session, limit: int = 168, model_version
     return {
         "total_evaluated": total,
         "total_reconciled": total,
+        "total_lifetime_evaluated": total_lifetime,
         "win_rate_pct": win_rate,
         "directional_accuracy_pct": win_rate,
         "mae_usd": round(mae, 2),
