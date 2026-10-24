@@ -4,12 +4,6 @@ Mudra — Institutional Quantitative Cryptocurrency Intelligence Terminal.
 Real-Time Multi-Agent Deliberation, Delayed Ground Truth Reconciliation,
 and Autonomous $10,000 Forward Paper Trading Ledger on Neon Cloud PostgreSQL.
 """
-# 1. PRE-LOAD ONNXRUNTIME FIRST to prevent Windows OpenMP (0xC0000005) thread collision
-try:
-    import onnxruntime  # noqa: F401
-except ImportError:
-    pass
-
 import os
 import re
 import sys
@@ -35,6 +29,9 @@ import requests
 import plotly.graph_objects as go
 
 from config import (
+    APP_TITLE,
+    APP_SUBTITLE,
+    FEATURE_DISPLAY_NAMES,
     ACTIVE_MODEL_VERSION,
     FEATURE_SCHEMA_VERSION,
     MODEL_MANIFEST_PATH,
@@ -71,41 +68,18 @@ from src.ui.charts import (
     create_reconciliation_scatter,
 )
 
-# --- Plain English Feature Names for Signal Attribution ---
-FEATURE_PLAIN_NAMES: Dict[str, str] = {
-    "taker_buy_ratio": "Buyer vs. Seller Volume",
-    "vol_mean_6h": "Average 6-Hour Price Swing ($)",
-    "vol_std_6h": "6-Hour Swing Change ($)",
-    "vol_max_6h": "Largest 1h Swing in Last 6h ($)",
-    "vol_min_6h": "Smallest 1h Swing in Last 6h ($)",
-    "vol_1h": "1-Hour High–Low Price Range ($)",
-    "high_low_spread": "1-Hour High–Low Price Range ($)",
-    "Price Change": "1-Hour Price Change ($)",
-    "close_open_diff": "1-Hour Price Change ($)",
-    "close_lag_1": "Previous Hour Closing Price ($)",
-    "Rolling_Mean_Close": "10-Hour Average Price ($)",
-    "Rolling_Std_Close": "10-Hour Price Swing ($)",
-    "return_1h": "1-Hour Price Trend",
-    "return_3h": "3-Hour Price Trend",
-    "return_6h": "6-Hour Price Trend",
-    "rsi": "Price Momentum (RSI)",
-    "macd": "Trend Direction (MACD)",
-    "macd_signal": "Trend Direction (MACD)",
-    "bb_high": "Price Range Band (Bollinger)",
-    "bb_low": "Price Range Band (Bollinger)",
-    "ema_10": "Short vs. Long Price Trend (EMA)",
-    "ema_30": "Short vs. Long Price Trend (EMA)",
-    "ema_10_30_diff": "Short vs. Long Price Trend (EMA)",
-    "volume": "Trading Volume",
-    "Volume_Change": "Trading Volume",
-    "number_of_trades": "Number of Trades",
-    "fng_value": "Market Sentiment (Fear & Greed)",
-    "fng_mean_3d": "Market Sentiment (Fear & Greed)",
-}
+# Reference centralized feature display naming dictionary
+FEATURE_PLAIN_NAMES: Dict[str, str] = FEATURE_DISPLAY_NAMES
+
+
+def get_feature_display_name(feat_name: str) -> str:
+    """Returns a descriptive plain-English label or clean title-cased name for any model feature."""
+    return FEATURE_DISPLAY_NAMES.get(feat_name, str(feat_name).replace("_", " ").title())
+
 
 # --- Streamlit Page Configuration ---
 st.set_page_config(
-    page_title="Mudra — Bitcoin Price Prediction & Paper Trading",
+    page_title=APP_TITLE,
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -289,41 +263,13 @@ def generate_live_forecast(
     }
 
 
-FEATURE_HUMAN_NAMES: Dict[str, str] = {
-    "vol_mean_6h": "6-Hour Average Volume",
-    "taker_buy_ratio": "Buyer vs. Seller Volume Ratio",
-    "rsi": "Relative Strength Index (RSI Momentum)",
-    "macd": "MACD Trend Momentum",
-    "macd_signal": "MACD Signal Line",
-    "macd_hist": "MACD Histogram Divergence",
-    "bb_high": "Bollinger Upper Band Boundary",
-    "bb_low": "Bollinger Lower Band Boundary",
-    "bb_mid": "Bollinger 20-Period Basis",
-    "fng_value": "Crypto Fear & Greed Index Sentiment",
-    "close_lag_1": "Previous Hour Close Price",
-    "close_lag_2": "2-Hours-Ago Close Price",
-    "close_lag_3": "3-Hours-Ago Close Price",
-    "volume_change": "Hourly Volume Growth Rate",
-    "realized_vol_24h": "24-Hour Realized Price Volatility",
-    "spread_pct": "1-Hour High–Low Price Swing %",
-    "price_spread": "1-Hour High–Low Price Spread ($)",
-    "ret_1h": "1-Hour Price Return %",
-    "ret_3h": "3-Hour Cumulative Return %",
-    "ret_6h": "6-Hour Cumulative Return %",
-    "ret_12h": "12-Hour Cumulative Return %",
-    "ret_24h": "24-Hour Cumulative Return %",
-    "ema_20": "20-Hour Exponential Moving Average",
-    "ema_50": "50-Hour Exponential Moving Average",
-    "atr_14": "14-Hour Average True Range (Volatility)",
-    "obv": "On-Balance Volume (Cumulative Flow)",
-    "funding_rate": "Perpetual Contract Funding Rate",
-    "open_interest": "Derivatives Open Interest",
-}
+# Alias to centralized feature display dictionary for backward compatibility
+FEATURE_HUMAN_NAMES: Dict[str, str] = FEATURE_DISPLAY_NAMES
 
 
 def get_human_feature_label(feat_name: str) -> str:
     """Returns a descriptive plain-English label alongside the technical feature code."""
-    desc = FEATURE_HUMAN_NAMES.get(feat_name)
+    desc = FEATURE_DISPLAY_NAMES.get(feat_name)
     if desc:
         return f"{feat_name} ({desc})"
     return feat_name
@@ -358,10 +304,16 @@ def generate_live_shap_attribution(
         return None
 
 
-def build_council_scenario_payload(scenario_selected: str, current_price: float):
+def build_council_scenario_payload(
+    scenario_selected: str,
+    current_price: float,
+    live_forecast: Optional[Dict[str, Any]] = None,
+    live_df: Optional[pd.DataFrame] = None,
+):
     """
     Constructs market_data, engineered_features, and ml_forecast dictionaries for Tab 2
     Multi-Agent Council stress/simulation scenarios.
+    When scenario_selected is 'live' and live_forecast is provided, uses real live model outputs.
     Enforces strict internal mathematical consistency across all generated fields:
       - high = current_price * (1.0 + volatility_spread / 2.0)
       - low  = current_price * (1.0 - volatility_spread / 2.0)
@@ -370,7 +322,32 @@ def build_council_scenario_payload(scenario_selected: str, current_price: float)
       - clears_hurdle = bool(abs(expected_return_pct) >= MIN_HURDLE_PCT)
     """
     current_price = float(current_price)
-    if scenario_selected == "bullish":
+    if scenario_selected == "live" and live_forecast:
+        expected_return_pct = float(live_forecast.get("pred_ret_pct", 0.08))
+        c_dir = live_forecast.get("direction_label", "UP")
+        confidence = (
+            float(live_forecast.get("prob_up", 50.0)) / 100.0
+            if c_dir == "UP"
+            else float(live_forecast.get("prob_down", 50.0)) / 100.0
+        )
+        volatility_spread = max(0.002, float(live_forecast.get("spread_pct", 1.8)) / 100.0)
+        taker_buy_ratio = float(live_forecast.get("taker", 0.51))
+        order_flow_bias = (
+            "BUYER_AGGRESSION"
+            if taker_buy_ratio > 0.52
+            else ("SELLER_AGGRESSION" if taker_buy_ratio < 0.48 else "NEUTRAL")
+        )
+        volume = (
+            float(live_df["volume"].iloc[-1])
+            if live_df is not None and not live_df.empty and "volume" in live_df.columns
+            else 1200.0
+        )
+        rsi_estimate = (
+            float(live_df["rsi"].iloc[-1])
+            if live_df is not None and not live_df.empty and "rsi" in live_df.columns
+            else 50.0
+        )
+    elif scenario_selected == "bullish":
         volatility_spread = 0.015
         volume = 5000.0
         taker_buy_ratio = 0.65
@@ -670,12 +647,12 @@ st.sidebar.success("FastMCP Server: 4 Quant Tools Ready")
 
 with st.sidebar.expander("System Info", expanded=False):
     st.markdown(
-        """
+        f"""
         - Single Source of Truth: Neon Cloud PostgreSQL
-        - Return Forecasting: 26-feature XGBoost Regressor (`xgb_onnx_v1.0.0`)
-        - Direction Classification: 39-feature XGBoost Classifier (`xgb_onnx_v1.0.0`)
+        - Return Forecasting: {len(REGRESSOR_FEATURES)}-feature XGBoost Regressor (`{ACTIVE_MODEL_VERSION}`)
+        - Direction Classification: {len(CLASSIFIER_FEATURES)}-feature XGBoost Classifier (`{ACTIVE_MODEL_VERSION}`)
         - Multi-Agent Deliberation: LangGraph 2-Node Council (Lead Strategist + Risk Critic)
-        - Forward Ledger: $10,000 Paper Portfolio (0.14% round-trip friction)
+        - Forward Ledger: $10,000 Paper Portfolio ({ROUND_TRIP_FRICTION_PCT:.2f}% round-trip friction)
         """
     )
 
@@ -683,7 +660,7 @@ with st.sidebar.expander("System Info", expanded=False):
 # =====================================================================================
 # TOP EXECUTIVE KPI BANNER & 1-SECOND WEBSOCKET RIBBON
 # =====================================================================================
-st.title("Mudra — Bitcoin Price Prediction & Paper Trading")
+st.title(APP_TITLE)
 
 # Client-Side 1-Second Binance WebSocket Ticker (0% Server Load)
 components.html(
@@ -743,7 +720,7 @@ components.html(
     height=60,
 )
 
-st.caption("Live BTC/USDT Price, Next-Hour Model Prediction, AI Trade Decision & $10,000 Paper Trading")
+st.caption(APP_SUBTITLE)
 
 # Top Metrics Row
 kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
@@ -834,6 +811,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 # -------------------------------------------------------------------------------------
 with tab1:
     st.subheader("Live Bitcoin (BTC/USDT) 1-Hour Chart")
+    st.caption("Live Bitcoin spot market and next-hour machine learning price forecast.")
 
     # Live Real-Time Binance Candlestick Widget via TradingView
     components.html(
@@ -1043,7 +1021,7 @@ def format_risk_levels(
 # -------------------------------------------------------------------------------------
 with tab2:
     st.subheader("AI Trade Decision & Risk Check")
-    st.caption("Step 1 (Strategist) proposes BUY, SELL, or HOLD from the prediction. Step 2 (Risk Critic) blocks trades when fees or price swings are too high.")
+    st.caption("Multi-agent risk validation: Strategist proposes an action and Risk Critic checks safety limits.")
 
     # Deliberation Trigger & Stress Testing Scenarios
     c_btn1, c_btn2, c_btn3, c_btn4 = st.columns(4)
@@ -1068,6 +1046,8 @@ with tab2:
             m_data, t_data, f_data = build_council_scenario_payload(
                 scenario_selected=scenario_selected,
                 current_price=current_price,
+                live_forecast=forecast_result,
+                live_df=live_market_df,
             )
 
             st.session_state["council_state"] = run_trading_graph(
@@ -1132,7 +1112,8 @@ with tab2:
     col_s1, col_s2 = st.columns(2)
     with col_s1:
         with st.expander("Step 1: Strategy Proposal", expanded=True):
-            st.markdown(f"**Proposed Action:** `{act}` (Confidence: {conv}/10)")
+            prop_action = council_state.get("strategist_action", act)
+            st.markdown(f"**Proposed Action:** `{prop_action}` (Confidence: {conv}/10)")
             thesis_text = (
                 council_state.get("thesis")
                 or council_state.get("strategist_thesis")
@@ -1518,13 +1499,24 @@ def resolve_tab3_reconciliation_kpis(
 # -------------------------------------------------------------------------------------
 with tab3:
     st.subheader("Past Prediction Accuracy (Checked 1 Hour Later)")
-    st.caption("Every prediction is checked 1 hour later against the actual Bitcoin closing price.")
+    st.caption("Realized model accuracy evaluated 1 hour later against actual Bitcoin closing price.")
+
+    rec_df = db_state.get("rec_df", pd.DataFrame())
+    base_kpis = db_state.get("rec_kpis", {})
+
+    # Dynamically discover all evaluated models from database records while preserving canonical baseline
+    db_models = (
+        [str(m) for m in rec_df["model_version"].dropna().unique() if m and str(m).strip()]
+        if not rec_df.empty and "model_version" in rec_df.columns
+        else []
+    )
+    dropdown_models = ["All Models"] + sorted(list(set([ACTIVE_MODEL_VERSION] + db_models)))
 
     t3_col1, t3_col2 = st.columns([1, 1])
     with t3_col1:
         selected_model = st.selectbox(
             "Filter Delayed Track Record by Model",
-            options=TAB3_MODEL_SELECTOR_OPTIONS,
+            options=dropdown_models,
             key="tab3_model_selector",
         )
     with t3_col2:
@@ -1536,9 +1528,6 @@ with tab3:
         )
 
     selected_lookback = None if "All Time" in lookback_label else (24 if "24 Hours" in lookback_label else 168)
-
-    rec_df = db_state.get("rec_df", pd.DataFrame())
-    base_kpis = db_state.get("rec_kpis", {})
 
     # Filter reconciliation records and resolve KPIs safely
     filtered_rec_df = filter_reconciliation_records(rec_df, selected_model)
@@ -1929,7 +1918,7 @@ with tab4:
 # -------------------------------------------------------------------------------------
 with tab5:
     st.subheader("Top Signals Behind This Hour's Prediction")
-    st.caption("Shows the top market signals pushing the model toward UP or DOWN right now.")
+    st.caption("TreeSHAP feature attributions and walk-forward chronological evaluation boundaries.")
 
     if is_stale_fallback:
         st.warning(
@@ -1951,7 +1940,7 @@ with tab5:
                 if top_pos:
                     for driver in top_pos:
                         feat = driver["feature"]
-                        plain = FEATURE_PLAIN_NAMES.get(feat, feat.replace("_", " ").title())
+                        plain = get_feature_display_name(feat)
                         st.markdown(f"- **{plain}** (`{feat}`)")
                 else:
                     st.write("No strong upward signals this hour.")
@@ -1960,7 +1949,7 @@ with tab5:
                 if top_neg:
                     for driver in top_neg:
                         feat = driver["feature"]
-                        plain = FEATURE_PLAIN_NAMES.get(feat, feat.replace("_", " ").title())
+                        plain = get_feature_display_name(feat)
                         st.markdown(f"- **{plain}** (`{feat}`)")
                 else:
                     st.write("No strong downward signals this hour.")
