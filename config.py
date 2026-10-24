@@ -5,6 +5,7 @@ Central source of truth for file paths, feature schemas, model artifacts,
 and trading parameters.
 """
 import os
+import json
 import math
 from decimal import Decimal
 from pathlib import Path
@@ -185,6 +186,7 @@ MIN_HURDLE_PCT: float = MIN_HURDLE_RATE * 100.0
 MODELS_DIR = str(BASE_DIR / "artifacts" / "models")
 REGRESSOR_MODEL_PATH = str(BASE_DIR / "artifacts" / "models" / "best_regressor_model.pkl")
 CLASSIFIER_MODEL_PATH = str(BASE_DIR / "artifacts" / "models" / "best_classifier_model.pkl")
+MODEL_MANIFEST_PATH = str(BASE_DIR / "artifacts" / "models" / "model_manifest.json")
 
 # Canonical Model Governance & Lineage (Single Source of Truth)
 ACTIVE_MODEL_VERSION: str = "xgb_onnx_v1.0.0"
@@ -282,6 +284,22 @@ CLASSIFIER_FEATURES = [
     'onchain_num_tx_change', 'onchain_hash_rate_change', 'onchain_miners_revenue_change'
 ]
 
+# Auto-sync with active model manifest if present (Single Source of Truth)
+if os.path.exists(MODEL_MANIFEST_PATH):
+    try:
+        with open(MODEL_MANIFEST_PATH, "r", encoding="utf-8") as _mf:
+            _manifest = json.load(_mf)
+        ACTIVE_MODEL_VERSION = _manifest.get("model_version", ACTIVE_MODEL_VERSION)
+        FEATURE_SCHEMA_VERSION = _manifest.get("feature_schema_version", FEATURE_SCHEMA_VERSION)
+        REGRESSOR_MODEL_SHA256 = _manifest.get("regressor_sha256", REGRESSOR_MODEL_SHA256)
+        CLASSIFIER_MODEL_SHA256 = _manifest.get("classifier_sha256", CLASSIFIER_MODEL_SHA256)
+        if "regressor_features" in _manifest:
+            REGRESSOR_FEATURES = _manifest["regressor_features"]
+        if "classifier_features" in _manifest:
+            CLASSIFIER_FEATURES = _manifest["classifier_features"]
+    except Exception as _err:
+        pass
+
 __all__ = [
     "BASE_DIR",
     "INITIAL_CAPITAL_USD",
@@ -300,6 +318,7 @@ __all__ = [
     "MODELS_DIR",
     "REGRESSOR_MODEL_PATH",
     "CLASSIFIER_MODEL_PATH",
+    "MODEL_MANIFEST_PATH",
     "ACTIVE_MODEL_VERSION",
     "FEATURE_SCHEMA_VERSION",
     "REGRESSOR_MODEL_SHA256",
