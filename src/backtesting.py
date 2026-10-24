@@ -75,10 +75,10 @@ def _simulate_from_signals(
     slippage_rate: float = SLIPPAGE_RATE
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Simulates mark-to-market hourly portfolio execution given binary position signals.
+    Simulates mark-to-market hourly portfolio execution given position signals (-1: Short, 0: Cash, 1: Long).
     """
     equity = initial_capital
-    position = 0  # 0: 100% Cash (USDT), 1: 100% Long (BTC)
+    position = 0  # 0: 100% Cash (USDT), 1: 100% Long (BTC), -1: 100% Short (BTC)
     entry_equity = 0.0
     entry_price = 0.0
     entry_time = None
@@ -93,19 +93,27 @@ def _simulate_from_signals(
         time = test_df['timestamp'].iloc[i]
         signal = int(signals[i])
 
-        # 1. Buy Signal (Enter Long from Cash)
+        # 1. Buy Signal (Enter Long from Cash with fee and slippage)
         if position == 0 and signal == 1:
             entry_equity = equity * (1.0 - total_friction)
             entry_price = price
             entry_time = time
             position = 1
 
-        # 2. Sell Signal (Exit Long to Cash)
+        # 2. Short Signal (Enter Short from Cash with fee and slippage)
+        elif position == 0 and signal == -1:
+            entry_equity = equity * (1.0 - total_friction)
+            entry_price = price
+            entry_time = time
+            position = -1
+
+        # 3. Sell Signal (Exit Long to Cash, profit when price rose)
         elif position == 1 and signal == 0:
             gross_return = (price / entry_price) - 1.0
             equity = entry_equity * (1.0 + gross_return) * (1.0 - total_friction)
-            net_return = (equity / (entry_equity / (1.0 - total_friction))) - 1.0
-            profit_loss = equity - (entry_equity / (1.0 - total_friction))
+            capital_deployed = entry_equity / (1.0 - total_friction)
+            net_return = (equity / capital_deployed) - 1.0
+            profit_loss = equity - capital_deployed
 
             trade_log.append({
                 'entry_time': entry_time,
@@ -120,8 +128,36 @@ def _simulate_from_signals(
             })
             position = 0
 
-        # Mark-to-market equity for the current hour
-        mtm_equity = entry_equity * (price / entry_price) if position == 1 else equity
+        # 4. Cover Signal (Exit Short to Cash, profit when price fell)
+        elif position == -1 and signal == 0:
+            # Short profit formula: gain when price drops below entry price
+            gross_return = 1.0 - (price / entry_price)
+            equity = entry_equity * (1.0 + gross_return) * (1.0 - total_friction)
+            capital_deployed = entry_equity / (1.0 - total_friction)
+            net_return = (equity / capital_deployed) - 1.0
+            profit_loss = equity - capital_deployed
+
+            trade_log.append({
+                'entry_time': entry_time,
+                'exit_time': time,
+                'entry_price': entry_price,
+                'exit_price': price,
+                'gross_return_pct': round(gross_return * 100.0, 3),
+                'net_return_pct': round(net_return * 100.0, 3),
+                'pnl_usd': round(profit_loss, 2),
+                'equity_after': round(equity, 2),
+                'outcome': 'WIN' if net_return > 0 else 'LOSS'
+            })
+            position = 0
+
+        # 5. Hourly Mark-to-Market (Track unrealized portfolio equity)
+        if position == 1:
+            mtm_equity = entry_equity * (price / entry_price)
+        elif position == -1:
+            mtm_equity = entry_equity * (1.0 + (entry_price - price) / entry_price)
+        else:
+            mtm_equity = equity
+
         equity_curve.append({
             'timestamp': time,
             'close': price,
@@ -130,13 +166,36 @@ def _simulate_from_signals(
             'signal': signal
         })
 
-    # Liquidate open position at the final candle
+    # 6. Final Candle Liquidation (Close open Long or Short position)
     if position == 1:
         last_price = float(test_df['close'].iloc[-1])
         gross_return = (last_price / entry_price) - 1.0
         equity = entry_equity * (1.0 + gross_return) * (1.0 - total_friction)
-        net_return = (equity / (entry_equity / (1.0 - total_friction))) - 1.0
-        profit_loss = equity - (entry_equity / (1.0 - total_friction))
+        capital_deployed = entry_equity / (1.0 - total_friction)
+        net_return = (equity / capital_deployed) - 1.0
+        profit_loss = equity - capital_deployed
+
+        trade_log.append({
+            'entry_time': entry_time,
+            'exit_time': test_df['timestamp'].iloc[-1],
+            'entry_price': entry_price,
+            'exit_price': last_price,
+            'gross_return_pct': round(gross_return * 100.0, 3),
+            'net_return_pct': round(net_return * 100.0, 3),
+            'pnl_usd': round(profit_loss, 2),
+            'equity_after': round(equity, 2),
+            'outcome': 'WIN' if net_return > 0 else 'LOSS'
+        })
+        equity_curve[-1]['equity'] = equity
+        equity_curve[-1]['position'] = 0
+
+    elif position == -1:
+        last_price = float(test_df['close'].iloc[-1])
+        gross_return = 1.0 - (last_price / entry_price)
+        equity = entry_equity * (1.0 + gross_return) * (1.0 - total_friction)
+        capital_deployed = entry_equity / (1.0 - total_friction)
+        net_return = (equity / capital_deployed) - 1.0
+        profit_loss = equity - capital_deployed
 
         trade_log.append({
             'entry_time': entry_time,
@@ -279,7 +338,7 @@ def calculate_quant_metrics(
         profit_factor = 0.0
         avg_trade_return = 0.0
 
-    exposure_pct = (equity_curve_df['position'] == 1).mean() * 100.0
+    exposure_pct = (equity_curve_df['position'] != 0).mean() * 100.0
 
     return {
         'initial_capital': INITIAL_CAPITAL,
