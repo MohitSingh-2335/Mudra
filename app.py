@@ -36,6 +36,8 @@ import plotly.graph_objects as go
 
 from config import (
     ACTIVE_MODEL_VERSION,
+    FEATURE_SCHEMA_VERSION,
+    MODEL_MANIFEST_PATH,
     REGRESSOR_MODEL_SHA256,
     CLASSIFIER_MODEL_SHA256,
     REGRESSOR_FEATURES,
