@@ -74,23 +74,31 @@ def evaluate_multi_angle_consensus(
     predicted_range_usd: float,
     shadow_direction: Optional[str] = None,
     shadow_prob_up: Optional[float] = None,
+    model_votes: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
-    Combines Angle 1 (Model 1 + optional Model 2 Direction Vote),
+    Combines Angle 1 (Multi-model Direction Vote across all registered models),
     Angle 2 (Predicted 1h Price Range in $), and Angle 3 (Predicted 1h Dollar Move)
     into a plain-English consensus report.
     """
     hurdle_dollar_min = current_price * (MIN_HURDLE_PCT / 100.0)
-    votes_up = 1 if str(primary_direction).upper() == "UP" else 0
-    total_models = 1
 
-    if shadow_direction is not None and shadow_prob_up is not None:
-        total_models = 2
-        if str(shadow_direction).upper() == "UP":
-            votes_up += 1
-        avg_prob_up = (float(primary_prob_up) + float(shadow_prob_up)) / 2.0
+    # 1. Count directional votes across all voting models
+    if model_votes and len(model_votes) > 0:
+        total_models = len(model_votes)
+        votes_up = sum(1 for m in model_votes if str(m.get("direction")).upper() == "UP")
+        avg_prob_up = float(np.mean([float(m.get("prob_up", 50.0)) for m in model_votes]))
     else:
-        avg_prob_up = float(primary_prob_up)
+        votes_up = 1 if str(primary_direction).upper() == "UP" else 0
+        total_models = 1
+
+        if shadow_direction is not None and shadow_prob_up is not None:
+            total_models = 2
+            if str(shadow_direction).upper() == "UP":
+                votes_up += 1
+            avg_prob_up = (float(primary_prob_up) + float(shadow_prob_up)) / 2.0
+        else:
+            avg_prob_up = float(primary_prob_up)
 
     votes_down = total_models - votes_up
     if votes_up > votes_down:
@@ -101,7 +109,7 @@ def evaluate_multi_angle_consensus(
         agreement_text = f"{votes_down}/{total_models} Models Vote DOWN"
     else:
         consensus_dir = "SPLIT"
-        agreement_text = "1/2 Models Split (No Consensus -> Hold)"
+        agreement_text = f"{votes_up}/{total_models} Models Split (No Consensus -> Hold)"
 
     range_clears_fees = predicted_range_usd >= (hurdle_dollar_min * 1.5)
     move_clears_fees = abs(primary_pred_dollar_move) >= hurdle_dollar_min
