@@ -131,29 +131,35 @@ def create_features(
         df["fng_value"] = 50.0
         df["fng_mean_3d"] = 50.0
 
-    # On-chain network dynamics (day-over-day changes, preserve upstream daily changes if present)
+    # On-chain network dynamics (day-over-day changes, 0.0 default if unmerged)
+    if "onchain_num_tx_change" not in df.columns:
+        if "onchain_num_tx" in df.columns:
+            df["onchain_num_tx_change"] = df["onchain_num_tx"].pct_change(fill_method=None).fillna(0.0)
+        else:
+            df["onchain_num_tx_change"] = 0.0
+    else:
+        df["onchain_num_tx_change"] = df["onchain_num_tx_change"].fillna(0.0)
+
+    if "onchain_hash_rate_change" not in df.columns:
+        if "onchain_hash_rate" in df.columns:
+            df["onchain_hash_rate_change"] = df["onchain_hash_rate"].pct_change(fill_method=None).fillna(0.0)
+        else:
+            df["onchain_hash_rate_change"] = 0.0
+    else:
+        df["onchain_hash_rate_change"] = df["onchain_hash_rate_change"].fillna(0.0)
+
+    if "onchain_miners_revenue_change" not in df.columns:
+        if "onchain_miners_revenue_usd" in df.columns:
+            df["onchain_miners_revenue_change"] = df["onchain_miners_revenue_usd"].pct_change(fill_method=None).fillna(0.0)
+        else:
+            df["onchain_miners_revenue_change"] = 0.0
+    else:
+        df["onchain_miners_revenue_change"] = df["onchain_miners_revenue_change"].fillna(0.0)
+
     if "onchain_num_tx" not in df.columns:
         df["onchain_num_tx"] = 0.0
     if "onchain_hash_rate" not in df.columns:
         df["onchain_hash_rate"] = 0.0
-
-    if "onchain_num_tx_change" not in df.columns:
-        if "onchain_num_tx" in df.columns:
-            df["onchain_num_tx_change"] = df["onchain_num_tx"].pct_change(fill_method=None)
-        else:
-            df["onchain_num_tx_change"] = 0.0
-
-    if "onchain_hash_rate_change" not in df.columns:
-        if "onchain_hash_rate" in df.columns:
-            df["onchain_hash_rate_change"] = df["onchain_hash_rate"].pct_change(fill_method=None)
-        else:
-            df["onchain_hash_rate_change"] = 0.0
-
-    if "onchain_miners_revenue_change" not in df.columns:
-        if "onchain_miners_revenue_usd" in df.columns:
-            df["onchain_miners_revenue_change"] = df["onchain_miners_revenue_usd"].pct_change(fill_method=None)
-        else:
-            df["onchain_miners_revenue_change"] = 0.0
 
     # Replace any infinite values from zero divisions
     df = df.replace([np.inf, -np.inf], np.nan)
