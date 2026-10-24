@@ -155,6 +155,55 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
         session.add(rec)
         reconciled_records.append(rec)
 
+        # 6b. Reconcile point-in-time predictions across all models (primary and candidates)
+        try:
+            from src.database.models import ModelPrediction
+            unresolved_preds = session.execute(
+                select(ModelPrediction).where(
+                    ModelPrediction.tick_id == prior_tick.id,
+                    ModelPrediction.outcome_tick_id.is_(None),
+                )
+            ).scalars().all()
+            for u_pred in unresolved_preds:
+                u_pred_price = float(u_pred.predicted_price_1h)
+                u_pred_ret = float(u_pred.predicted_return_pct)
+                u_res_err = float(actual_return_pct - u_pred_ret)
+                u_abs_err = float(abs(actual_price - u_pred_price))
+                u_pct_err = float((u_abs_err / actual_price) * 100.0)
+                u_dir_pred = u_pred.direction_predicted
+                u_dir_corr = bool(u_dir_pred == dir_real)
+                u_is_black = bool(abs(actual_return_pct) >= 3.8 or abs(u_res_err) >= 3.8)
+
+                if u_is_black:
+                    u_tag = "BLACK_SWAN_OUTLIER"
+                elif u_dir_corr:
+                    if u_pct_err <= 0.35:
+                        u_tag = "ACCURATE"
+                    elif abs(actual_return_pct) > abs(u_pred_ret):
+                        u_tag = "MOMENTUM_UNDERESTIMATED"
+                    else:
+                        u_tag = "MOMENTUM_OVERESTIMATED"
+                else:
+                    if u_pct_err <= 0.20 or u_abs_err < 150.0:
+                        u_tag = "SIDEWAYS_DRIFT"
+                    else:
+                        u_tag = "DIRECTION_MISALIGNED"
+
+                u_pred.outcome_tick_id = outcome_candle.id
+                u_pred.evaluation_policy_version = "binary_exact_t1_v2"
+                u_pred.actual_price_at_t_plus_1 = actual_price
+                u_pred.actual_return_pct = actual_return_pct
+                u_pred.direction_realized = dir_real
+                u_pred.direction_correct = u_dir_corr
+                u_pred.residual_error = u_res_err
+                u_pred.absolute_error_usd = u_abs_err
+                u_pred.percentage_error = u_pct_err
+                u_pred.is_black_swan = u_is_black
+                u_pred.error_attribution_tag = u_tag
+                u_pred.reconciled_at = datetime.now(timezone.utc)
+        except Exception as pred_reconcile_err:
+            logger.warning("[RECONCILIATION] ModelPrediction update failed: %s", pred_reconcile_err)
+
         # 7. Index plain-English outcome into ChromaDB episodic memory
         try:
             from src.agents.rag_agent import index_reconciled_outcome_memory
@@ -307,24 +356,51 @@ def get_reconciliation_summary(session: Session, limit: int = 168, model_version
     total_lifetime = session.execute(select(func.count(Reconciliation.id))).scalar() or 0
 
     # Build query for the requested window and model
+    records = []
     if model_version is not None and model_version != "All Models":
-        stmt = (
-            select(Reconciliation)
-            .join(MarketTick, Reconciliation.tick_id == MarketTick.id)
-            .where(MarketTick.model_version == model_version)
-            .order_by(desc(Reconciliation.timestamp))
-        )
+        # First check if candidate predictions exist in ModelPrediction
+        try:
+            from src.database.models import ModelPrediction
+            pred_stmt = (
+                select(ModelPrediction)
+                .where(
+                    ModelPrediction.model_version == model_version,
+                    ModelPrediction.outcome_tick_id.isnot(None),
+                )
+                .order_by(desc(ModelPrediction.reconciled_at))
+            )
+            if limit is not None and limit > 0:
+                pred_stmt = pred_stmt.limit(limit)
+            pred_records = session.execute(pred_stmt).scalars().all()
+            if pred_records:
+                records = pred_records
+                total_lifetime = session.execute(
+                    select(func.count(ModelPrediction.id)).where(
+                        ModelPrediction.model_version == model_version,
+                        ModelPrediction.outcome_tick_id.isnot(None),
+                    )
+                ).scalar() or len(records)
+        except Exception as cand_exc:
+            logger.debug("Failed querying candidate ModelPrediction: %s", cand_exc)
+
+        if not records:
+            stmt = (
+                select(Reconciliation)
+                .join(MarketTick, Reconciliation.tick_id == MarketTick.id)
+                .where(MarketTick.model_version == model_version)
+                .order_by(desc(Reconciliation.timestamp))
+            )
+            if limit is not None and limit > 0:
+                stmt = stmt.limit(limit)
+            records = session.execute(stmt).scalars().all()
     else:
         stmt = (
             select(Reconciliation)
             .order_by(desc(Reconciliation.timestamp))
         )
-
-    # Apply rolling window limit only when positive integer is provided
-    if limit is not None and limit > 0:
-        stmt = stmt.limit(limit)
-
-    records = session.execute(stmt).scalars().all()
+        if limit is not None and limit > 0:
+            stmt = stmt.limit(limit)
+        records = session.execute(stmt).scalars().all()
 
     if not records:
         return {
