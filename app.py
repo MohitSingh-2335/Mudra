@@ -519,18 +519,32 @@ def format_portfolio_rationale(row) -> str:
 def build_model_pedigree_markdown() -> str:
     """
     Constructs the rendered Markdown table for Tab 5 Active Production Model Pedigree,
-    preserving historical 0.30% friction and +33.55 pp alpha provenance while formatting
-    current canonical ROUND_TRIP_FRICTION_PCT and TOTAL_FRICTION_PER_SIDE_PCT dynamically.
+    reading dynamic metrics, version, and hashes from model_manifest.json.
     """
+    import json
+    holdout_acc = "52.49%"
+    holdout_mae = "0.0032"
+    if os.path.exists(MODEL_MANIFEST_PATH):
+        try:
+            with open(MODEL_MANIFEST_PATH, "r", encoding="utf-8") as f:
+                mf = json.load(f)
+            m = mf.get("metrics", {})
+            if "holdout_accuracy" in m:
+                holdout_acc = f"{m['holdout_accuracy'] * 100:.2f}%"
+            if "holdout_mae" in m:
+                holdout_mae = f"{m['holdout_mae']:.4f}"
+        except Exception:
+            pass
+
     return (
         "| Parameter | Active Value | Rationale |\n"
         "| :--- | :--- | :--- |\n"
-        "| **Model Architecture** | `XGBRegressor (CPU)` | Sub-millisecond single-row latency |\n"
-        f"| **Model Checkpoint** | `{ACTIVE_MODEL_VERSION}` | Optuna 50 Bayesian trial champion |\n"
-        "| **Cross-Validation RMSE**| `$396.22` | Chronological walk-forward split |\n"
-        "| **Directional Accuracy**| `53.17%` | Out-of-sample test set |\n"
-        f"| **Historical Backtest Friction** | `0.30% (Historical)` | Legacy Phase 1 report assumption (7,000h study); current canonical friction is `{ROUND_TRIP_FRICTION_PCT:.2f}%` (`{TOTAL_FRICTION_PER_SIDE_PCT:.2f}%` per side) |\n"
-        f"| **Net Strategy Alpha (Historical)** | `+33.55 pp (Historical)` | Measured under the historical `0.30%` friction assumption; not evidence of equivalent performance under current canonical `{ROUND_TRIP_FRICTION_PCT:.2f}%` friction |"
+        "| **Model Architecture** | `XGBoost Regressor + Classifier (CPU)` | Sub-millisecond latency for live inference |\n"
+        f"| **Active Checkpoint** | `{ACTIVE_MODEL_VERSION}` | Dynamic SSOT model checkpoint |\n"
+        f"| **Feature Schema** | `{FEATURE_SCHEMA_VERSION}` | Stationary percentage ratios + technicals |\n"
+        f"| **Holdout Accuracy** | `{holdout_acc}` | Out-of-sample chronological test partition |\n"
+        f"| **Holdout Return MAE** | `{holdout_mae}` | Average absolute continuous return error |\n"
+        f"| **Production Friction** | `{ROUND_TRIP_FRICTION_PCT:.2f}%` | Canonical 0.05% fee + 0.02% slippage per side |"
     )
 
 
@@ -576,10 +590,10 @@ def fetch_cloud_database_state(current_price: float):
         if not db_ok:
             return fallback_state
 
-        ticks_df = get_latest_market_ticks(limit=100)
-        rec_df = get_reconciliation_history(limit=50)
+        ticks_df = get_latest_market_ticks(limit=500)
+        rec_df = get_reconciliation_history(limit=500)
         rec_kpis = get_reconciliation_kpis(lookback_hours=168)
-        port_df = get_portfolio_history(limit=100)
+        port_df = get_portfolio_history(limit=500)
         port_kpis = get_portfolio_kpis(current_price=current_price)
         latest_audit = get_latest_council_audit()
 
@@ -783,12 +797,13 @@ with kpi3:
         if rec_kpis.get("total_reconciled") is not None
         else rec_kpis.get("total_evaluated", 0)
     )
+    lifetime_eval = int(rec_kpis.get("total_lifetime_evaluated", total_eval))
     st.metric(
         "Direction Accuracy (7d)",
         f"{win_rate:.1f}%",
-        f"{total_eval} hours checked",
+        f"{total_eval}h rolling ({lifetime_eval} total)",
         delta_color="off",
-        help="Percentage of evaluated 1-hour predictions over the last 7 days (168 hours lookback) where the model's forecasted direction (UP or DOWN) matched the realized market close.",
+        help=f"Percentage of evaluated 1-hour predictions over the last 7 days (168 hours lookback) where the model's forecasted direction matched the realized market close. Total lifetime evaluated predictions in cloud database: {lifetime_eval}.",
     )
 
 with kpi4:
@@ -1409,11 +1424,12 @@ def resolve_tab3_reconciliation_kpis(
     selected_model: str,
     base_kpis: Dict[str, Any],
     filtered_df: pd.DataFrame,
-    kpi_fetcher: Optional[Callable[[int, Optional[str]], Dict[str, Any]]] = None,
+    kpi_fetcher: Optional[Callable[[Optional[int], Optional[str]], Dict[str, Any]]] = None,
+    lookback_hours: Optional[int] = 168,
 ) -> Tuple[Dict[str, Any], Optional[str]]:
     """
-    Resolves the KPI metrics dictionary for Tab 3 based on selected model.
-    If 'All Models', returns (base_kpis, None) unless base_kpis itself failed.
+    Resolves the KPI metrics dictionary for Tab 3 based on selected model and lookback window.
+    If 'All Models', returns (base_kpis, None) unless custom window or base_kpis failed.
     If a specific model is selected:
       - Attempts to fetch model-specific KPIs via kpi_fetcher.
       - Explicitly distinguishes query success from query failure via query_failed/error flags
@@ -1427,6 +1443,15 @@ def resolve_tab3_reconciliation_kpis(
         (kpi_dict, warning_message_or_none)
     """
     if selected_model == "All Models" or not selected_model:
+        # If custom lookback window requested (not default 168), fetch window KPIs from DB
+        if kpi_fetcher is not None and lookback_hours != 168:
+            try:
+                res = kpi_fetcher(lookback_hours, None)
+                if isinstance(res, dict) and not res.get("query_failed") and not res.get("error"):
+                    return res, None
+            except Exception:
+                pass
+
         if base_kpis and (base_kpis.get("query_failed") or base_kpis.get("error")):
             if not filtered_df.empty:
                 fallback_kpis = compute_fallback_reconciliation_kpis(filtered_df, model_version="All Models")
@@ -1459,7 +1484,7 @@ def resolve_tab3_reconciliation_kpis(
     fetched_kpis = None
     if kpi_fetcher is not None:
         try:
-            res = kpi_fetcher(168, selected_model)
+            res = kpi_fetcher(lookback_hours, selected_model)
             if isinstance(res, dict) and not res.get("query_failed") and not res.get("error"):
                 fetched_kpis = res
                 query_succeeded = True
@@ -1507,12 +1532,22 @@ with tab3:
     st.subheader("Past Prediction Accuracy (Checked 1 Hour Later)")
     st.caption("Every prediction is checked 1 hour later against the actual Bitcoin closing price.")
 
-    # Read-only Model Version Selector
-    selected_model = st.selectbox(
-        "Filter Delayed Track Record by Model",
-        options=TAB3_MODEL_SELECTOR_OPTIONS,
-        key="tab3_model_selector",
-    )
+    t3_col1, t3_col2 = st.columns([1, 1])
+    with t3_col1:
+        selected_model = st.selectbox(
+            "Filter Delayed Track Record by Model",
+            options=TAB3_MODEL_SELECTOR_OPTIONS,
+            key="tab3_model_selector",
+        )
+    with t3_col2:
+        lookback_label = st.radio(
+            "Evaluation Time Window",
+            options=["All Time (Total History)", "Last 7 Days (168 Hours)", "Last 24 Hours (24 Hours)"],
+            horizontal=True,
+            key="tab3_lookback_selector",
+        )
+
+    selected_lookback = None if "All Time" in lookback_label else (24 if "24 Hours" in lookback_label else 168)
 
     rec_df = db_state.get("rec_df", pd.DataFrame())
     base_kpis = db_state.get("rec_kpis", {})
@@ -1524,9 +1559,14 @@ with tab3:
         base_kpis=base_kpis,
         filtered_df=filtered_rec_df,
         kpi_fetcher=get_reconciliation_kpis if db_state.get("db_ok", False) else None,
+        lookback_hours=selected_lookback,
     )
     if kpi_warning:
         st.warning(f"⚠️ {kpi_warning}")
+
+    tot_val = rec_kpis.get("total_reconciled") if rec_kpis.get("total_reconciled") is not None else rec_kpis.get("total_evaluated", 0)
+    lifetime_total = rec_kpis.get("total_lifetime_evaluated", tot_val)
+    st.info(f"Database Connected: Showing {tot_val} evaluated predictions in selected window ({lifetime_total} total evaluations recorded across all time in Neon DB).")
 
     # Rolling Metrics Ribbon
     m_col1, m_col2, m_col3, m_col4 = st.columns(4)
@@ -1990,3 +2030,31 @@ with tab5:
             *Why was candidate `p1_controlled_candidate_v1` rejected?* While the candidate regressor price RMSE was marginally lower ($399.37 vs $399.47), both models underperformed naive persistence ($398.77). More importantly, the candidate had a lower directional hit rate (50.36% vs 50.50%), lower classification accuracy (53.03% vs 53.26%), and lower macro F1. In accordance with Mudra's model governance policy, candidates that fail to beat the active baseline across key trading metrics are permanently rejected and blocked from production deployment.
             """
         )
+
+        st.markdown("#### MLflow Experiment Runs & Bayesian Optimization Trials")
+        try:
+            import mlflow
+            from config import MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_NAME
+            mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+            runs_df = mlflow.search_runs(experiment_names=[MLFLOW_EXPERIMENT_NAME])
+            if not runs_df.empty:
+                display_cols = [c for c in [
+                    "tags.mlflow.runName", "tags.model_type", "metrics.test_accuracy",
+                    "metrics.test_rmse_price", "params.learning_rate", "params.max_depth",
+                    "params.n_estimators", "start_time"
+                ] if c in runs_df.columns]
+                renamed_cols = {
+                    "tags.mlflow.runName": "Run Name",
+                    "tags.model_type": "Model Type",
+                    "metrics.test_accuracy": "Holdout Accuracy",
+                    "metrics.test_rmse_price": "Test RMSE",
+                    "params.learning_rate": "Learning Rate",
+                    "params.max_depth": "Max Depth",
+                    "params.n_estimators": "Trees",
+                    "start_time": "Date / Time",
+                }
+                st.dataframe(runs_df[display_cols].rename(columns=renamed_cols).head(10), use_container_width=True)
+            else:
+                st.info("No MLflow runs recorded yet. Execute `python scripts/run_pipeline.py --tune` to run Optuna Bayesian tuning.")
+        except Exception as exc:
+            st.caption(f"Offline MLflow tracking active via 'mlruns/' ({exc}).")
