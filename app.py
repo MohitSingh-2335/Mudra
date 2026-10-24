@@ -521,33 +521,25 @@ def fetch_live_market_candles(symbol: str = "BTCUSDT") -> pd.DataFrame:
     """Streams the latest 100 confirmed closed hourly candles reusing shared tools fetcher."""
     try:
         return fetch_historical_candles(symbol=symbol, limit=100)
-    except Exception:
-        return pd.DataFrame()
+    except Exception as exc:
+        empty_df = pd.DataFrame()
+        empty_df.attrs["error"] = f"{type(exc).__name__}: {exc}"
+        return empty_df
 
 
 @st.cache_data(ttl=60)
-def fetch_cloud_database_state(current_price: float):
+def fetch_cloud_database_state(current_price: Optional[float]):
     """Pulls track record, portfolio equity, and reconciliation KPIs directly from Neon."""
     fallback_state = {
         "db_ok": False,
-        "db_ver": "Connecting / Offline",
+        "db_ver": "Offline",
         "db_lat": 0.0,
+        "db_error": "Neon database is unavailable.",
         "ticks_df": pd.DataFrame(),
         "rec_df": pd.DataFrame(),
-        "rec_kpis": {
-            "total_evaluated": 0, "total_reconciled": 0,
-            "win_rate_pct": 0.0, "directional_accuracy_pct": 0.0,
-            "mae_usd": 0.0, "mape_pct": 0.0,
-            "information_coefficient": 0.0, "information_coefficient_ic": 0.0,
-            "black_swans_filtered": 0, "accurate_count": 0
-        },
+        "rec_kpis": {},
         "port_df": pd.DataFrame(),
-        "port_kpis": {
-            "cash_balance": 10000.0, "btc_balance": 0.0,
-            "total_equity_usd": 10000.0, "cumulative_return_pct": 0.0,
-            "benchmark_btc_equity": 10000.0, "alpha_usd": 0.0,
-            "alpha_pct": 0.0, "drawdown_pct": 0.0, "total_trades": 0
-        },
+        "port_kpis": {},
         "latest_audit": None,
     }
     try:
@@ -559,13 +551,14 @@ def fetch_cloud_database_state(current_price: float):
         rec_df = get_reconciliation_history(limit=500)
         rec_kpis = get_reconciliation_kpis(lookback_hours=168)
         port_df = get_portfolio_history(limit=500)
-        port_kpis = get_portfolio_kpis(current_price=current_price)
+        port_kpis = get_portfolio_kpis(current_price=current_price) if current_price is not None else {}
         latest_audit = get_latest_council_audit()
 
         return {
             "db_ok": db_ok,
             "db_ver": db_ver,
             "db_lat": db_lat,
+            "db_error": None,
             "ticks_df": ticks_df,
             "rec_df": rec_df,
             "rec_kpis": rec_kpis,
@@ -573,7 +566,8 @@ def fetch_cloud_database_state(current_price: float):
             "port_kpis": port_kpis,
             "latest_audit": latest_audit,
         }
-    except Exception:
+    except Exception as exc:
+        fallback_state["db_error"] = f"{type(exc).__name__}: {exc}"
         return fallback_state
 
 
@@ -614,7 +608,11 @@ st.sidebar.subheader("System Status")
 
 # Fetch live market data (strictly confirmed closed hourly candles)
 live_market_df = fetch_live_market_candles()
-current_price = float(live_market_df["close"].iloc[-1]) if not live_market_df.empty else 83000.0
+current_price = (
+    float(live_market_df["close"].iloc[-1])
+    if not live_market_df.empty
+    else None
+)
 
 # Assess feed staleness / offline replay status
 is_stale_fallback, stale_age_hours = check_feed_staleness(live_market_df)
@@ -625,14 +623,23 @@ db_state = fetch_cloud_database_state(current_price=current_price)
 if db_state["db_ok"]:
     st.sidebar.success(f"Database: Connected ({db_state['db_lat']:.0f}ms)")
 else:
-    st.sidebar.error("Database: Offline (Local Fallback)")
+    st.sidebar.error("Database: Offline")
+    if db_state.get("db_error"):
+        st.sidebar.caption(db_state["db_error"])
 
 if is_stale_fallback:
-    st.sidebar.warning(f"Market Data: Offline Replay ({stale_age_hours:.0f}h old)")
+    source_label = (
+        f"Stale local replay ({stale_age_hours:.0f}h old)"
+        if not live_market_df.empty
+        else "Unavailable"
+    )
+    st.sidebar.warning(f"Market Data: {source_label}")
 elif not live_market_df.empty:
     st.sidebar.success("Market Data: Live (1h Confirmed Candles)")
 else:
     st.sidebar.error("Market Data: Offline")
+    if live_market_df.attrs.get("error"):
+        st.sidebar.caption(live_market_df.attrs["error"])
 
 try:
     from src.agents.market_analyst_agent import get_gemini_status
@@ -643,7 +650,6 @@ try:
         st.sidebar.info(_gem_info["label"])
 except Exception:
     pass
-st.sidebar.success("FastMCP Server: 4 Quant Tools Ready")
 
 with st.sidebar.expander("System Info", expanded=False):
     st.markdown(
@@ -658,67 +664,9 @@ with st.sidebar.expander("System Info", expanded=False):
 
 
 # =====================================================================================
-# TOP EXECUTIVE KPI BANNER & 1-SECOND WEBSOCKET RIBBON
+# TOP EXECUTIVE KPI BANNER
 # =====================================================================================
 st.title(APP_TITLE)
-
-# Client-Side 1-Second Binance WebSocket Ticker (0% Server Load)
-components.html(
-    """
-    <div style="background-color: #0E1117; border: 1px solid #1E2329; border-radius: 8px; padding: 10px 16px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #FFFFFF; display: flex; justify-content: space-between; align-items: center; box-sizing: border-box;">
-        <div style="display: flex; align-items: center; gap: 12px;">
-            <span style="font-size: 1.05rem; font-weight: 700; color: #F0B90B;">BTC/USDT</span>
-            <span id="price" style="font-size: 1.35rem; font-weight: 800; font-family: monospace; transition: color 0.15s ease;">$---.--</span>
-            <span id="change" style="font-size: 0.88rem; font-weight: 600; padding: 2px 6px; border-radius: 4px;">---%</span>
-        </div>
-        <div style="display: flex; gap: 16px; font-size: 0.82rem; color: #848E9C; align-items: center;">
-            <div>24h High: <span id="high" style="color: #EAECEF; font-weight: 600; font-family: monospace;">$---.--</span></div>
-            <div>24h Low: <span id="low" style="color: #EAECEF; font-weight: 600; font-family: monospace;">$---.--</span></div>
-            <div>24h Vol: <span id="vol" style="color: #EAECEF; font-weight: 600; font-family: monospace;">--- BTC</span></div>
-            <div style="display: flex; align-items: center; gap: 6px; margin-left: 8px;">
-                <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background-color: #0ECB81; box-shadow: 0 0 6px #0ECB81;"></span>
-                <span style="color: #0ECB81; font-weight: 600;">Binance WebSocket 1s</span>
-            </div>
-        </div>
-    </div>
-    <script>
-        const ws = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@ticker");
-        let lastPrice = 0;
-        ws.onmessage = function(event) {
-            const data = JSON.parse(event.data);
-            const price = parseFloat(data.c);
-            const change = parseFloat(data.P);
-            const high = parseFloat(data.h);
-            const low = parseFloat(data.l);
-            const vol = parseFloat(data.v);
-
-            const priceEl = document.getElementById("price");
-            const changeEl = document.getElementById("change");
-            const highEl = document.getElementById("high");
-            const lowEl = document.getElementById("low");
-            const volEl = document.getElementById("vol");
-
-            if (priceEl) {
-                priceEl.innerText = "$" + price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
-                if (lastPrice !== 0) {
-                    priceEl.style.color = price >= lastPrice ? "#0ECB81" : "#F6465D";
-                }
-                lastPrice = price;
-            }
-            if (changeEl) {
-                const isPos = change >= 0;
-                changeEl.innerText = (isPos ? "+" : "") + change.toFixed(2) + "%";
-                changeEl.style.color = isPos ? "#0ECB81" : "#F6465D";
-                changeEl.style.backgroundColor = isPos ? "rgba(14, 203, 129, 0.15)" : "rgba(246, 70, 93, 0.15)";
-            }
-            if (highEl) highEl.innerText = "$" + high.toLocaleString(undefined, {minimumFractionDigits: 2});
-            if (lowEl) lowEl.innerText = "$" + low.toLocaleString(undefined, {minimumFractionDigits: 2});
-            if (volEl) volEl.innerText = vol.toLocaleString(undefined, {maximumFractionDigits: 0}) + " BTC";
-        };
-    </script>
-    """,
-    height=60,
-)
 
 st.caption(APP_SUBTITLE)
 
@@ -726,67 +674,93 @@ st.caption(APP_SUBTITLE)
 kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
 
 # Calculate 24h price change
-price_24h_ago = float(live_market_df["close"].iloc[-24]) if len(live_market_df) >= 24 else current_price
-delta_24h_usd = current_price - price_24h_ago
+price_24h_ago = (
+    float(live_market_df["close"].iloc[-24])
+    if len(live_market_df) >= 24
+    else None
+)
+delta_24h_usd = (
+    current_price - price_24h_ago
+    if current_price is not None and price_24h_ago is not None
+    else None
+)
 
 with kpi1:
-    spot_label = "Bitcoin Price (Offline Replay)" if is_stale_fallback else "Bitcoin Price"
+    spot_label = "Bitcoin Price" if not is_stale_fallback else "Bitcoin Price (Replay)"
     st.metric(
         spot_label,
-        f"${current_price:,.2f}",
-        f"${delta_24h_usd:+,.2f} (24h)",
+        (
+            f"${current_price:,.2f}"
+            if current_price is not None and not is_stale_fallback
+            else "Unavailable"
+        ),
+        (
+            f"${delta_24h_usd:+,.2f} (24h)"
+            if delta_24h_usd is not None and not is_stale_fallback
+            else "Fresh candle required"
+        ),
         help="Latest confirmed 1-hour candle close price in USD; delta measures 24-hour price change in Dollars.",
     )
 
 with kpi2:
     audit = db_state["latest_audit"]
-    action_badge = audit.get("final_decision", "HOLD") if audit else "HOLD"
-    verdict = audit.get("risk_verdict", "APPROVED") if audit else "APPROVED"
+    action_badge = audit.get("final_decision") if audit else None
+    verdict = audit.get("risk_verdict") if audit else None
     st.metric(
         "AI Trade Decision",
-        f"{action_badge}",
-        "Risk Check: Passed" if verdict == "APPROVED" else "Risk Check: Blocked",
+        action_badge or "Unavailable",
+        (
+            "Risk Check: Passed" if verdict == "APPROVED"
+            else "Risk Check: Blocked" if verdict
+            else "Database audit required"
+        ),
         delta_color="off",
         help="Latest hourly trading decision (BUY, SELL, or HOLD) from the 2-Node Multi-Agent Council. Risk Critic confirms whether safety rules were APPROVED or VETOED.",
     )
 
 with kpi3:
     rec_kpis = db_state["rec_kpis"]
-    win_rate = float(
-        rec_kpis.get("directional_accuracy_pct")
-        if rec_kpis.get("directional_accuracy_pct") is not None
-        else rec_kpis.get("win_rate_pct", 0.0)
-    )
-    total_eval = int(
-        rec_kpis.get("total_reconciled")
-        if rec_kpis.get("total_reconciled") is not None
-        else rec_kpis.get("total_evaluated", 0)
-    )
-    lifetime_eval = int(rec_kpis.get("total_lifetime_evaluated", total_eval))
+    win_rate_value = rec_kpis.get("directional_accuracy_pct")
+    if win_rate_value is None:
+        win_rate_value = rec_kpis.get("win_rate_pct")
+    total_eval_value = rec_kpis.get("total_reconciled")
+    if total_eval_value is None:
+        total_eval_value = rec_kpis.get("total_evaluated")
+    lifetime_eval_value = rec_kpis.get("total_lifetime_evaluated", total_eval_value)
     st.metric(
         "Direction Accuracy (7d)",
-        f"{win_rate:.1f}%",
-        f"{total_eval}h rolling ({lifetime_eval} total)",
+        f"{float(win_rate_value):.1f}%" if win_rate_value is not None else "Unavailable",
+        (
+            f"{int(total_eval_value)}h rolling ({int(lifetime_eval_value)} total)"
+            if total_eval_value is not None and lifetime_eval_value is not None
+            else "Database required"
+        ),
         delta_color="off",
-        help=f"Percentage of evaluated 1-hour predictions over the last 7 days (168 hours lookback) where the model's forecasted direction matched the realized market close. Total lifetime evaluated predictions in cloud database: {lifetime_eval}.",
+        help=(
+            "Percentage of evaluated 1-hour predictions over the last 7 days "
+            "(168 hours lookback) where the forecasted direction matched the "
+            "realized market close."
+        ),
     )
 
 with kpi4:
     port = db_state["port_kpis"]
-    equity = float(port.get("total_equity_usd", 10000.0))
+    equity = port.get("total_equity_usd")
     st.metric(
         "Paper Account Value",
-        f"${equity:,.2f}",
-        f"${equity - 10000.0:+,.2f} vs $10k start",
+        f"${float(equity):,.2f}" if equity is not None else "Unavailable",
+        "Database required" if equity is None else f"${float(equity) - 10000.0:+,.2f} vs $10k start",
         help="Current marked-to-market value of the simulated $10,000 paper-trading account (Cash + Bitcoin holdings) and profit/loss in Dollars.",
     )
 
 with kpi5:
-    alpha = float(port.get("alpha_usd", 0.0))
+    alpha = port.get("alpha_usd")
     st.metric(
         "vs. Holding Bitcoin",
-        f"${alpha:+,.2f}",
-        "Ahead of Buy & Hold" if alpha >= 0 else "Behind Buy & Hold",
+        f"${float(alpha):+,.2f}" if alpha is not None else "Unavailable",
+        (
+            "Ahead of Buy & Hold" if float(alpha) >= 0 else "Behind Buy & Hold"
+        ) if alpha is not None else "Database required",
         help="Dollar difference between the simulated paper portfolio and a simple Bitcoin Buy & Hold benchmark started at the exact same time ($10k base).",
     )
 
@@ -794,20 +768,18 @@ st.markdown("---")
 
 
 # =====================================================================================
-# 5 INSTITUTIONAL TABS
+# 3 evidence-first dashboard sections
 # =====================================================================================
 forecast_result = None
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "Live Price & 1h Prediction",
-    "AI Trade Decision",
-    "Past Prediction Accuracy",
-    "$10,000 Paper Trading",
-    "Why the Model Predicted This",
+tab1, tab2, tab3 = st.tabs([
+    "Overview",
+    "Model Evidence",
+    "Paper Portfolio",
 ])
 
 
 # -------------------------------------------------------------------------------------
-# TAB 1: LIVE CANDLESTICK TERMINAL
+# TAB 1: OVERVIEW
 # -------------------------------------------------------------------------------------
 with tab1:
     st.subheader("Live Bitcoin (BTC/USDT) 1-Hour Chart")
@@ -1017,34 +989,30 @@ def format_risk_levels(
 
 
 # -------------------------------------------------------------------------------------
-# TAB 2: MULTI-AGENT COUNCIL (LANGGRAPH)
+# TAB 2: MODEL EVIDENCE
 # -------------------------------------------------------------------------------------
 with tab2:
-    st.subheader("AI Trade Decision & Risk Check")
-    st.caption("Multi-agent risk validation: Strategist proposes an action and Risk Critic checks safety limits.")
+    st.subheader("Model Evidence & Risk Review")
+    st.caption("Review the live council decision, delayed ground-truth accuracy, and model explanations.")
+    if current_price is None or is_stale_fallback:
+        st.warning("Council unavailable: a fresh confirmed market candle is required before any decision can be calculated.")
+        st.stop()
+    if not db_state["db_ok"]:
+        st.warning("Council unavailable: the persisted database state is offline, so portfolio and audit evidence cannot be verified.")
+        st.stop()
 
-    # Deliberation Trigger & Stress Testing Scenarios
-    c_btn1, c_btn2, c_btn3, c_btn4 = st.columns(4)
-    run_deliberation = False
-    scenario_selected = "live"
-
-    if c_btn1.button("Check Live Market", use_container_width=True):
-        scenario_selected = "live"
-        run_deliberation = True
-    if c_btn2.button("Test: Strong Up Move (Buy)", use_container_width=True):
-        scenario_selected = "bullish"
-        run_deliberation = True
-    if c_btn3.button("Test: Big Price Swing (Blocked)", use_container_width=True):
-        scenario_selected = "vol_spike"
-        run_deliberation = True
-    if c_btn4.button("Test: Small Dollar Move (Hold)", use_container_width=True):
-        scenario_selected = "chop"
-        run_deliberation = True
+    # Only deliberate on observed market data; synthetic scenarios are not evidence.
+    run_deliberation = st.button(
+        "Check current live market",
+        use_container_width=True,
+        disabled=forecast_result is None or is_stale_fallback,
+        help="Runs the council only when the latest confirmed market feed is fresh and model inference succeeded.",
+    )
 
     if run_deliberation:
         with st.spinner("Convening Strategist and Risk Critic nodes..."):
             m_data, t_data, f_data = build_council_scenario_payload(
-                scenario_selected=scenario_selected,
+                scenario_selected="live",
                 current_price=current_price,
                 live_forecast=forecast_result,
                 live_df=live_market_df,
@@ -1058,7 +1026,7 @@ with tab2:
                 ml_forecast=f_data,
             )
 
-    # Use simulated/live state if triggered, otherwise fallback to latest audit from database
+    # Use the live session result or the latest persisted audit from the database.
     council_state = st.session_state.get("council_state")
     if not council_state and db_state.get("latest_audit"):
         audit = db_state["latest_audit"]
@@ -1495,9 +1463,9 @@ def resolve_tab3_reconciliation_kpis(
 
 
 # -------------------------------------------------------------------------------------
-# TAB 3: LIVE TRACK RECORD & DELAYED RECONCILIATION (NEON DB SSOT)
+# LIVE TRACK RECORD & DELAYED RECONCILIATION (NEON DB SSOT)
 # -------------------------------------------------------------------------------------
-with tab3:
+with tab2:
     st.subheader("Past Prediction Accuracy (Checked 1 Hour Later)")
     st.caption("Realized model accuracy evaluated 1 hour later against actual Bitcoin closing price.")
 
@@ -1749,9 +1717,9 @@ with tab3:
 
 
 # -------------------------------------------------------------------------------------
-# TAB 4: $10,000 PAPER TRADING PORTFOLIO LEDGER (NEON DB SSOT)
+# TAB 3: PAPER PORTFOLIO
 # -------------------------------------------------------------------------------------
-with tab4:
+with tab3:
     st.subheader("$10,000 Paper Trading Account")
     st.caption(
         f"Simulated trading starting with $10,000 virtual cash (includes trading fees and price slippage). "
@@ -1762,11 +1730,11 @@ with tab4:
     port_df = db_state["port_df"]
     port_kpis = db_state["port_kpis"]
 
-    total_equity = float(port_kpis.get("total_equity_usd", 10000.0) or 10000.0)
-    cash_balance = float(port_kpis.get("cash_balance", 10000.0) or 10000.0)
-    btc_balance = float(port_kpis.get("btc_balance", 0.0) or 0.0)
-    benchmark_btc_equity = float(port_kpis.get("benchmark_btc_equity", 10000.0) or 10000.0)
-    alpha_usd = float(port_kpis.get("alpha_usd", 0.0) or 0.0)
+    total_equity = port_kpis.get("total_equity_usd")
+    cash_balance = port_kpis.get("cash_balance")
+    btc_balance = port_kpis.get("btc_balance")
+    benchmark_btc_equity = port_kpis.get("benchmark_btc_equity")
+    alpha_usd = port_kpis.get("alpha_usd")
 
     # Clear top-level Spot Trade Counter Banner in Tab 4
     t4_buys = 0
@@ -1778,44 +1746,64 @@ with tab4:
         t4_sells = int((act_series == "SELL").sum())
         t4_holds = int((act_series == "HOLD").sum())
 
-    hurdle_usd_t4 = current_price * (MIN_HURDLE_PCT / 100.0)
-    if btc_balance > 1e-8:
+    hurdle_usd_t4 = (
+        current_price * (MIN_HURDLE_PCT / 100.0)
+        if current_price is not None
+        else None
+    )
+    if btc_balance is None:
+        st.warning("Paper portfolio metrics are unavailable because the database snapshot could not be loaded.")
+    elif btc_balance > 1e-8:
         st.success(
             f"Spot Trade Tracker: ACTIVE POSITION OPEN ({btc_balance:.4f} BTC held) | "
             f"Completed Spot Trades: {t4_buys} Buys, {t4_sells} Sells ({t4_holds} hours held)"
         )
     else:
+        hurdle_message = (
+            f"Why no Buy yet? The predicted 1h move must clear the ~${hurdle_usd_t4:,.0f} "
+            f"({MIN_HURDLE_PCT:.2f}%) fee hurdle."
+            if hurdle_usd_t4 is not None
+            else "The fee hurdle will be evaluated after a live market candle is available."
+        )
         st.info(
-            f"Spot Trade Tracker: 100% IN CASH ($10,000 protected) — {t4_buys} Buys, {t4_sells} Sells, {t4_holds} Hours Skipped | "
-            f"Why no Buy yet? Model 1's predicted 1h moves are smaller than the ~${hurdle_usd_t4:,.0f} ({MIN_HURDLE_PCT:.2f}%) fee cost."
+            f"Spot Trade Tracker: 100% IN CASH — {t4_buys} Buys, {t4_sells} Sells, "
+            f"{t4_holds} Hours Skipped | {hurdle_message}"
         )
 
     p_col1, p_col2, p_col3, p_col4, p_col5 = st.columns(5)
     with p_col1:
         st.metric(
             "Account Value",
-            f"${total_equity:,.2f}",
-            f"${total_equity - 10000.0:+,.2f} total",
+            f"${float(total_equity):,.2f}" if total_equity is not None else "Unavailable",
+            (
+                f"${float(total_equity) - 10000.0:+,.2f} total"
+                if total_equity is not None
+                else "Database required"
+            ),
         )
     with p_col2:
         st.metric(
             "Available Cash",
-            f"${cash_balance:,.2f}",
+            f"${float(cash_balance):,.2f}" if cash_balance is not None else "Unavailable",
         )
     with p_col3:
         st.metric(
             "Bitcoin Held",
-            f"{btc_balance:.4f} BTC",
+            f"{float(btc_balance):.4f} BTC" if btc_balance is not None else "Unavailable",
         )
     with p_col4:
         st.metric(
             "If You Just Held BTC",
-            f"${benchmark_btc_equity:,.2f}",
+            (
+                f"${float(benchmark_btc_equity):,.2f}"
+                if benchmark_btc_equity is not None
+                else "Unavailable"
+            ),
         )
     with p_col5:
         st.metric(
             "Difference vs. Holding BTC",
-            f"${alpha_usd:+,.2f}",
+            f"${float(alpha_usd):+,.2f}" if alpha_usd is not None else "Unavailable",
         )
 
     # Strategy Equity Curve vs Buy & Hold Benchmark
@@ -1914,9 +1902,9 @@ with tab4:
 
 
 # -------------------------------------------------------------------------------------
-# TAB 5: WHY THE MODEL PREDICTED THIS (TREESHAP ATTRIBUTION & TECHNICAL DETAILS)
+# TREESHAP ATTRIBUTION & TECHNICAL DETAILS
 # -------------------------------------------------------------------------------------
-with tab5:
+with tab2:
     st.subheader("Top Signals Behind This Hour's Prediction")
     st.caption("TreeSHAP feature attributions and walk-forward chronological evaluation boundaries.")
 
