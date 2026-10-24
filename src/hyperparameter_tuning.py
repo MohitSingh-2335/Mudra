@@ -290,10 +290,18 @@ def run_tuning(
         })
         mlflow.xgboost.log_model(best_xgbc, artifact_path="model")
 
-    clf_save_path = Path(CLASSIFIER_MODEL_PATH)
-    clf_save_path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(best_xgbc, clf_save_path)
-    print(f"[SUCCESS] Tuned classifier saved to: '{clf_save_path}'")
+    from src.model_loader import save_production_models
+    save_production_models(
+        clf_model=best_xgbc,
+        reg_model=best_xgbr,
+        features=CLASSIFIER_FEATURES,
+        version="xgb_v1.1.0_tuned",
+        metrics={
+            "tuned_test_accuracy": round(test_acc, 4),
+            "tuned_test_rmse": round(test_rmse, 2),
+            "accuracy_gain_pct": round(acc_gain, 2),
+        },
+    )
 
     results["classifier"] = {
         "best_params": best_clf_params,
