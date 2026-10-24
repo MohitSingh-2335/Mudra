@@ -222,16 +222,14 @@ def extract_features_for_inference(df: pd.DataFrame) -> dict:
         val = latest[col]
         out[col] = int(val) if col in {"hour", "dayofweek", "day"} else float(val)
 
-    # Preserve intermediate technical indicator statistics for telemetry and diagnostics
-    telemetry_cols = [
-        "Rolling_Mean_Close", "Rolling_Std_Close", "rolling_max_6h", "rolling_min_6h",
-        "vol_1h", "vol_mean_6h", "vol_std_6h", "close_lag_1", "volume_lag_1", "rsi", "macd",
-        "candle_body_pct", "hl_range_pct", "sma_10_dist_pct", "ema_10_dist_pct", "ema_30_dist_pct",
-        "bb_width_pct", "bb_pct_b"
-    ]
-    for col in telemetry_cols:
-        if col in latest and col not in out:
-            out[col] = float(latest[col])
+    # Preserve all computed feature columns from featured_df for dynamic multi-model serving
+    for col in featured_df.columns:
+        if col not in out and col in latest and pd.notna(latest[col]):
+            val = latest[col]
+            if isinstance(val, (int, np.integer)):
+                out[col] = int(val)
+            elif isinstance(val, (float, np.floating)):
+                out[col] = float(val)
 
     # Raw candlestick values
     out["close"] = float(latest["close"])
