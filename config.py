@@ -9,7 +9,7 @@ import json
 import math
 from decimal import Decimal
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -300,6 +300,65 @@ if os.path.exists(MODEL_MANIFEST_PATH):
     except Exception as _err:
         pass
 
+# Universal UI Display Constants & Feature Human-Readable Names
+APP_TITLE: str = "Mudra — Bitcoin Price Prediction & Model Monitoring"
+APP_SUBTITLE: str = "Live BTC/USDT Price, Next-Hour ML Forecast & Multi-Model Evaluation"
+
+FEATURE_DISPLAY_NAMES: Dict[str, str] = {
+    "taker_buy_ratio": "Buyer vs. Seller Volume",
+    "taker_buy_ratio_mean_6h": "6-Hour Average Buyer Ratio",
+    "vol_mean_6h": "6-Hour Average Price Swing ($)",
+    "vol_std_6h": "6-Hour Swing Change ($)",
+    "vol_max_6h": "Largest 1h Swing in Last 6h ($)",
+    "vol_min_6h": "Smallest 1h Swing in Last 6h ($)",
+    "vol_1h": "1-Hour High–Low Price Range ($)",
+    "Volatility": "Hourly Price Volatility ($)",
+    "high_low_spread": "1-Hour High–Low Price Range ($)",
+    "Price Change": "1-Hour Price Change ($)",
+    "close_open_diff": "1-Hour Open-to-Close Difference ($)",
+    "close_lag_1": "Previous Hour Closing Price ($)",
+    "volume_lag_1": "Previous Hour Trading Volume",
+    "Rolling_Mean_Close": "10-Hour Moving Average Price ($)",
+    "Rolling_Std_Close": "10-Hour Price Volatility ($)",
+    "return_mean_6h": "6-Hour Average Return %",
+    "return_std_6h": "6-Hour Return Volatility %",
+    "return_1h": "1-Hour Price Trend %",
+    "return_3h": "3-Hour Price Trend %",
+    "return_6h": "6-Hour Price Trend %",
+    "rolling_max_6h": "6-Hour Rolling Highest Price ($)",
+    "rolling_min_6h": "6-Hour Rolling Lowest Price ($)",
+    "price_volatility_interaction": "Price x Volatility Interaction",
+    "rsi": "Price Momentum (RSI)",
+    "macd": "Trend Direction (MACD)",
+    "macd_signal": "MACD Signal Line",
+    "macd_hist": "MACD Histogram Divergence",
+    "bb_high": "Upper Bollinger Band ($)",
+    "bb_low": "Lower Bollinger Band ($)",
+    "bb_mid": "Bollinger Middle Basis ($)",
+    "ema_10": "10-Hour Exponential Moving Average ($)",
+    "ema_20": "20-Hour Exponential Moving Average ($)",
+    "ema_30": "30-Hour Exponential Moving Average ($)",
+    "ema_50": "50-Hour Exponential Moving Average ($)",
+    "ema_10_30_diff": "Fast vs. Slow EMA Trend Spread ($)",
+    "volume": "Trading Volume",
+    "Volume_Change": "Hourly Volume Growth Rate",
+    "trades_mean_6h": "6-Hour Average Number of Trades",
+    "number_of_trades": "Number of Trades",
+    "fng_value": "Market Sentiment (Fear & Greed)",
+    "fng_mean_3d": "3-Day Average Sentiment (Fear & Greed)",
+    "onchain_num_tx_change": "On-Chain Transaction Growth Rate %",
+    "onchain_hash_rate_change": "Bitcoin Network Hashrate Change %",
+    "onchain_miners_revenue_change": "Miner Revenue Growth Rate %",
+    "hour": "Hour of Day (UTC)",
+    "dayofweek": "Day of Week",
+    "day": "Day of Month",
+    "hour_sin": "Cyclical Hour (Sine)",
+    "hour_cos": "Cyclical Hour (Cosine)",
+    "day_sin": "Cyclical Day (Sine)",
+    "day_cos": "Cyclical Day (Cosine)",
+    "high_low_ratio": "High-to-Low Ratio",
+}
+
 __all__ = [
     "BASE_DIR",
     "INITIAL_CAPITAL_USD",
@@ -354,4 +413,7 @@ __all__ = [
     "EXCHANGE_RETRY_TOTAL_DEADLINE",
     "REGRESSOR_FEATURES",
     "CLASSIFIER_FEATURES",
+    "APP_TITLE",
+    "APP_SUBTITLE",
+    "FEATURE_DISPLAY_NAMES",
 ]
