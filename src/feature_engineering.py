@@ -91,6 +91,16 @@ def create_features(
     df["ema_10"] = df["close"].ewm(span=10).mean()
     df["ema_30"] = df["close"].ewm(span=30).mean()
 
+    # Stationary percentage ratios (scale-invariant across market regimes)
+    df["candle_body_pct"] = (df["close"] - df["open"]) / df["open"]
+    df["hl_range_pct"] = (df["high"] - df["low"]) / df["close"]
+    df["sma_10_dist_pct"] = (df["close"] - df["Rolling_Mean_Close"]) / df["Rolling_Mean_Close"]
+    df["ema_10_dist_pct"] = (df["close"] - df["ema_10"]) / df["ema_10"]
+    df["ema_30_dist_pct"] = (df["close"] - df["ema_30"]) / df["ema_30"]
+    df["bb_width_pct"] = (df["bb_high"] - df["bb_low"]) / df["close"]
+    bb_diff = (df["bb_high"] - df["bb_low"]).replace(0, np.nan)
+    df["bb_pct_b"] = ((df["close"] - df["bb_low"]) / bb_diff).fillna(0.5)
+
     # Lag and interaction features
     df["close_lag_1"] = df["close"].shift(1)
     df["volume_lag_1"] = df["volume"].shift(1)
@@ -103,6 +113,9 @@ def create_features(
     else:
         df["taker_buy_ratio"] = 0.5
         df["taker_buy_ratio_mean_6h"] = 0.5
+
+    if "taker_buy_base_volume" not in df.columns:
+        df["taker_buy_base_volume"] = 0.0
 
     if "number_of_trades" in df.columns and df["number_of_trades"].notna().any():
         df["number_of_trades"] = pd.to_numeric(df["number_of_trades"], errors="coerce").fillna(0.0)
@@ -119,6 +132,11 @@ def create_features(
         df["fng_mean_3d"] = 50.0
 
     # On-chain network dynamics (day-over-day changes, preserve upstream daily changes if present)
+    if "onchain_num_tx" not in df.columns:
+        df["onchain_num_tx"] = 0.0
+    if "onchain_hash_rate" not in df.columns:
+        df["onchain_hash_rate"] = 0.0
+
     if "onchain_num_tx_change" not in df.columns:
         if "onchain_num_tx" in df.columns:
             df["onchain_num_tx_change"] = df["onchain_num_tx"].pct_change(fill_method=None)
@@ -136,6 +154,9 @@ def create_features(
             df["onchain_miners_revenue_change"] = df["onchain_miners_revenue_usd"].pct_change(fill_method=None)
         else:
             df["onchain_miners_revenue_change"] = 0.0
+
+    # Replace any infinite values from zero divisions
+    df = df.replace([np.inf, -np.inf], np.nan)
 
     # Clean rolling window NaNs and reset index
     if drop_na:
@@ -194,6 +215,17 @@ def extract_features_for_inference(df: pd.DataFrame) -> dict:
     for col in all_required_features:
         val = latest[col]
         out[col] = int(val) if col in {"hour", "dayofweek", "day"} else float(val)
+
+    # Preserve intermediate technical indicator statistics for telemetry and diagnostics
+    telemetry_cols = [
+        "Rolling_Mean_Close", "Rolling_Std_Close", "rolling_max_6h", "rolling_min_6h",
+        "vol_1h", "vol_mean_6h", "vol_std_6h", "close_lag_1", "volume_lag_1", "rsi", "macd",
+        "candle_body_pct", "hl_range_pct", "sma_10_dist_pct", "ema_10_dist_pct", "ema_30_dist_pct",
+        "bb_width_pct", "bb_pct_b"
+    ]
+    for col in telemetry_cols:
+        if col in latest and col not in out:
+            out[col] = float(latest[col])
 
     # Raw candlestick values
     out["close"] = float(latest["close"])
