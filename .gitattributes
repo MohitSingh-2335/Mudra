@@ -1,0 +1,4 @@
+# GitHub Linguist Overrides
+# Treat Jupyter Notebooks as documentation so repository language statistics accurately reflect Python
+*.ipynb linguist-documentation
+*.ipynb linguist-detectable=false
