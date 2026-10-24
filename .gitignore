@@ -21,6 +21,7 @@ data/processed/*
 # Trained model and explainability artifacts (keep production models & SHAP plots)
 artifacts/*
 !artifacts/models/
+!artifacts/models/model_manifest.json
 !artifacts/models/best_regressor_model.pkl
 !artifacts/models/best_classifier_model.pkl
 !artifacts/shap_*.png
@@ -42,8 +43,7 @@ Thumbs.db
 .vscode/
 
 # Local planning documents that are not part of the public source repository
-archive/planning/*.docx
-archive/planning/*.txt
+archive/
 docs/reference/*.docx
 docs/reference/BOT-requirement.txt
 aiml_workspace/Research_material/
