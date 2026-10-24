@@ -25,6 +25,7 @@ __all__ = [
     "load_verified_model",
     "load_production_models",
     "save_production_models",
+    "get_registered_models",
 ]
 
 SHA256_HEX_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -178,4 +179,64 @@ def save_production_models(
     print(f"Regressor SHA256:  {reg_hash}")
     print(f"Metrics: {computed_metrics}")
     return manifest
+
+
+def get_registered_models() -> Dict[str, Dict[str, Any]]:
+    """
+    Discovers all registered model manifests in artifacts/models/ and loads model packages dynamically.
+    Returns a dictionary of model packages keyed by model_version.
+    """
+    from config import MODELS_DIR, ACTIVE_MODEL_VERSION, REGRESSOR_MODEL_PATH, CLASSIFIER_MODEL_PATH
+
+    models_dir = Path(MODELS_DIR)
+    registered = {}
+
+    if not models_dir.exists():
+        return registered
+
+    # 1. Discover all manifest JSON files in the models directory
+    manifest_files = sorted(list(models_dir.glob("*manifest*.json")))
+
+    for m_file in manifest_files:
+        try:
+            with open(m_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            version = data.get("model_version")
+            if not version:
+                continue
+
+            # 2. Resolve artifact paths for classifier and regressor
+            clf_path = data.get("classifier_artifact_path") or CLASSIFIER_MODEL_PATH
+            reg_path = data.get("regressor_artifact_path") or REGRESSOR_MODEL_PATH
+
+            if not Path(clf_path).is_file() or not Path(reg_path).is_file():
+                continue
+
+            # 3. Load model checkpoints with CPU device execution
+            clf_model = joblib.load(clf_path)
+            reg_model = joblib.load(reg_path)
+
+            if hasattr(clf_model, "set_params"):
+                clf_model.set_params(device="cpu")
+            if hasattr(reg_model, "set_params"):
+                reg_model.set_params(device="cpu")
+
+            features = data.get("features") or data.get("classifier_features") or []
+
+            registered[version] = {
+                "model_version": version,
+                "status": data.get("status", "ACTIVE" if version == ACTIVE_MODEL_VERSION else "CANDIDATE"),
+                "manifest_path": str(m_file),
+                "classifier": clf_model,
+                "regressor": reg_model,
+                "features": features,
+                "metrics": data.get("metrics", {}),
+                "manifest_data": data,
+            }
+        except Exception:
+            continue
+
+    return registered
+
 
