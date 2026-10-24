@@ -352,11 +352,10 @@ def get_reconciliation_summary(session: Session, limit: int = 168, model_version
     Returns:
         Dictionary containing win rate, MAE, MAPE, IC, sample counts, and applied model_version filter.
     """
-    # Query total lifetime evaluations across all records in Neon DB
-    total_lifetime = session.execute(select(func.count(Reconciliation.id))).scalar() or 0
-
     # Build query for the requested window and model
     records = []
+    total_lifetime = 0
+
     if model_version is not None and model_version != "All Models":
         # First check if candidate predictions exist in ModelPrediction
         try:
@@ -393,7 +392,17 @@ def get_reconciliation_summary(session: Session, limit: int = 168, model_version
             if limit is not None and limit > 0:
                 stmt = stmt.limit(limit)
             records = session.execute(stmt).scalars().all()
+            if records:
+                total_lifetime = session.execute(
+                    select(func.count(Reconciliation.id))
+                    .join(MarketTick, Reconciliation.tick_id == MarketTick.id)
+                    .where(MarketTick.model_version == model_version)
+                ).scalar() or len(records)
+            else:
+                total_lifetime = 0
     else:
+        # Unfiltered: query total lifetime evaluations across all records in Neon DB
+        total_lifetime = session.execute(select(func.count(Reconciliation.id))).scalar() or 0
         stmt = (
             select(Reconciliation)
             .order_by(desc(Reconciliation.timestamp))
