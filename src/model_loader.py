@@ -3,11 +3,12 @@ Mudra Cryptographic Model Loader & Integrity Verification Service.
 Enforces fail-closed SHA-256 checksum verification before deserializing model artifacts.
 """
 import io
+import json
 import hashlib
 import os
 from pathlib import Path
 import re
-from typing import Any, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 import joblib
 
 from config import (
@@ -23,6 +24,7 @@ __all__ = [
     "verify_model_artifact",
     "load_verified_model",
     "load_production_models",
+    "save_production_models",
 ]
 
 SHA256_HEX_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -105,3 +107,75 @@ def load_production_models() -> Tuple[Any, Any]:
     if hasattr(clf_model, "set_params"):
         clf_model.set_params(device="cpu")
     return reg_model, clf_model
+
+
+def save_production_models(
+    clf_model: Any,
+    reg_model: Any,
+    features: List[str],
+    version: str = "xgb_v1.1.0",
+    holdout_df: Optional[Any] = None,
+    metrics: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Saves trained models to configured paths, calculates SHA-256 hashes,
+    evaluates holdout metrics dynamically if holdout_df is provided,
+    and updates model_manifest.json as the Single Source of Truth.
+    """
+    from config import (
+        REGRESSOR_MODEL_PATH,
+        CLASSIFIER_MODEL_PATH,
+        MODEL_MANIFEST_PATH,
+        MODELS_DIR,
+    )
+    # Ensure target artifacts directory exists
+    os.makedirs(MODELS_DIR, exist_ok=True)
+
+    # 1. Save model weights to disk
+    joblib.dump(clf_model, CLASSIFIER_MODEL_PATH)
+    joblib.dump(reg_model, REGRESSOR_MODEL_PATH)
+
+    # 2. Compute cryptographic SHA-256 checksums automatically
+    clf_hash = compute_file_sha256(CLASSIFIER_MODEL_PATH)
+    reg_hash = compute_file_sha256(REGRESSOR_MODEL_PATH)
+
+    # 3. Calculate real holdout metrics dynamically
+    computed_metrics: Dict[str, Any] = {}
+    if holdout_df is not None:
+        if "Target_Movement" in holdout_df.columns:
+            from sklearn.metrics import accuracy_score, log_loss
+            y_true_dir = holdout_df["Target_Movement"].astype(int).values
+            probs = clf_model.predict_proba(holdout_df[features])[:, 1]
+            computed_metrics["holdout_accuracy"] = round(float(accuracy_score(y_true_dir, (probs >= 0.5).astype(int))), 4)
+            computed_metrics["holdout_log_loss"] = round(float(log_loss(y_true_dir, probs)), 4)
+        if "Target_Return" in holdout_df.columns:
+            from sklearn.metrics import mean_absolute_error
+            y_true_ret = holdout_df["Target_Return"].values
+            preds_ret = reg_model.predict(holdout_df[features])
+            computed_metrics["holdout_mae"] = round(float(mean_absolute_error(y_true_ret, preds_ret)), 6)
+    if metrics:
+        computed_metrics.update(metrics)
+
+    # 4. Build metadata manifest for automated lineage tracking
+    manifest = {
+        "model_version": version,
+        "feature_schema_version": f"{version}_{len(features)}stationary",
+        "features": list(features),
+        "classifier_features": list(features),
+        "regressor_features": list(features),
+        "classifier_sha256": clf_hash,
+        "regressor_sha256": reg_hash,
+        "metrics": computed_metrics,
+    }
+
+    # 5. Serialize manifest to disk
+    with open(MODEL_MANIFEST_PATH, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
+    print(f"[SUCCESS] Exported {version} to {MODELS_DIR} successfully!")
+    print(f"[MANIFEST] Updated {MODEL_MANIFEST_PATH}")
+    print(f"Classifier SHA256: {clf_hash}")
+    print(f"Regressor SHA256:  {reg_hash}")
+    print(f"Metrics: {computed_metrics}")
+    return manifest
+
