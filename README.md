@@ -3,9 +3,9 @@
 
 [![CI/CD Pipeline](https://github.com/MohitSingh-2335/Mudra/actions/workflows/ci.yml/badge.svg)](https://github.com/MohitSingh-2335/Mudra/actions/workflows/ci.yml)
 [![Hourly Worker](https://github.com/MohitSingh-2335/Mudra/actions/workflows/hourly_worker.yml/badge.svg)](https://github.com/MohitSingh-2335/Mudra/actions/workflows/hourly_worker.yml)
-[![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![XGBoost](https://img.shields.io/badge/XGBoost-2.1-EB5E28)](https://xgboost.readthedocs.io/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![XGBoost](https://img.shields.io/badge/XGBoost-2.0-EB5E28)](https://xgboost.readthedocs.io/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.111-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 
 **Live Streamlit Monitoring Dashboard:** [mudra-quant-terminal.streamlit.app](https://mudra-quant-terminal.streamlit.app/)
@@ -131,7 +131,7 @@ On the 6,998-hour out-of-sample holdout (`2025-09-17 19:00 UTC` to `2026-07-06 0
 | **Bitcoin Buy & Hold Benchmark** | `0.00%` | 1 | `100.00%` | `$5,459.14` | `-45.41%` | Bear-market benchmark |
 | **Unfiltered Classifier (`P(up) > 0.50`)** | `0.10%` (`0.20%` RT) | 1,196 | `~48.0%` | `$753.00` | `-92.47%` | Destroyed by fee churn |
 | **Return-Filtered (`E[r] > 0.055%`, Code Default)** | `0.07%` (`0.14%` RT) | 105 | **3.57%** (`96.43%` in cash) | `$8,234.12` | `-17.66%` | **Cash preservation (NOT alpha)**; `0.055%` cutoff tuned post-hoc |
-| **Legacy Friction Simulation (`app.py` Tab 5)** | `0.15%` (`0.30%` RT) | 105 | **3.57%** (`96.43%` in cash) | `$8,831.00` *(historical split)* | `-11.69%` | Historical Phase 1 reference run |
+| **Legacy Friction Simulation (Historical Reference)** | `0.15%` (`0.30%` RT) | 105 | **3.57%** (`96.43%` in cash) | `$8,831.00` *(historical split)* | `-11.69%` | Historical Phase 1 reference run |
 
 > **Why "-17.66% vs. -45.41%" is Cash Preservation, Not Alpha:**
 > Earlier drafts of this README described the `+27.75 percentage point` difference between `-17.66%` and `-45.41%` as "Alpha." That framing was incorrect. Sitting in cash **96.43% of the time** during a `-45.41%` drawdown naturally avoids most of the crash (a 100% cash portfolio returns `0.00%` and beats Buy & Hold by `+45.41 pp`). On the `3.57%` of hours when the model actually entered the market, net return after `0.07%`/side friction was negative (`-17.66%`), and the `0.055%` return filter was selected on the holdout set.
@@ -174,7 +174,7 @@ Although the underlying 1-hour ML signal has no durable post-fee edge, the repos
 │  ├── Neon PostgreSQL (9 Tables): Predictions, Paper Ledger, Model Registry  │
 │  ├── T+1h Reconciliation Engine: Pairs past forecasts with realized candles │
 │  ├── FastAPI Backend (src/api/main.py): REST endpoints + Pydantic schemas   │
-│  └── Streamlit UI (app.py): 5-tab live monitoring & governance dashboard    │
+│  └── Streamlit UI (app.py): 3-tab live monitoring & governance dashboard    │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -190,15 +190,15 @@ Although the underlying 1-hour ML signal has no durable post-fee edge, the repos
      5. **Conviction Floor:** `conviction_score >= 4` (out of 10).
 3. **Why a 9-Table PostgreSQL Schema (`src/database/models.py`)?**
    - Designed to model a multi-version MLOps audit trail on **Neon Serverless PostgreSQL** (with automatic SQLite fallback in CI/local runs):
-     1. `predictions`: Stores hourly forecasts, features, and realized `T+1h` outcomes.
-     2. `agent_decisions`: Logs Strategist & Risk Critic state, veto reasons, and risk levels.
-     3. `paper_portfolio`: Tracks virtual cash, BTC holdings, and PostgreSQL advisory lock safety (`PORTFOLIO_ADVISORY_LOCK_ID = 888001`).
-     4. `trade_ledger`: Immutable paper-trade execution log with fee and slippage breakdowns.
-     5. `reconciliation_logs`: Audit trail of `T+1h` forecast-vs-actual evaluations.
-     6. `model_registry`: Tracks active (`xgb_onnx_v1.0.0`), candidate (`xgb_v2.0.0`), and rejected (`p1_controlled_candidate_v1`) model metadata.
-     7. `backtest_runs`: Stores historical walk-forward and holdout simulation summaries.
-     8. `system_heartbeats`: Tracks hourly worker liveness and latency.
-     9. `forecast_error_investigations`: Stores post-mortem root-cause notes when reconciled predictions miss direction.
+     1. `market_ticks`: Stores canonical 1-hour OHLCV candles, 39 features JSON, and primary model inference outputs.
+     2. `api_telemetry`: Observability table tracking external API calls, latency, rate limits, and token cost quotas.
+     3. `council_audits`: Immutable audit trail for multi-agent deliberations, strategist actions, risk verdicts, and veto reasons.
+     4. `reconciliations`: Ground-truth delayed reconciliation ledger with residual error decomposition and Black Swan outlier isolation.
+     5. `paper_portfolio`: Forward $10,000 paper trading ledger tracking virtual cash, BTC balances, execution fees, slippage, and Alpha vs. Buy & Hold.
+     6. `model_registry`: Authoritative registry tracking model versions, cryptographic SHA-256 digests, and feature schemas.
+     7. `model_lifecycle_events`: Append-only audit trail tracking model state transitions (REGISTERED, EVALUATED, PROMOTED, etc.).
+     8. `model_predictions`: Granular prediction ledger supporting point-in-time forecasts and delayed reconciliations across PRIMARY and SHADOW models.
+     9. `prediction_investigations`: Qualitative post-mortem ledger preserving news headlines, macro events, and causal failure explanations.
 4. **Delayed `T+1h` Reconciliation & the `"ACCURATE"` Tag (`src/engine/reconciliation.py`):**
    - Every hour, `scripts/run_hourly_worker.py` fetches the newly closed candle and reconciles predictions made $\ge 1$ hour earlier.
    - **Important metric caveat:** In `src/engine/reconciliation.py` (line 138), a prediction is labeled `"ACCURATE"` if `direction_correct` is `True` and `percentage_error <= 0.35%` (`MAX_ACCEPTABLE_ERROR_PCT = 0.35`), `"DIRECTION_ONLY"` if direction matched but error $> 0.35\%$, and `"MISSED_DIRECTION"` if direction was wrong. Because typical 1-hour BTC moves are small (`~0.3%–0.5%`), almost any directionally correct forecast falls under `0.35%` error. Always evaluate the model using **Out-of-Sample Directional Accuracy, Log-Loss, ROC-AUC, and RMSE vs. Naive Persistence**, not the UI `"ACCURATE"` badge count.
@@ -218,9 +218,9 @@ Although the underlying 1-hour ML signal has no durable post-fee edge, the repos
 
 ```text
 Mudra/
-├── app.py                              # 5-tab Streamlit monitoring & model governance UI
+├── app.py                              # 3-tab Streamlit monitoring & model governance UI
 ├── config.py                           # Central configuration, SHA-256 hashes & fee invariants
-├── Dockerfile                          # Multi-stage Python 3.12 container image
+├── Dockerfile                          # Multi-stage Python 3.11 container image
 ├── docker-compose.yml                  # Local FastAPI + Streamlit + PostgreSQL stack
 ├── requirements.txt                    # Pinned production dependencies
 ├── aiml_workspace/
@@ -253,7 +253,7 @@ Mudra/
 │   ├── api/                            # FastAPI routes (main.py) & Pydantic v2 schemas (schemas.py)
 │   ├── database/                       # SQLAlchemy 2.0 ORM models (9 tables) & connection pool
 │   └── engine/                         # Paper trading ledger & delayed T+1h reconciliation engine
-└── tests/                              # 13 pytest modules (280 test functions / 450+ parametrized cases)
+└── tests/                              # 13 pytest modules (500 collected test cases)
 ```
 
 ---
@@ -308,7 +308,7 @@ python scripts/run_hourly_worker.py
 
 ### 7.5 Launch the Streamlit Dashboard & FastAPI Server
 ```bash
-# Launch the 5-tab Streamlit dashboard (http://localhost:8501)
+# Launch the 3-tab Streamlit dashboard (http://localhost:8501)
 streamlit run app.py
 
 # Launch the FastAPI REST service (http://localhost:8000/docs)
@@ -316,7 +316,7 @@ uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ### 7.6 Run the Automated Test Suite
-The `tests/` directory contains 13 test modules (280 `test_*` functions expanding to 450+ parametrized unit and integration test cases) covering temporal split causality, SHA-256 artifact governance, execution cost math, LangGraph deterministic vetoes, and database reconciliation:
+The `tests/` directory contains 13 test modules (500 collected unit and integration test cases) covering temporal split causality, SHA-256 artifact governance, execution cost math, LangGraph deterministic vetoes, and database reconciliation:
 ```bash
 pytest -q
 ```
