@@ -1,5 +1,5 @@
-"""Database package for Mudra operational ledger, model governance, and telemetry."""
-from .models import (
+"""Mudra quantitative trading and machine learning framework package."""
+from .database.models import (
     Base,
     MarketTick,
     ApiTelemetry,
@@ -11,7 +11,7 @@ from .models import (
     ModelPrediction,
     PredictionInvestigation,
 )
-from .connection import (
+from .database.connection import (
     SchemaDriftError,
     FunctionSpec,
     TriggerSpec,
