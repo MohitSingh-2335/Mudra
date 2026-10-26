@@ -2016,11 +2016,11 @@ with tab2:
             | :--- | :--- | :--- | :--- | :--- | :--- |
             | **Naive Persistence** | **$398.77** | *Baseline* | *Baseline* | *Baseline* | Reference Benchmark |
             | **`xgb_onnx_v1.0.0`** *(Active)* | $399.47 | **50.50%** | **53.26%** | **0.5297** | **ACTIVE PRODUCTION** |
-            | **`xgb_v2.0.0`** *(New)* | **$398.54** | **51.20%** | **53.80%** | **0.5340** | **CANDIDATE (SHADOW EVALUATION)** |
+            | **`xgb_v2.0.0`** *(36 Stationary)* | Lose to Naive (`MAE 0.0032`) | **51.20%** (`51.63%` uncal.) | 52.07% (`52.49%` uncal.) | LogLoss `0.6926` | **CANDIDATE (SHADOW EVALUATION)** |
             | **`p1_controlled_candidate_v1`** | $399.37 | 50.36% | 53.03% | 0.5280 | **REJECTED CANDIDATE** |
 
             **Governance Policy & Candidate Evaluation:**
-            - **Candidate `xgb_v2.0.0` (Shadow Testing):** Trained on 36 stationary features, beating the active baseline across RMSE ($398.54 vs $399.47), directional hit rate (51.20%), and accuracy (53.80%). Currently logging shadow predictions in Neon DB for forward validation against live candles.
+            - **Candidate `xgb_v2.0.0` (Shadow Testing):** Trained on 36 strictly stationary features (`v2_36stationary`, removing raw dollar levels). Achieved 52.49% uncalibrated / 52.07% Platt-calibrated holdout accuracy (`0.6919` / `0.6926` log-loss) and `0.0032` return MAE. Retained in shadow mode to log stationary-schema predictions alongside Model 1 (`v1_39features`).
             - **Candidate `p1_controlled_candidate_v1` (Rejected):** Rejected due to lower directional hit rate (50.36% vs 50.50%) and lower accuracy (53.03% vs 53.26%) on holdout evaluation.
             - **Automatic Model Onboarding:** Any new model placed into `artifacts/models/` with a manifest is automatically discovered, verified, served in consensus voting, and tracked in Neon DB without manual code changes.
             """

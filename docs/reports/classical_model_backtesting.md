@@ -1,6 +1,6 @@
-# Historical Study Report — Backtesting the Classical ML Models (BTC/USDT, 1H)
+# Phase 1 Research Report — Backtesting the Classical ML Models (BTC/USDT, 1H)
 
-**Status:** Complete. **Verdict:** No exploitable edge found. Proceeding to Historical Study (pretrained time-series foundation models).
+**Status:** Complete. **Verdict:** No exploitable edge found. Proceeding to Phase 2 (pretrained time-series foundation models).
 
 ---
 
@@ -16,27 +16,27 @@ chronological (non-leaky) train/test split.
 
 | Component | File | Purpose |
 |---|---|---|
-| Model family comparison | `scripts/experiments/find_best_models.py` | Compare LinearRegression/RandomForest/XGBoost/SVR (regression) and LogisticRegression/RandomForest/XGBoost/SVC (classification) on identical chronological split + fixed feature sets |
+| Model family comparison | `scripts/experiments/find_best_models.py` *(archived; see `data/results/model_comparison_backtest.csv`)* | Compare LinearRegression/RandomForest/XGBoost/SVR (regression) and LogisticRegression/RandomForest/XGBoost/SVC (classification) on identical chronological split + fixed feature sets |
 | Event-driven backtester | `src/backtesting.py` | Trains a classifier, walks forward through held-out data, simulates long/flat strategy with 0.1%/side fees, computes Sharpe/drawdown/win-rate/P&L |
-| Threshold sweep (single model) | `scripts/experiments/sweep_threshold.py` | LogisticRegression only, thresholds 0.50–0.70 |
-| Threshold sweep (all models) | `compare_models_backtest.py` | LogisticRegression, SVC, XGBoost × thresholds 0.50–0.70 |
-| Statistical significance test | `significance_test.py` | Binomial test on win rate + bootstrap CI on per-trade returns, for the best-looking configs |
-| Walk-forward validation | `walk_forward_validate.py` | Re-tests the winning config across 5 independent, non-overlapping time windows |
+| Threshold sweep (single model) | `scripts/experiments/sweep_threshold.py` | Sweeps probability thresholds and saves results to `data/results/threshold_sweep.csv` |
+| Threshold sweep (all models) | `compare_models_backtest.py` *(archived; output in `data/results/model_comparison_backtest.csv`)* | LogisticRegression, SVC, XGBoost × thresholds 0.50–0.70 |
+| Statistical significance test | `significance_test.py` *(archived)* | Binomial test on win rate + bootstrap CI on per-trade returns, for the best-looking configs |
+| Walk-forward validation | `walk_forward_validate.py` *(archived; output in `data/results/walk_forward_validation.csv`)* | Re-tests the winning config across 5 independent, non-overlapping time windows |
 
 ---
 
 ## 3. Methodology
 
-- **Data:** `data/raw/BTCUSDT-1H.csv`, 35,031 rows after feature engineering.
+- **Data:** `data/raw/BTCUSDT-1H.csv`, 35,031 rows after initial feature engineering (later refined to 34,990 rows after removing the 2023-03-24 12:00 UTC exchange-halt candle and 1-hour purge buffer).
 - **Split:** Chronological only (`df.iloc[:split_idx]` / `df.iloc[split_idx:]`), never random —
   the codebase's original `train_test_split(random_state=42)` was identified as a data-leakage
-  bug (see `03_KNOWN_ISSUES_AND_TECH_DEBT.md` #1) and was **not** used for any of this work.
+  bug and was **not** used for any of this work.
 - **Target:**
   - Regression target changed from `Target_Close` (absolute price) to `Target_Return`
     (% change to next close) — every regressor tested on absolute price lost to a naive
     persistence baseline; this is a target-framing fix, not a tuning fix.
   - Classification target: `Target_Movement` (1 = up, 0 = down).
-- **Fees:** 0.1% per side (0.2% round trip), matching Binance taker fees. A backtest without
+- **Fees:** 0.1% per side (0.2% round trip), matching standard Binance Spot VIP-0 taker fees. A backtest without
   fees is not meaningful for this use case.
 - **Strategy:** Simple long/flat. Enter long when `P(up) > threshold`, exit when it drops
   back below.
@@ -47,7 +47,7 @@ chronological (non-leaky) train/test split.
 
 ## 4. Results
 
-### 4.1 Model family leaderboard (`scripts/experiments/find_best_models.py`)
+### 4.1 Model family leaderboard
 
 **Regression** — all models lost to the naive persistence baseline:
 
@@ -63,16 +63,16 @@ chronological (non-leaky) train/test split.
 
 | Model | Accuracy | Beats baseline (49.58%)? |
 |---|---|---|
-| Logistic Regression | 52.49% | âœ… |
-| SVC (rbf) | 52.26% | âœ… |
-| XGBoost | 52.15% | âœ… |
-| Random Forest | 51.36% | âœ… |
+| Logistic Regression | 52.49% | [YES] |
+| SVC (rbf) | 52.26% | [YES] |
+| XGBoost | 52.15% | [YES] |
+| Random Forest | 51.36% | [YES] |
 
 **Conclusion at this point:** Regression is a dead end on this feature set (no model beats
 "do nothing"). Classification has a small, real-looking edge over guessing — worth
 backtesting to see if it survives fees.
 
-### 4.2 Threshold sweep — all 3 classifiers × 9 thresholds (`compare_models_backtest.py`)
+### 4.2 Threshold sweep — all 3 classifiers × 9 thresholds (`data/results/model_comparison_backtest.csv`)
 
 Full results in `data/results/model_comparison_backtest.csv`. Summary:
 
@@ -90,7 +90,7 @@ Full results in `data/results/model_comparison_backtest.csv`. Summary:
   (positive return despite <50% win rate implies wins sized larger than losses — needs
   scrutiny, not just accepted at face value).
 
-### 4.3 Statistical significance test (`significance_test.py`)
+### 4.3 Statistical significance test
 
 | Config | n | Win rate | Binomial p-value (vs 50%) | Bootstrap 95% CI on mean return |
 |---|---|---|---|---|
@@ -103,7 +103,7 @@ fact.** Applying a Bonferroni correction for 27 comparisons: significance thresh
 `0.05 / 27 ≈ 0.0019`. **LogReg's p=0.0195 does not survive this correction.** This is a
 textbook multiple-comparisons false positive, not a validated edge.
 
-### 4.4 Walk-forward validation (`walk_forward_validate.py`)
+### 4.4 Walk-forward validation (`data/results/walk_forward_validation.csv`)
 
 Re-ran LogisticRegression @ threshold=0.68 across **5 independent, non-overlapping windows**
 spanning 2022-07 to 2026-07, to test whether the apparent edge replicates out-of-sample:
@@ -143,22 +143,21 @@ one lucky draw out of many tested configs, not a real, repeatable edge.
    windows during 2022–2024).
 5. **Feature set may simply lack forward-looking information.** `SVC_FEATURES` are almost
    entirely derived from price/volume history (technical indicators, rolling stats, lags).
-   No external signal (sentiment, on-chain, macro) is present yet — Historical Study in the roadmap,
-   not yet built.
+   No external signal (sentiment, on-chain, macro) is present yet — planned for Phase 3 in the research roadmap.
 
 ---
 
 ## 6. What this rules out (and doesn't)
 
-- [NO] **Ruled out:** LogisticRegression / SVC / XGBoost, on the current `SVC_FEATURES`
+- [NO] **Ruled out:** LogisticRegression / SVC / XGBoost, on the price/volume technical
   feature set, with a simple long/flat threshold strategy, do not have a fee-surviving,
   replicable directional edge on BTC/USDT 1H data.
 - [NO] **Ruled out:** "Just raise the confidence threshold" as a fix — it doesn't create
   edge, it just shrinks the sample until noise looks like a pattern.
-- [NOTE] **Not ruled out:** A better feature set (external data — Historical Study agents), a different
+- [NOTE] **Not ruled out:** A better feature set (external data — Phase 3 agents), a different
   target/strategy formulation (e.g. position sizing instead of binary long/flat, multi-class
   instead of binary, holding period other than 1h), or a fundamentally different model
-  architecture (Historical Study) might still find something these three algorithms couldn't. The
+  architecture (Phase 2 foundation models) might still find something these three algorithms couldn't. The
   negative result here is specific to *this* feature set and *these* three classical models —
   not proof that no edge exists in the data at all.
 
@@ -166,14 +165,13 @@ one lucky draw out of many tested configs, not a real, repeatable edge.
 
 ## 7. Recommendation
 
-Per `research benchmark protocol`, this is exactly the negative result that justifies moving to
-**Historical Study — fine-tune a pretrained time-series foundation model** (Chronos-2, TimesFM 2.5,
-or Moirai-2) rather than continuing to tune classical classifiers on this feature set.
-Rationale from the roadmap still holds: cheaper to test than building PatchTST from scratch,
-and zero-shot forecasting gives a cheap first signal on whether the direction is worth
+Per the research benchmark protocol, this is the negative result that justifies moving to
+**Phase 2 — evaluate pretrained time-series foundation models** (Chronos-2, TimesFM 2.5,
+or Moirai 2.0) rather than continuing to tune classical classifiers on this feature set.
+Zero-shot forecasting gives a fast first signal on whether the foundation-model direction is worth
 pursuing before any fine-tuning investment.
 
-**Before starting Historical Study, carry forward as fixed process (don't repeat Historical Study's mistake):**
+**Before starting Phase 2, carry forward as fixed process (don't repeat Phase 1's single-split trap):**
 - Any new model/config must be validated on **multiple independent time windows**, not a
   single train/test split, before being treated as a result.
 - Any threshold or hyperparameter sweep must apply a **multiple-comparisons correction**
@@ -183,13 +181,11 @@ pursuing before any fine-tuning investment.
 
 ---
 
-## 8. Artifacts produced during this evaluation
+## 8. Artifacts retained in repository
 
-- `src/backtesting.py` — reusable backtesting engine (kept, used going forward)
-- `scripts/experiments/find_best_models.py` — model family comparison script
-- `compare_models_backtest.py` — threshold × model sweep script
-- `significance_test.py` — binomial + bootstrap significance testing
-- `walk_forward_validate.py` — multi-window replication test
+- `src/backtesting.py` — reusable backtesting engine
+- `scripts/experiments/sweep_threshold.py` — threshold sweep runner
 - `data/results/model_comparison_backtest.csv` — full sweep results (27 configs)
-- `data/results/threshold_sweep.csv` — LogisticRegression-only sweep (superseded by the above)
+- `data/results/threshold_sweep.csv` — single-model threshold sweep output
 - `data/results/walk_forward_validation.csv` — 5-window replication results
+- *(Note: Standalone one-off experiment runners `find_best_models.py`, `compare_models_backtest.py`, `significance_test.py`, and `walk_forward_validate.py` were archived after exporting their CSV tables to `data/results/`.)*

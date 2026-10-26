@@ -58,7 +58,7 @@ def run_pipeline(
     print("=" * 70)
 
     # 1. Feature Engineering: Create clean stationary feature matrix
-    print("\n[PHASE 1/7] Preparing clean dataset and 36 stationary features...")
+    print(f"\n[PHASE 1/7] Preparing clean dataset and feature matrix ({config.FEATURE_SCHEMA_VERSION})...")
     df_featured = preprocess_and_save_featured_data(fetch_fresh=fetch_fresh)
     print(f"[OK] Generated {len(df_featured):,} rows with {df_featured.shape[1]} columns.")
 

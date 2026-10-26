@@ -1,2 +1,52 @@
-# This help python to understand that this is a toolbox(packages) where all the tools are present 
-# This work like a label which tell python that this folder is a package
+"""Database package for Mudra operational ledger, model governance, and telemetry."""
+from .models import (
+    Base,
+    MarketTick,
+    ApiTelemetry,
+    CouncilAudit,
+    Reconciliation,
+    PaperPortfolio,
+    ModelRegistry,
+    ModelLifecycleEvent,
+    ModelPrediction,
+    PredictionInvestigation,
+)
+from .connection import (
+    SchemaDriftError,
+    FunctionSpec,
+    TriggerSpec,
+    ensure_canonical_function,
+    ensure_canonical_trigger,
+    verify_db_schema,
+    get_db,
+    init_db,
+    test_connection,
+    engine,
+    SessionLocal,
+    has_tick_id_column,
+)
+
+__all__ = [
+    "Base",
+    "MarketTick",
+    "ApiTelemetry",
+    "CouncilAudit",
+    "Reconciliation",
+    "PaperPortfolio",
+    "ModelRegistry",
+    "ModelLifecycleEvent",
+    "ModelPrediction",
+    "PredictionInvestigation",
+    "SchemaDriftError",
+    "FunctionSpec",
+    "TriggerSpec",
+    "ensure_canonical_function",
+    "ensure_canonical_trigger",
+    "verify_db_schema",
+    "get_db",
+    "init_db",
+    "test_connection",
+    "engine",
+    "SessionLocal",
+    "has_tick_id_column",
+]
