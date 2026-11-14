@@ -8,7 +8,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.111-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 
-**Live Streamlit Monitoring Dashboard:** [mudra-quant-terminal.streamlit.app](https://mudra-quant-terminal.streamlit.app/)
+**Streamlit Monitoring Dashboard:** Runs locally with `streamlit run app.py` (see [Section 7.5](#75-launch-the-streamlit-dashboard--fastapi-server))
 
 **Mudra** is an end-to-end machine learning engineering and paper-trading MLOps project built to answer a concrete quantitative question: *Can classical gradient-boosted trees or zero-shot time-series foundation models predict next-hour Bitcoin (`BTC/USDT`) returns accurately enough to survive spot/futures transaction costs on a strictly leak-free chronological split?*
 
