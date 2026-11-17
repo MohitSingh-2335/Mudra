@@ -194,11 +194,6 @@ FEATURE_SCHEMA_VERSION: str = "v1_39features"
 REGRESSOR_MODEL_SHA256: str = "b44fba18cf2c7b51e3297e83a946d869392803a267e951a5e85ea052c63eb854"
 CLASSIFIER_MODEL_SHA256: str = "df139c1018ed5025b1444d6597c3d98b4d7c377a898487268d18e58d253ae684"
 
-# Auxiliary / Checkpoint Artifact Paths
-XGB_MODEL_PATH = str(BASE_DIR / "artifacts" / "models" / "best_xgb_model.pkl")
-LSTM_MODEL_PATH = str(BASE_DIR / "artifacts" / "models" / "patchtst_weights.pt")
-SVC_MODEL_PATH = str(BASE_DIR / "artifacts" / "models" / "best_svc_model.pkl")
-SCALER_PATH = str(BASE_DIR / "artifacts" / "models" / "scaler.pkl")
 
 # Data File Paths
 THRESHOLD_SWEEP = str(BASE_DIR / "data" / "results" / "threshold_sweep.csv")
@@ -382,10 +377,6 @@ __all__ = [
     "FEATURE_SCHEMA_VERSION",
     "REGRESSOR_MODEL_SHA256",
     "CLASSIFIER_MODEL_SHA256",
-    "XGB_MODEL_PATH",
-    "LSTM_MODEL_PATH",
-    "SVC_MODEL_PATH",
-    "SCALER_PATH",
     "THRESHOLD_SWEEP",
     "BTCUSDT_1H_CSV",
     "FEATURED_BTC_DATA_PATH",
