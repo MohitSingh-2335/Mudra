@@ -59,7 +59,7 @@ jobs:
 
   # Job 2: Container Image Build Verification
   build-containers:
-    name: Validate Docker Images
+    name: Validate Docker Image
     needs: test
     runs-on: ubuntu-latest
 
@@ -70,18 +70,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Validate FastAPI Container Build (Port 8000)
+      - name: Validate Streamlit Container Build (Port 8501)
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
           push: false
-          tags: mudra-api:latest
-
-      - name: Validate Streamlit Container Build (Port 8501)
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile.streamlit
-          push: false
-          tags: mudra-ui:latest
+          tags: mudra-terminal:latest
