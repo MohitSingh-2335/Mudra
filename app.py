@@ -779,6 +779,241 @@ st.markdown("---")
 # 3 evidence-first dashboard sections
 # =====================================================================================
 forecast_result = None
+
+# --- Tab Reconciliation & Display Helpers ---
+def format_risk_levels(
+    action: str,
+    verdict: str,
+    current_price: float,
+    council_state: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, str]:
+    """
+    Returns plain-English Stop-Loss and Take-Profit strings.
+    When trade is not approved or action is HOLD, displays 'None (No active trade opened — cash preserved)'.
+    When BUY is approved, displays stop loss (-1.5%) and target take-profit (+2.5%).
+    When SELL is approved, displays stop loss (+1.5%) and target take-profit (-2.5%).
+    """
+    c_state = council_state or {}
+    act = str(action).upper().strip()
+    vrd = str(verdict).upper().strip()
+    if vrd != "APPROVED" or act == "HOLD":
+        no_trade_msg = "None (No active trade opened — cash preserved)"
+        return no_trade_msg, no_trade_msg
+
+    if act == "BUY":
+        sl = float(c_state.get("stop_loss_price") or (current_price * 0.985))
+        tp = float(c_state.get("take_profit_price") or (current_price * 1.025))
+        return f"${sl:,.2f} (-1.5%)", f"${tp:,.2f} (+2.5%)"
+    elif act == "SELL":
+        sl = float(c_state.get("stop_loss_price") or (current_price * 1.015))
+        tp = float(c_state.get("take_profit_price") or (current_price * 0.975))
+        return f"${sl:,.2f} (+1.5%)", f"${tp:,.2f} (-2.5%)"
+
+    no_trade_msg = "None (No active trade opened — cash preserved)"
+    return no_trade_msg, no_trade_msg
+
+
+TAB3_MODEL_SELECTOR_OPTIONS: List[str] = ["All Models", ACTIVE_MODEL_VERSION]
+
+
+def filter_reconciliation_records(df: pd.DataFrame, selected_model: str) -> pd.DataFrame:
+    """
+    Filters reconciliation records for the selected model version.
+    If selected_model is 'All Models' or None, returns all records.
+    Preserves unknown attribution records under 'All Models'.
+    """
+    if df.empty or "model_version" not in df.columns:
+        return df.copy()
+    if selected_model and selected_model != "All Models":
+        return df[df["model_version"] == selected_model].copy()
+    return df.copy()
+
+
+def prepare_reconciliation_table_display(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Prepares reconciliation audit records for UI table rendering.
+    Maps null/missing model_version to 'UNKNOWN' and preserves DataFrame integrity.
+    """
+    if df.empty:
+        return df.copy()
+    disp_df = df.copy()
+    if "model_version" in disp_df.columns:
+        disp_df["Model Version"] = disp_df["model_version"].fillna("UNKNOWN")
+    else:
+        disp_df["Model Version"] = "UNKNOWN"
+    return disp_df
+
+
+def compute_fallback_reconciliation_kpis(df: pd.DataFrame, model_version: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Computes rolling performance metrics directly from loaded DataFrame records.
+    Used as a fallback when database KPI query fails, ensuring filtered client records
+    are used rather than leaking unfiltered database-wide KPIs.
+    """
+    if df.empty:
+        return {
+            "total_evaluated": 0,
+            "total_reconciled": 0,
+            "directional_accuracy_pct": None,
+            "win_rate_pct": None,
+            "mae_usd": None,
+            "mape_pct": None,
+            "information_coefficient": None,
+            "information_coefficient_ic": None,
+            "black_swans_filtered": 0,
+            "black_swan_count": 0,
+            "accurate_count": 0,
+            "tag_breakdown": {},
+            "model_version": model_version,
+            "is_fallback": True,
+        }
+
+    total = len(df)
+    if "direction_correct" in df.columns:
+        correct = int(df["direction_correct"].sum())
+    elif {"direction_predicted", "direction_realized"}.issubset(df.columns):
+        correct = int((df["direction_predicted"] == df["direction_realized"]).sum())
+    else:
+        correct = 0
+
+    win_rate = round((correct / total) * 100.0, 2) if total > 0 else 0.0
+    mae = round(float(df["absolute_error_usd"].mean()), 2) if "absolute_error_usd" in df.columns else 0.0
+    mape = round(float(df["percentage_error"].mean() * 100.0), 4) if "percentage_error" in df.columns else 0.0
+
+    ic = 0.0
+    if len(df) > 1 and {"predicted_return_pct", "actual_return_pct"}.issubset(df.columns):
+        if float(df["actual_return_pct"].std()) > 0 and float(df["predicted_return_pct"].std()) > 0:
+            corr = df["predicted_return_pct"].corr(df["actual_return_pct"])
+            ic = round(float(corr), 3) if not np.isnan(corr) else 0.0
+
+    black_swans = int(df["is_black_swan"].sum()) if "is_black_swan" in df.columns else 0
+    accurate = int((df["error_attribution_tag"] == "ACCURATE").sum()) if "error_attribution_tag" in df.columns else 0
+    tag_counts = df["error_attribution_tag"].value_counts().to_dict() if "error_attribution_tag" in df.columns else {}
+
+    return {
+        "total_evaluated": total,
+        "total_reconciled": total,
+        "directional_accuracy_pct": win_rate,
+        "win_rate_pct": win_rate,
+        "mae_usd": mae,
+        "mape_pct": mape,
+        "information_coefficient": ic,
+        "information_coefficient_ic": ic,
+        "black_swans_filtered": black_swans,
+        "black_swan_count": black_swans,
+        "accurate_count": accurate,
+        "tag_breakdown": tag_counts,
+        "model_version": model_version,
+        "is_fallback": True,
+    }
+
+
+def resolve_tab3_reconciliation_kpis(
+    selected_model: str,
+    base_kpis: Dict[str, Any],
+    filtered_df: pd.DataFrame,
+    kpi_fetcher: Optional[Callable[[Optional[int], Optional[str]], Dict[str, Any]]] = None,
+    lookback_hours: Optional[int] = 168,
+) -> Tuple[Dict[str, Any], Optional[str]]:
+    """
+    Resolves the KPI metrics dictionary for Tab 3 based on selected model and lookback window.
+    If 'All Models', returns (base_kpis, None) unless custom window or base_kpis failed.
+    If a specific model is selected:
+      - Attempts to fetch model-specific KPIs via kpi_fetcher.
+      - Explicitly distinguishes query success from query failure via query_failed/error flags
+        or thrown exceptions, never assuming a dictionary indicates success.
+      - If the query genuinely succeeded with zero records, returns the valid zero-valued metrics.
+      - If the query failed, computes fallback KPIs from filtered_df if records exist,
+        or returns a defensive unavailable KPI structure with an error message.
+    Under NO circumstance does this return unfiltered base_kpis when a specific model is selected.
+
+    Returns:
+        (kpi_dict, warning_message_or_none)
+    """
+    if selected_model == "All Models" or not selected_model:
+        # If custom lookback window requested (not default 168), fetch window KPIs from DB
+        if kpi_fetcher is not None and lookback_hours != 168:
+            try:
+                res = kpi_fetcher(lookback_hours, None)
+                if isinstance(res, dict) and not res.get("query_failed") and not res.get("error"):
+                    return res, None
+            except Exception:
+                pass
+
+        if base_kpis and (base_kpis.get("query_failed") or base_kpis.get("error")):
+            if not filtered_df.empty:
+                fallback_kpis = compute_fallback_reconciliation_kpis(filtered_df, model_version="All Models")
+                warning_msg = (
+                    f"Database KPI query failed. "
+                    f"Displaying fallback KPIs computed from {len(filtered_df)} loaded client records."
+                )
+                return fallback_kpis, warning_msg
+            unavailable_kpis = {
+                "total_evaluated": 0,
+                "total_reconciled": 0,
+                "directional_accuracy_pct": None,
+                "win_rate_pct": None,
+                "mae_usd": None,
+                "mape_pct": None,
+                "information_coefficient": None,
+                "information_coefficient_ic": None,
+                "black_swans_filtered": 0,
+                "black_swan_count": 0,
+                "accurate_count": 0,
+                "tag_breakdown": {},
+                "model_version": None,
+                "kpi_unavailable": True,
+            }
+            return unavailable_kpis, "Reconciliation KPIs are currently unavailable due to a database error."
+        return base_kpis, None
+
+    # Specific model selected: query filtered KPIs
+    query_succeeded = False
+    fetched_kpis = None
+    if kpi_fetcher is not None:
+        try:
+            res = kpi_fetcher(lookback_hours, selected_model)
+            if isinstance(res, dict) and not res.get("query_failed") and not res.get("error"):
+                fetched_kpis = res
+                query_succeeded = True
+        except Exception:
+            query_succeeded = False
+
+    # Valid successful query result (including genuinely empty 0-record results)
+    if query_succeeded and fetched_kpis is not None:
+        return fetched_kpis, None
+
+    # Query failed or was unavailable: fallback to filtered DataFrame
+    if not filtered_df.empty:
+        fallback_kpis = compute_fallback_reconciliation_kpis(filtered_df, model_version=selected_model)
+        warning_msg = (
+            f"Database KPI query failed for model '{selected_model}'. "
+            f"Displaying fallback KPIs computed from {len(filtered_df)} loaded client records."
+        )
+        return fallback_kpis, warning_msg
+
+    # No records and query failed: unavailable state
+    unavailable_kpis = {
+        "total_evaluated": 0,
+        "total_reconciled": 0,
+        "directional_accuracy_pct": None,
+        "win_rate_pct": None,
+        "mae_usd": None,
+        "mape_pct": None,
+        "information_coefficient": None,
+        "information_coefficient_ic": None,
+        "black_swans_filtered": 0,
+        "black_swan_count": 0,
+        "accurate_count": 0,
+        "tag_breakdown": {},
+        "model_version": selected_model,
+        "kpi_unavailable": True,
+    }
+    warning_msg = f"Model-specific KPIs for '{selected_model}' are currently unavailable."
+    return unavailable_kpis, warning_msg
+
+
+
 tab1, tab2, tab3 = st.tabs([
     "Overview",
     "Model Evidence",
@@ -980,37 +1215,6 @@ with tab1:
                 help="Live Binance USDS-M BTCUSDT Perpetual Futures Mark Price and 8-hour funding rate via Mudra FastMCP.",
             )
 
-
-def format_risk_levels(
-    action: str,
-    verdict: str,
-    current_price: float,
-    council_state: Optional[Dict[str, Any]] = None,
-) -> Tuple[str, str]:
-    """
-    Returns plain-English Stop-Loss and Take-Profit strings.
-    When trade is not approved or action is HOLD, displays 'None (No active trade opened — cash preserved)'.
-    When BUY is approved, displays stop loss (-1.5%) and target take-profit (+2.5%).
-    When SELL is approved, displays stop loss (+1.5%) and target take-profit (-2.5%).
-    """
-    c_state = council_state or {}
-    act = str(action).upper().strip()
-    vrd = str(verdict).upper().strip()
-    if vrd != "APPROVED" or act == "HOLD":
-        no_trade_msg = "None (No active trade opened — cash preserved)"
-        return no_trade_msg, no_trade_msg
-
-    if act == "BUY":
-        sl = float(c_state.get("stop_loss_price") or (current_price * 0.985))
-        tp = float(c_state.get("take_profit_price") or (current_price * 1.025))
-        return f"${sl:,.2f} (-1.5%)", f"${tp:,.2f} (+2.5%)"
-    elif act == "SELL":
-        sl = float(c_state.get("stop_loss_price") or (current_price * 1.015))
-        tp = float(c_state.get("take_profit_price") or (current_price * 0.975))
-        return f"${sl:,.2f} (+1.5%)", f"${tp:,.2f} (-2.5%)"
-
-    no_trade_msg = "None (No active trade opened — cash preserved)"
-    return no_trade_msg, no_trade_msg
 
 
 # -------------------------------------------------------------------------------------
@@ -1287,210 +1491,10 @@ with tab2:
             st.caption(f_plan["summary"])
 
 
-TAB3_MODEL_SELECTOR_OPTIONS: List[str] = ["All Models", ACTIVE_MODEL_VERSION]
-
-
-def filter_reconciliation_records(df: pd.DataFrame, selected_model: str) -> pd.DataFrame:
-    """
-    Filters reconciliation records for the selected model version.
-    If selected_model is 'All Models' or None, returns all records.
-    Preserves unknown attribution records under 'All Models'.
-    """
-    if df.empty or "model_version" not in df.columns:
-        return df.copy()
-    if selected_model and selected_model != "All Models":
-        return df[df["model_version"] == selected_model].copy()
-    return df.copy()
-
-
-def prepare_reconciliation_table_display(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Prepares reconciliation audit records for UI table rendering.
-    Maps null/missing model_version to 'UNKNOWN' and preserves DataFrame integrity.
-    """
-    if df.empty:
-        return df.copy()
-    disp_df = df.copy()
-    if "model_version" in disp_df.columns:
-        disp_df["Model Version"] = disp_df["model_version"].fillna("UNKNOWN")
-    else:
-        disp_df["Model Version"] = "UNKNOWN"
-    return disp_df
-
-
-def compute_fallback_reconciliation_kpis(df: pd.DataFrame, model_version: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Computes rolling performance metrics directly from loaded DataFrame records.
-    Used as a fallback when database KPI query fails, ensuring filtered client records
-    are used rather than leaking unfiltered database-wide KPIs.
-    """
-    if df.empty:
-        return {
-            "total_evaluated": 0,
-            "total_reconciled": 0,
-            "directional_accuracy_pct": None,
-            "win_rate_pct": None,
-            "mae_usd": None,
-            "mape_pct": None,
-            "information_coefficient": None,
-            "information_coefficient_ic": None,
-            "black_swans_filtered": 0,
-            "black_swan_count": 0,
-            "accurate_count": 0,
-            "tag_breakdown": {},
-            "model_version": model_version,
-            "is_fallback": True,
-        }
-
-    total = len(df)
-    if "direction_correct" in df.columns:
-        correct = int(df["direction_correct"].sum())
-    elif {"direction_predicted", "direction_realized"}.issubset(df.columns):
-        correct = int((df["direction_predicted"] == df["direction_realized"]).sum())
-    else:
-        correct = 0
-
-    win_rate = round((correct / total) * 100.0, 2) if total > 0 else 0.0
-    mae = round(float(df["absolute_error_usd"].mean()), 2) if "absolute_error_usd" in df.columns else 0.0
-    mape = round(float(df["percentage_error"].mean() * 100.0), 4) if "percentage_error" in df.columns else 0.0
-
-    ic = 0.0
-    if len(df) > 1 and {"predicted_return_pct", "actual_return_pct"}.issubset(df.columns):
-        if float(df["actual_return_pct"].std()) > 0 and float(df["predicted_return_pct"].std()) > 0:
-            corr = df["predicted_return_pct"].corr(df["actual_return_pct"])
-            ic = round(float(corr), 3) if not np.isnan(corr) else 0.0
-
-    black_swans = int(df["is_black_swan"].sum()) if "is_black_swan" in df.columns else 0
-    accurate = int((df["error_attribution_tag"] == "ACCURATE").sum()) if "error_attribution_tag" in df.columns else 0
-    tag_counts = df["error_attribution_tag"].value_counts().to_dict() if "error_attribution_tag" in df.columns else {}
-
-    return {
-        "total_evaluated": total,
-        "total_reconciled": total,
-        "directional_accuracy_pct": win_rate,
-        "win_rate_pct": win_rate,
-        "mae_usd": mae,
-        "mape_pct": mape,
-        "information_coefficient": ic,
-        "information_coefficient_ic": ic,
-        "black_swans_filtered": black_swans,
-        "black_swan_count": black_swans,
-        "accurate_count": accurate,
-        "tag_breakdown": tag_counts,
-        "model_version": model_version,
-        "is_fallback": True,
-    }
-
-
-def resolve_tab3_reconciliation_kpis(
-    selected_model: str,
-    base_kpis: Dict[str, Any],
-    filtered_df: pd.DataFrame,
-    kpi_fetcher: Optional[Callable[[Optional[int], Optional[str]], Dict[str, Any]]] = None,
-    lookback_hours: Optional[int] = 168,
-) -> Tuple[Dict[str, Any], Optional[str]]:
-    """
-    Resolves the KPI metrics dictionary for Tab 3 based on selected model and lookback window.
-    If 'All Models', returns (base_kpis, None) unless custom window or base_kpis failed.
-    If a specific model is selected:
-      - Attempts to fetch model-specific KPIs via kpi_fetcher.
-      - Explicitly distinguishes query success from query failure via query_failed/error flags
-        or thrown exceptions, never assuming a dictionary indicates success.
-      - If the query genuinely succeeded with zero records, returns the valid zero-valued metrics.
-      - If the query failed, computes fallback KPIs from filtered_df if records exist,
-        or returns a defensive unavailable KPI structure with an error message.
-    Under NO circumstance does this return unfiltered base_kpis when a specific model is selected.
-
-    Returns:
-        (kpi_dict, warning_message_or_none)
-    """
-    if selected_model == "All Models" or not selected_model:
-        # If custom lookback window requested (not default 168), fetch window KPIs from DB
-        if kpi_fetcher is not None and lookback_hours != 168:
-            try:
-                res = kpi_fetcher(lookback_hours, None)
-                if isinstance(res, dict) and not res.get("query_failed") and not res.get("error"):
-                    return res, None
-            except Exception:
-                pass
-
-        if base_kpis and (base_kpis.get("query_failed") or base_kpis.get("error")):
-            if not filtered_df.empty:
-                fallback_kpis = compute_fallback_reconciliation_kpis(filtered_df, model_version="All Models")
-                warning_msg = (
-                    f"Database KPI query failed. "
-                    f"Displaying fallback KPIs computed from {len(filtered_df)} loaded client records."
-                )
-                return fallback_kpis, warning_msg
-            unavailable_kpis = {
-                "total_evaluated": 0,
-                "total_reconciled": 0,
-                "directional_accuracy_pct": None,
-                "win_rate_pct": None,
-                "mae_usd": None,
-                "mape_pct": None,
-                "information_coefficient": None,
-                "information_coefficient_ic": None,
-                "black_swans_filtered": 0,
-                "black_swan_count": 0,
-                "accurate_count": 0,
-                "tag_breakdown": {},
-                "model_version": None,
-                "kpi_unavailable": True,
-            }
-            return unavailable_kpis, "Reconciliation KPIs are currently unavailable due to a database error."
-        return base_kpis, None
-
-    # Specific model selected: query filtered KPIs
-    query_succeeded = False
-    fetched_kpis = None
-    if kpi_fetcher is not None:
-        try:
-            res = kpi_fetcher(lookback_hours, selected_model)
-            if isinstance(res, dict) and not res.get("query_failed") and not res.get("error"):
-                fetched_kpis = res
-                query_succeeded = True
-        except Exception:
-            query_succeeded = False
-
-    # Valid successful query result (including genuinely empty 0-record results)
-    if query_succeeded and fetched_kpis is not None:
-        return fetched_kpis, None
-
-    # Query failed or was unavailable: fallback to filtered DataFrame
-    if not filtered_df.empty:
-        fallback_kpis = compute_fallback_reconciliation_kpis(filtered_df, model_version=selected_model)
-        warning_msg = (
-            f"Database KPI query failed for model '{selected_model}'. "
-            f"Displaying fallback KPIs computed from {len(filtered_df)} loaded client records."
-        )
-        return fallback_kpis, warning_msg
-
-    # No records and query failed: unavailable state
-    unavailable_kpis = {
-        "total_evaluated": 0,
-        "total_reconciled": 0,
-        "directional_accuracy_pct": None,
-        "win_rate_pct": None,
-        "mae_usd": None,
-        "mape_pct": None,
-        "information_coefficient": None,
-        "information_coefficient_ic": None,
-        "black_swans_filtered": 0,
-        "black_swan_count": 0,
-        "accurate_count": 0,
-        "tag_breakdown": {},
-        "model_version": selected_model,
-        "kpi_unavailable": True,
-    }
-    warning_msg = f"Model-specific KPIs for '{selected_model}' are currently unavailable."
-    return unavailable_kpis, warning_msg
-
 
 # -------------------------------------------------------------------------------------
 # LIVE TRACK RECORD & DELAYED RECONCILIATION (NEON DB SSOT)
 # -------------------------------------------------------------------------------------
-with tab2:
     st.subheader("Past Prediction Accuracy (Checked 1 Hour Later)")
     st.caption("Realized model accuracy evaluated 1 hour later against actual Bitcoin closing price.")
 
@@ -1743,6 +1747,131 @@ with tab2:
             st.info("Diagnostic investigations database is currently operating in local test mode. Delayed reconciliation logs will populate when live anomalies occur.")
 
 
+
+# -------------------------------------------------------------------------------------
+# TREESHAP ATTRIBUTION & TECHNICAL DETAILS
+# -------------------------------------------------------------------------------------
+    st.subheader("Top Signals Behind This Hour's Prediction")
+    st.caption("TreeSHAP feature attributions and walk-forward chronological evaluation boundaries.")
+
+    if is_stale_fallback:
+        st.warning(
+            "⚠️ Live market feed unavailable (offline replay active). "
+            "Live TreeSHAP factor attribution inference is paused to prevent presenting stale explanations as live."
+        )
+    else:
+        shap_res = generate_live_shap_attribution(
+            live_df=live_market_df,
+            explainer_clf=explainer_clf,
+            is_stale=is_stale_fallback,
+            top_n=4,
+        )
+        if shap_res:
+            base_val, top_pos, top_neg, fig_shap = shap_res
+            sh_col1, sh_col2 = st.columns(2)
+            with sh_col1:
+                st.markdown("#### Signals Pushing Price UP")
+                if top_pos:
+                    for driver in top_pos:
+                        feat = driver["feature"]
+                        plain = get_feature_display_name(feat)
+                        st.markdown(f"- **{plain}** (`{feat}`)")
+                else:
+                    st.write("No strong upward signals this hour.")
+            with sh_col2:
+                st.markdown("#### Signals Pushing Price DOWN")
+                if top_neg:
+                    for driver in top_neg:
+                        feat = driver["feature"]
+                        plain = get_feature_display_name(feat)
+                        st.markdown(f"- **{plain}** (`{feat}`)")
+                else:
+                    st.write("No strong downward signals this hour.")
+
+            if fig_shap is not None:
+                try:
+                    st.plotly_chart(fig_shap, use_container_width=True)
+                except Exception:
+                    try:
+                        st.pyplot(fig_shap)
+                    except Exception:
+                        pass
+        else:
+            st.info("[INFO] TreeSHAP factor attributions ready on next candle close.")
+
+    with st.expander("Technical Model Details & Training History", expanded=False):
+        g_col1, g_col2 = st.columns(2)
+        with g_col1:
+            st.markdown("#### Active Production Model Pedigree")
+            st.markdown(build_model_pedigree_markdown())
+
+        with g_col2:
+            st.markdown("#### Anti-Leakage Chronological Split Boundary")
+            st.markdown(
+                """
+                ```text
+                CLEAN DATASET (34,990 Total 1-Hour Candles):
+                ├── Range: 2022-07-08 13:00 UTC to 2026-07-06 08:00 UTC
+                └── Note: 1 irregular exchange-halt row (2023-03-24 12:00 UTC) removed
+
+                TRAIN PERIOD (80% Chronological — 27,991 Hours):
+                ├── Start: 2022-07-08 13:00:00 UTC
+                └── End:   2025-09-17 17:00:00 UTC (No future market data visible to model)
+
+                PURGE BUFFER (1-Hour Causality Guard — 1 Hour):
+                └── Excluded: 2025-09-17 18:00:00 UTC (Prevents T+1h target leakage across boundary)
+
+                OUT-OF-SAMPLE TEST PERIOD (20% Holdout — 6,998 Hours):
+                ├── Start: 2025-09-17 19:00:00 UTC
+                └── End:   2026-07-06 08:00:00 UTC (Pure out-of-sample forward evaluation)
+                ```
+                """
+            )
+
+        st.markdown("#### Controlled Model Benchmark & Rejection Rationale")
+        st.markdown(
+            """
+            | Model Version | Regressor RMSE (USD) | Direction Hit Rate | Classifier Accuracy | Classifier Macro F1 | Governance Status |
+            | :--- | :--- | :--- | :--- | :--- | :--- |
+            | **Naive Persistence** | **$398.77** | *Baseline* | *Baseline* | *Baseline* | Reference Benchmark |
+            | **`xgb_onnx_v1.0.0`** *(Active)* | $399.47 | **50.50%** | **53.26%** | **0.5297** | **ACTIVE PRODUCTION** |
+            | **`xgb_v2.0.0`** *(36 Stationary)* | Lose to Naive (`MAE 0.0032`) | **51.20%** (`51.63%` uncal.) | 52.07% (`52.49%` uncal.) | LogLoss `0.6926` | **CANDIDATE (SHADOW EVALUATION)** |
+            | **`p1_controlled_candidate_v1`** | $399.37 | 50.36% | 53.03% | 0.5280 | **REJECTED CANDIDATE** |
+
+            **Governance Policy & Candidate Evaluation:**
+            - **Candidate `xgb_v2.0.0` (Shadow Testing):** Trained on 36 strictly stationary features (`v2_36stationary`, removing raw dollar levels). Achieved 52.49% uncalibrated / 52.07% Platt-calibrated holdout accuracy (`0.6919` / `0.6926` log-loss) and `0.0032` return MAE. Retained in shadow mode to log stationary-schema predictions alongside Model 1 (`v1_39features`).
+            - **Candidate `p1_controlled_candidate_v1` (Rejected):** Rejected due to lower directional hit rate (50.36% vs 50.50%) and lower accuracy (53.03% vs 53.26%) on holdout evaluation.
+            - **Automatic Model Onboarding:** Any new model placed into `artifacts/models/` with a manifest is automatically discovered, verified, served in consensus voting, and tracked in Neon DB without manual code changes.
+            """
+        )
+
+        st.markdown("#### MLflow Experiment Runs & Bayesian Optimization Trials")
+        try:
+            import mlflow
+            from config import MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_NAME
+            mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+            runs_df = mlflow.search_runs(experiment_names=[MLFLOW_EXPERIMENT_NAME])
+            if not runs_df.empty:
+                display_cols = [c for c in [
+                    "tags.mlflow.runName", "tags.model_type", "metrics.test_accuracy",
+                    "metrics.test_rmse_price", "params.learning_rate", "params.max_depth",
+                    "params.n_estimators", "start_time"
+                ] if c in runs_df.columns]
+                renamed_cols = {
+                    "tags.mlflow.runName": "Run Name",
+                    "tags.model_type": "Model Type",
+                    "metrics.test_accuracy": "Holdout Accuracy",
+                    "metrics.test_rmse_price": "Test RMSE",
+                    "params.learning_rate": "Learning Rate",
+                    "params.max_depth": "Max Depth",
+                    "params.n_estimators": "Trees",
+                    "start_time": "Date / Time",
+                }
+                st.dataframe(runs_df[display_cols].rename(columns=renamed_cols).head(10), use_container_width=True)
+            else:
+                st.info("No MLflow runs recorded yet. Execute `python scripts/run_pipeline.py --tune` to run Optuna Bayesian tuning.")
+        except Exception:
+            st.caption("Offline MLflow tracking active via 'mlruns/'.")
 # -------------------------------------------------------------------------------------
 # TAB 3: PAPER PORTFOLIO
 # -------------------------------------------------------------------------------------
@@ -1928,128 +2057,3 @@ with tab3:
         st.info("[INFO] Portfolio initialized with $10,000.00 USDT virtual bankroll. Transactions log each hour as trades execute.")
 
 
-# -------------------------------------------------------------------------------------
-# TREESHAP ATTRIBUTION & TECHNICAL DETAILS
-# -------------------------------------------------------------------------------------
-with tab2:
-    st.subheader("Top Signals Behind This Hour's Prediction")
-    st.caption("TreeSHAP feature attributions and walk-forward chronological evaluation boundaries.")
-
-    if is_stale_fallback:
-        st.warning(
-            "⚠️ Live market feed unavailable (offline replay active). "
-            "Live TreeSHAP factor attribution inference is paused to prevent presenting stale explanations as live."
-        )
-    else:
-        shap_res = generate_live_shap_attribution(
-            live_df=live_market_df,
-            explainer_clf=explainer_clf,
-            is_stale=is_stale_fallback,
-            top_n=4,
-        )
-        if shap_res:
-            base_val, top_pos, top_neg, fig_shap = shap_res
-            sh_col1, sh_col2 = st.columns(2)
-            with sh_col1:
-                st.markdown("#### Signals Pushing Price UP")
-                if top_pos:
-                    for driver in top_pos:
-                        feat = driver["feature"]
-                        plain = get_feature_display_name(feat)
-                        st.markdown(f"- **{plain}** (`{feat}`)")
-                else:
-                    st.write("No strong upward signals this hour.")
-            with sh_col2:
-                st.markdown("#### Signals Pushing Price DOWN")
-                if top_neg:
-                    for driver in top_neg:
-                        feat = driver["feature"]
-                        plain = get_feature_display_name(feat)
-                        st.markdown(f"- **{plain}** (`{feat}`)")
-                else:
-                    st.write("No strong downward signals this hour.")
-
-            if fig_shap is not None:
-                try:
-                    st.plotly_chart(fig_shap, use_container_width=True)
-                except Exception:
-                    try:
-                        st.pyplot(fig_shap)
-                    except Exception:
-                        pass
-        else:
-            st.info("[INFO] TreeSHAP factor attributions ready on next candle close.")
-
-    with st.expander("Technical Model Details & Training History", expanded=False):
-        g_col1, g_col2 = st.columns(2)
-        with g_col1:
-            st.markdown("#### Active Production Model Pedigree")
-            st.markdown(build_model_pedigree_markdown())
-
-        with g_col2:
-            st.markdown("#### Anti-Leakage Chronological Split Boundary")
-            st.markdown(
-                """
-                ```text
-                CLEAN DATASET (34,990 Total 1-Hour Candles):
-                ├── Range: 2022-07-08 13:00 UTC to 2026-07-06 08:00 UTC
-                └── Note: 1 irregular exchange-halt row (2023-03-24 12:00 UTC) removed
-
-                TRAIN PERIOD (80% Chronological — 27,991 Hours):
-                ├── Start: 2022-07-08 13:00:00 UTC
-                └── End:   2025-09-17 17:00:00 UTC (No future market data visible to model)
-
-                PURGE BUFFER (1-Hour Causality Guard — 1 Hour):
-                └── Excluded: 2025-09-17 18:00:00 UTC (Prevents T+1h target leakage across boundary)
-
-                OUT-OF-SAMPLE TEST PERIOD (20% Holdout — 6,998 Hours):
-                ├── Start: 2025-09-17 19:00:00 UTC
-                └── End:   2026-07-06 08:00:00 UTC (Pure out-of-sample forward evaluation)
-                ```
-                """
-            )
-
-        st.markdown("#### Controlled Model Benchmark & Rejection Rationale")
-        st.markdown(
-            """
-            | Model Version | Regressor RMSE (USD) | Direction Hit Rate | Classifier Accuracy | Classifier Macro F1 | Governance Status |
-            | :--- | :--- | :--- | :--- | :--- | :--- |
-            | **Naive Persistence** | **$398.77** | *Baseline* | *Baseline* | *Baseline* | Reference Benchmark |
-            | **`xgb_onnx_v1.0.0`** *(Active)* | $399.47 | **50.50%** | **53.26%** | **0.5297** | **ACTIVE PRODUCTION** |
-            | **`xgb_v2.0.0`** *(36 Stationary)* | Lose to Naive (`MAE 0.0032`) | **51.20%** (`51.63%` uncal.) | 52.07% (`52.49%` uncal.) | LogLoss `0.6926` | **CANDIDATE (SHADOW EVALUATION)** |
-            | **`p1_controlled_candidate_v1`** | $399.37 | 50.36% | 53.03% | 0.5280 | **REJECTED CANDIDATE** |
-
-            **Governance Policy & Candidate Evaluation:**
-            - **Candidate `xgb_v2.0.0` (Shadow Testing):** Trained on 36 strictly stationary features (`v2_36stationary`, removing raw dollar levels). Achieved 52.49% uncalibrated / 52.07% Platt-calibrated holdout accuracy (`0.6919` / `0.6926` log-loss) and `0.0032` return MAE. Retained in shadow mode to log stationary-schema predictions alongside Model 1 (`v1_39features`).
-            - **Candidate `p1_controlled_candidate_v1` (Rejected):** Rejected due to lower directional hit rate (50.36% vs 50.50%) and lower accuracy (53.03% vs 53.26%) on holdout evaluation.
-            - **Automatic Model Onboarding:** Any new model placed into `artifacts/models/` with a manifest is automatically discovered, verified, served in consensus voting, and tracked in Neon DB without manual code changes.
-            """
-        )
-
-        st.markdown("#### MLflow Experiment Runs & Bayesian Optimization Trials")
-        try:
-            import mlflow
-            from config import MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_NAME
-            mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-            runs_df = mlflow.search_runs(experiment_names=[MLFLOW_EXPERIMENT_NAME])
-            if not runs_df.empty:
-                display_cols = [c for c in [
-                    "tags.mlflow.runName", "tags.model_type", "metrics.test_accuracy",
-                    "metrics.test_rmse_price", "params.learning_rate", "params.max_depth",
-                    "params.n_estimators", "start_time"
-                ] if c in runs_df.columns]
-                renamed_cols = {
-                    "tags.mlflow.runName": "Run Name",
-                    "tags.model_type": "Model Type",
-                    "metrics.test_accuracy": "Holdout Accuracy",
-                    "metrics.test_rmse_price": "Test RMSE",
-                    "params.learning_rate": "Learning Rate",
-                    "params.max_depth": "Max Depth",
-                    "params.n_estimators": "Trees",
-                    "start_time": "Date / Time",
-                }
-                st.dataframe(runs_df[display_cols].rename(columns=renamed_cols).head(10), use_container_width=True)
-            else:
-                st.info("No MLflow runs recorded yet. Execute `python scripts/run_pipeline.py --tune` to run Optuna Bayesian tuning.")
-        except Exception:
-            st.caption("Offline MLflow tracking active via 'mlruns/'.")
