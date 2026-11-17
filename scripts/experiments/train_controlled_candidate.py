@@ -1013,7 +1013,7 @@ def save_experiment_artifacts(
 
 
 def run_controlled_training_pipeline(
-    candidate_data_path: Union[str, Path] = str(BASE_DIR / "data" / "processed" / "featured_btc_data_candidate.csv"),
+    candidate_data_path: Union[str, Path] = FEATURED_BTC_DATA_PATH,
     raw_candlestick_path: Union[str, Path] = str(BTCUSDT_1H_CSV),
     output_dir: Union[str, Path] = str(BASE_DIR / "artifacts" / "experiments" / "p1_controlled_retrain"),
     split_ratio: float = 0.8,
@@ -1113,7 +1113,7 @@ def main() -> None:
     parser.add_argument(
         "--candidate-data",
         type=str,
-        default=str(BASE_DIR / "data" / "processed" / "featured_btc_data_candidate.csv"),
+        default=FEATURED_BTC_DATA_PATH,
         help="Path to candidate dataset CSV.",
     )
     parser.add_argument(
