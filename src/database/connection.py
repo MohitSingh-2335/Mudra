@@ -523,6 +523,7 @@ def init_db(target_engine: Optional[Engine] = None) -> None:
                     conn.commit()
                 except Exception as exc:
                     logger.error(f"Failed to add tick_id to paper_portfolio: {exc}")
+                    raise RuntimeError(f"Database migration failed: unable to add required column 'tick_id' to paper_portfolio: {exc}") from exc
 
             existing_indexes = {idx["name"] for idx in inspector.get_indexes("paper_portfolio")}
             if "uq_paper_portfolio_tick_id" not in existing_indexes:
