@@ -88,7 +88,7 @@ CANDIDATE_MODEL_SPEC: Dict[str, Any] = {
     "classifier_sha256": "80139690e79804a29a9b1cd11e83999530c1b5c013023a740bb975873625eb7f",
     "feature_schema_version": "v1_39features",
     "target_definition": "next_1h_close_return_pct_and_binary_direction",
-    "training_dataset_path": "data/processed/featured_btc_data_candidate.csv",
+    "training_dataset_path": "data/processed/featured_btc_data.csv",
     "training_dataset_sha256": "0b819589346b03cbb1a830db1e10235f79179da89c030a6d55d60b09585e2648",
     "training_row_count": 27991,
     "split_metadata": {
