@@ -12,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 import app
 from app import format_risk_levels
 from config import CLASSIFIER_FEATURES, FEATURED_BTC_DATA_PATH, REGRESSOR_FEATURES
-from src.api.main import (
+from src.api import (
     ACTIVE_MODEL_VERSION,
     ACTIVE_MODEL_VERSION as SCHEMA_ACTIVE_MODEL_VERSION,
     HealthResponse,
