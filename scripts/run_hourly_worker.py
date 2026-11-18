@@ -11,7 +11,7 @@ if str(ROOT_DIR) not in sys.path:
 import src.database.connection as db_conn
 from src.database.connection import get_db
 from src.database.models import MarketTick, ApiTelemetry
-from src.engine.sync import sync_hourly_quant_cycle, fetch_latest_confirmed_candle
+from src.engine import sync_hourly_quant_cycle, fetch_latest_confirmed_candle
 
 OUTBOX_FILE = ROOT_DIR / "data" / "sync_outbox.json"
 fetch_latest_candle = fetch_latest_confirmed_candle
