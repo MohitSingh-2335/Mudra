@@ -15,8 +15,7 @@ from src.agents.council import (
     risk_critic_node,
     build_trading_graph,
     run_trading_graph,
-)
-from src.agents.tools import (
+    fetch_historical_candles,
     get_live_market_data,
     calculate_technical_signals,
     get_model_return_forecast,
