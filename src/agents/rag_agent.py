@@ -1,13 +1,7 @@
-# src/agents/rag_agent.py
 import logging
 import os
-import sys
 from pathlib import Path
 from typing import List, Optional, Dict, Any
-
-ROOT_DIR = Path(__file__).resolve().parents[2]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
 
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 logging.getLogger("chromadb.telemetry").setLevel(logging.ERROR)
@@ -47,14 +41,13 @@ class GeminiEmbeddingFunction(EmbeddingFunction):
             return [[0.0] * 768 for _ in input]
         try:
             import google.generativeai as genai
-            res = genai.embed_content(model="models/text-embedding-004", content=input, output_dimensionality=768)
-            return res["embedding"]
+            return genai.embed_content(model="models/text-embedding-004", content=input, output_dimensionality=768)["embedding"]
         except Exception:
             return [[0.0] * 768 for _ in input]
 
 
 FOUNDATIONAL_KNOWLEDGE = [
-    {"id": "taker_ratio", "doc": "High Taker Buy Ratio signals aggressive buying and bullish momentum; low ratios indicate seller dominance.", "category": "microstructure"},
+    {"id": "taker_ratio", "doc": "High Taker Buy Ratio signals aggressive buying; low ratios indicate seller dominance.", "category": "microstructure"},
     {"id": "momentum_return", "doc": "Positive 6-hour mean return with expanding volatility confirms trend continuation.", "category": "trend"},
     {"id": "macro_liquidity", "doc": "Fed rate cuts and QE expand liquidity, serving as historical macro tailwinds for Bitcoin.", "category": "macro"},
     {"id": "etf_flows", "doc": "Sustained net Spot Bitcoin ETF inflows absorb miner issuance, establishing support floors.", "category": "institutional"},
