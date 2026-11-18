@@ -14,13 +14,12 @@ from config import (
     ACTIVE_MODEL_VERSION, CLASSIFIER_MODEL_SHA256, FEATURE_SCHEMA_VERSION,
     MIN_HURDLE_PCT, PORTFOLIO_ADVISORY_LOCK_ID, REGRESSOR_MODEL_SHA256,
 )
-from src.database.connection import (
-    CANONICAL_FUNCTIONS, CANONICAL_TABLE_COLUMNS, CANONICAL_TRIGGERS,
+from src.database import (
+    Base, CANONICAL_FUNCTIONS, CANONICAL_TABLE_COLUMNS, CANONICAL_TRIGGERS,
     SchemaDriftError, _TICK_ID_COLUMN_CACHE, _classify_column_type,
     create_db_engine, engine as default_engine, ensure_canonical_function,
     ensure_canonical_trigger, verify_db_schema,
 )
-from src.database.models import Base
 
 MIGRATION_ADVISORY_LOCK_ID = 888002
 
