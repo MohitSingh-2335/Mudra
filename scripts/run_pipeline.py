@@ -116,7 +116,7 @@ def run_pipeline(
         return
 
     if tune:
-        from src.hyperparameter_tuning import run_tuning
+        from src.model_training import run_tuning
         run_tuning(n_trials=n_trials)
     elif train_baseline:
         from src.model_training import train_and_save_models
