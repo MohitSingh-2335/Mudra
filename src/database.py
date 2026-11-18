@@ -873,6 +873,10 @@ def get_training_approved_investigations(limit: int = 100, session: Optional[Ses
 # 5. RETRO-COMPATIBILITY MAPPINGS
 # ---------------------------------------------------------------------------
 # Allows existing callers to reference submodules during migration
+connection = sys.modules[__name__]
+models = sys.modules[__name__]
+queries = sys.modules[__name__]
+
 sys.modules["src.database.models"] = sys.modules[__name__]
 sys.modules["src.database.connection"] = sys.modules[__name__]
 sys.modules["src.database.queries"] = sys.modules[__name__]
