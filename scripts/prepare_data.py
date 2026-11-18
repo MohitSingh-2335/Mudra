@@ -9,9 +9,11 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from config import BTCUSDT_1H_CSV, FEATURED_BTC_DATA_PATH
-from src.agents.fear_greed_agent import merge_fear_greed
-from src.agents.onchain_agent import merge_onchain
-from src.data_preprocessing import load_and_clean_data
+from src.data_preprocessing import (
+    load_and_clean_data,
+    merge_fear_greed,
+    merge_onchain,
+)
 from src.feature_engineering import create_features
 
 
