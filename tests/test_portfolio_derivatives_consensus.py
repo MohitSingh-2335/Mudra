@@ -10,7 +10,7 @@ from src.engine.paper_portfolio import (
     evaluate_spot_hold_until_profit_decision,
     evaluate_futures_long_short_plan,
 )
-from src.engine.model_consensus import (
+from src.engine.sync import (
     estimate_next_hour_price_range_usd,
     evaluate_multi_angle_consensus,
 )
