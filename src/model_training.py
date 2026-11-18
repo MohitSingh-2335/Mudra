@@ -14,9 +14,11 @@ from config import (
     MLFLOW_EXPERIMENT_NAME, MLFLOW_TRACKING_URI, MODELS_DIR,
     REGRESSOR_FEATURES, REGRESSOR_MODEL_PATH,
 )
-from src.agents.fear_greed_agent import merge_fear_greed
-from src.agents.onchain_agent import merge_onchain
-from src.data_preprocessing import load_and_clean_data
+from src.data_preprocessing import (
+    load_and_clean_data,
+    merge_fear_greed,
+    merge_onchain,
+)
 from src.feature_engineering import create_features
 
 
