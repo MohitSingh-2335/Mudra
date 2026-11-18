@@ -15,7 +15,6 @@ if hasattr(sys.stdout, "reconfigure") and sys.stdout.isatty():
 import joblib
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -23,20 +22,19 @@ from config import (
     ACTIVE_MODEL_VERSION,
     APP_SUBTITLE,
     APP_TITLE,
-    CLASSIFIER_FEATURES,
     CLASSIFIER_MODEL_PATH,
     CLASSIFIER_MODEL_SHA256,
     FEATURE_DISPLAY_NAMES,
-    FEATURE_SCHEMA_VERSION,
     MIN_HURDLE_PCT,
-    REGRESSOR_FEATURES,
     REGRESSOR_MODEL_PATH,
     REGRESSOR_MODEL_SHA256,
     ROUND_TRIP_FRICTION_PCT,
     TOTAL_FRICTION_PER_SIDE_PCT,
 )
+from src.agents.tools import fetch_historical_candles
 from src.agents.trading_graph import run_trading_graph
-from src.database.connection import test_connection
+from src.database.connection import get_db, test_connection
+from src.database.investigations import get_prediction_investigations
 from src.database.queries import (
     get_latest_council_audit,
     get_latest_market_ticks,
@@ -46,7 +44,7 @@ from src.database.queries import (
     get_reconciliation_kpis,
 )
 from src.engine.sync import sync_hourly_quant_cycle
-from src.explainability import explain_single_prediction, get_tree_explainer
+from src.explainability import get_tree_explainer
 from src.model_loader import load_verified_model
 from src.ui.charts import (
     create_alpha_equity_curve,
@@ -54,42 +52,11 @@ from src.ui.charts import (
     create_tradingview_candlestick,
 )
 
-FEATURE_PLAIN_NAMES: Dict[str, str] = FEATURE_DISPLAY_NAMES
-FEATURE_HUMAN_NAMES: Dict[str, str] = FEATURE_DISPLAY_NAMES
-
-
-def get_feature_display_name(feat_name: str) -> str:
-    return FEATURE_DISPLAY_NAMES.get(feat_name, str(feat_name).replace("_", " ").title())
-
-
-def get_human_feature_label(feat_name: str) -> str:
-    desc = FEATURE_DISPLAY_NAMES.get(feat_name)
-    return f"{feat_name} ({desc})" if desc else feat_name
-
-
 st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
-
-st.markdown(
-    """
-    <style>
-    .main { background-color: #0E1117; color: #E0E0E0; }
-    .stMetric { background-color: #1A1F2C; border: 1px solid #2B313E; border-radius: 8px; padding: 12px 14px; min-height: 115px; }
-    [data-testid="stMetricLabel"] { white-space: normal !important; }
-    [data-testid="stMetricLabel"] > div, [data-testid="stMetricLabel"] p { white-space: normal !important; overflow: visible !important; text-overflow: unset !important; line-height: 1.25 !important; font-size: 0.85rem !important; color: #A0AEC0 !important; }
-    [data-testid="stMetricValue"] { font-size: 1.35rem !important; line-height: 1.25 !important; }
-    [data-testid="stMetricValue"] > div { white-space: normal !important; overflow: visible !important; text-overflow: unset !important; word-break: break-word !important; }
-    [data-testid="stMetricDelta"] { font-size: 0.80rem !important; line-height: 1.2 !important; }
-    [data-testid="stMetricDelta"] > div { white-space: normal !important; overflow: visible !important; text-overflow: unset !important; word-break: break-word !important; }
-    .stTabs [data-baseweb="tab-list"] { gap: 12px; }
-    .stTabs [data-baseweb="tab"] { background-color: #161B26; border-radius: 6px; padding: 8px 18px; color: #A0AEC0; }
-    .stTabs [aria-selected="true"] { background-color: #2962FF !important; color: #FFFFFF !important; }
-    div[data-testid="stExpander"] { border: 1px solid #2B313E; border-radius: 8px; background-color: #131722; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown("<style>.main { background-color: #0E1117; color: #E0E0E0; }</style>", unsafe_allow_html=True)
 
 
+# Load verified production XGBoost models
 @st.cache_resource
 def load_models():
     try:
@@ -97,16 +64,16 @@ def load_models():
         clf = load_verified_model(CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256)
         reg.set_params(device="cpu")
         clf.set_params(device="cpu")
-        explainer = get_tree_explainer(clf)
-        return reg, clf, explainer
+        return reg, clf, get_tree_explainer(clf)
     except Exception as exc:
-        st.error(f"[ERROR] Failed to load ML artifacts: {exc}")
+        st.error(f"Failed to load ML artifacts: {exc}")
         return None, None, None
 
 
 reg_model, clf_model, explainer_clf = load_models()
 
 
+# Helper to format signed USD values
 def format_signed_usd(val: Optional[float], decimals: int = 2) -> str:
     if val is None:
         return "Unavailable"
@@ -114,6 +81,7 @@ def format_signed_usd(val: Optional[float], decimals: int = 2) -> str:
     return f"{sign}${abs(val):,.{decimals}f}"
 
 
+# Check if the market candle feed is stale
 def check_feed_staleness(df: pd.DataFrame, max_lag_hours: float = 3.0) -> Tuple[bool, float]:
     if df is None or df.empty:
         return True, 0.0
@@ -122,12 +90,8 @@ def check_feed_staleness(df: pd.DataFrame, max_lag_hours: float = 3.0) -> Tuple[
     return (lag > max_lag_hours or df.attrs.get("source") == "local_fallback", lag)
 
 
-def generate_live_forecast(
-    live_df: pd.DataFrame,
-    reg_model: Any,
-    clf_model: Any,
-    is_stale: bool = False,
-) -> Optional[Dict[str, Any]]:
+# Generate next-hour return and direction predictions from live candle
+def generate_live_forecast(live_df: pd.DataFrame, reg_model: Any, clf_model: Any, is_stale: bool = False) -> Optional[Dict[str, Any]]:
     if is_stale or live_df is None or live_df.empty or reg_model is None or len(live_df) < 35:
         return None
 
@@ -140,122 +104,83 @@ def generate_live_forecast(
 
     try:
         sample_input = extract_features_for_inference(live_df)
-    except Exception:
-        return None
+        recent = live_df.iloc[-1]
+        curr_price = float(recent["close"])
+        candle_range = float(recent["high"] - recent["low"])
+        spread = (candle_range / curr_price) * 100.0 if curr_price > 0 else 0.0
+        taker = float(recent.get("taker_buy_ratio", 0.5))
 
-    recent = live_df.iloc[-1]
-    curr_price = float(recent["close"])
-    candle_range = float(recent["high"] - recent["low"])
-    hurdle_dollar = curr_price * (MIN_HURDLE_PCT / 100.0)
-    spread = (candle_range / curr_price) * 100.0 if curr_price > 0 else 0.0
-    taker = float(recent.get("taker_buy_ratio", 0.5))
-
-    try:
         raw_pred_ret = float(predict_with_validation(reg_model, sample_input, model_type="regressor")[0])
-    except Exception:
-        raw_pred_ret = 0.0
+        pred_ret_pct = raw_pred_ret * 100.0
+        pred_move = curr_price * raw_pred_ret
+        cleared = abs(pred_ret_pct) >= MIN_HURDLE_PCT
 
-    pred_ret_pct = raw_pred_ret * 100.0
-    pred_move = curr_price * raw_pred_ret
-    pred_target = curr_price + pred_move
-    cleared = abs(pred_ret_pct) >= MIN_HURDLE_PCT
-    badge_text = f"Cleared {MIN_HURDLE_PCT:.2f}% Hurdle [PASS]" if cleared else "Below Fee Hurdle [SKIP]"
-
-    prob_up, prob_down = 50.0, 50.0
-    direction = "UP" if pred_ret_pct >= 0 else "DOWN"
-    if clf_model:
-        try:
+        prob_up, prob_down = 50.0, 50.0
+        direction = "UP" if pred_ret_pct >= 0 else "DOWN"
+        if clf_model:
             clf_df = validate_inference_features(sample_input, model_type="classifier")
             code = int(predict_with_validation(clf_model, clf_df, model_type="classifier")[0])
             direction = "UP" if code == 1 else "DOWN"
             if hasattr(clf_model, "predict_proba"):
                 probs = predict_proba_with_validation(clf_model, clf_df)[0]
-                prob_down = float(probs[0]) * 100.0
-                prob_up = float(probs[1]) * 100.0
-        except Exception:
-            pass
+                prob_down, prob_up = float(probs[0]) * 100.0, float(probs[1]) * 100.0
 
-    direction_badge = "SIDEWAYS (CHOP)" if not cleared else ("BULLISH (UP)" if direction == "UP" else "BEARISH (DOWN)")
+        direction_badge = "SIDEWAYS (CHOP)" if not cleared else ("BULLISH (UP)" if direction == "UP" else "BEARISH (DOWN)")
 
-    return {
-        "raw_pred_ret": raw_pred_ret,
-        "pred_ret_pct": pred_ret_pct,
-        "pred_dollar_move": pred_move,
-        "pred_target": pred_target,
-        "cleared_hurdle": cleared,
-        "direction_label": direction,
-        "direction_badge": direction_badge,
-        "prob_up": prob_up,
-        "prob_down": prob_down,
-        "taker": taker,
-        "spread_pct": spread,
-        "candle_range_usd": candle_range,
-        "hurdle_dollar_min": hurdle_dollar,
-        "hurdle_badge_text": badge_text,
-        "current_price": curr_price,
-    }
-
-
-def generate_live_shap_attribution(live_df: pd.DataFrame, explainer_clf: Any, is_stale: bool = False, top_n: int = 4):
-    if is_stale or live_df is None or live_df.empty or explainer_clf is None or len(live_df) < 35:
-        return None
-    from src.feature_engineering import extract_features_for_inference, validate_inference_features
-    try:
-        sample_input = extract_features_for_inference(live_df)
-        clf_input = validate_inference_features(sample_input, model_type="classifier")
-        return explain_single_prediction(explainer_clf, clf_input, top_n=top_n)
+        return {
+            "raw_pred_ret": raw_pred_ret,
+            "pred_ret_pct": pred_ret_pct,
+            "pred_dollar_move": pred_move,
+            "pred_target": curr_price + pred_move,
+            "cleared_hurdle": cleared,
+            "direction_label": direction,
+            "direction_badge": direction_badge,
+            "prob_up": prob_up,
+            "prob_down": prob_down,
+            "taker": taker,
+            "spread_pct": spread,
+            "candle_range_usd": candle_range,
+            "hurdle_dollar_min": curr_price * (MIN_HURDLE_PCT / 100.0),
+            "current_price": curr_price,
+        }
     except Exception:
         return None
 
 
-def build_council_scenario_payload(
-    scenario_selected: str,
-    current_price: float,
-    live_forecast: Optional[Dict[str, Any]] = None,
-    live_df: Optional[pd.DataFrame] = None,
-):
+# Build agent council scenario dictionary
+def build_council_scenario_payload(scenario_selected: str, current_price: float, live_forecast: Optional[Dict[str, Any]] = None, live_df: Optional[pd.DataFrame] = None):
     current_price = float(current_price)
     if scenario_selected == "live" and live_forecast:
-        expected_return_pct = float(live_forecast.get("pred_ret_pct", 0.08))
+        expected_ret = float(live_forecast.get("pred_ret_pct", 0.08))
         c_dir = live_forecast.get("direction_label", "UP")
         confidence = float(live_forecast.get("prob_up", 50.0)) / 100.0 if c_dir == "UP" else float(live_forecast.get("prob_down", 50.0)) / 100.0
-        volatility_spread = max(0.002, float(live_forecast.get("spread_pct", 1.8)) / 100.0)
-        taker_buy_ratio = float(live_forecast.get("taker", 0.51))
-        order_flow_bias = "BUYER_AGGRESSION" if taker_buy_ratio > 0.52 else ("SELLER_AGGRESSION" if taker_buy_ratio < 0.48 else "NEUTRAL")
+        vol_spread = max(0.002, float(live_forecast.get("spread_pct", 1.8)) / 100.0)
+        taker = float(live_forecast.get("taker", 0.51))
+        order_bias = "BUYER_AGGRESSION" if taker > 0.52 else ("SELLER_AGGRESSION" if taker < 0.48 else "NEUTRAL")
         volume = float(live_df["volume"].iloc[-1]) if live_df is not None and not live_df.empty and "volume" in live_df.columns else 1200.0
-        rsi_estimate = float(live_df["rsi"].iloc[-1]) if live_df is not None and not live_df.empty and "rsi" in live_df.columns else 50.0
+        rsi = float(live_df["rsi"].iloc[-1]) if live_df is not None and not live_df.empty and "rsi" in live_df.columns else 50.0
     elif scenario_selected == "bullish":
-        volatility_spread, volume, taker_buy_ratio = 0.015, 5000.0, 0.65
-        order_flow_bias, rsi_estimate, expected_return_pct, confidence = "STRONG_BUYER_AGGRESSION", 62.0, 0.42, 0.88
+        vol_spread, volume, taker = 0.015, 5000.0, 0.65
+        order_bias, rsi, expected_ret, confidence = "STRONG_BUYER_AGGRESSION", 62.0, 0.42, 0.88
     elif scenario_selected == "vol_spike":
-        volatility_spread, volume, taker_buy_ratio = 0.052, 12000.0, 0.35
-        order_flow_bias, rsi_estimate, expected_return_pct, confidence = "EXTREME_LIQUIDATION", 28.0, -0.20, 0.60
+        vol_spread, volume, taker = 0.052, 12000.0, 0.35
+        order_bias, rsi, expected_ret, confidence = "EXTREME_LIQUIDATION", 28.0, -0.20, 0.60
     elif scenario_selected == "chop":
-        volatility_spread, volume, taker_buy_ratio = 0.004, 400.0, 0.49
-        order_flow_bias, rsi_estimate, expected_return_pct, confidence = "FLAT_CHOP", 50.0, 0.02, 0.45
+        vol_spread, volume, taker = 0.004, 400.0, 0.49
+        order_bias, rsi, expected_ret, confidence = "FLAT_CHOP", 50.0, 0.02, 0.45
     else:
-        volatility_spread, volume, taker_buy_ratio = 0.018, 1200.0, 0.51
-        order_flow_bias, rsi_estimate, expected_return_pct, confidence = "NEUTRAL", 51.0, 0.08, 0.65
+        vol_spread, volume, taker = 0.018, 1200.0, 0.51
+        order_bias, rsi, expected_ret, confidence = "NEUTRAL", 51.0, 0.08, 0.65
 
-    high_price = current_price * (1.0 + volatility_spread / 2.0)
-    low_price = current_price * (1.0 - volatility_spread / 2.0)
-    vol_range = round(((high_price - low_price) / current_price) * 100.0, 3) if current_price > 0 else 0.0
-    pred_move = round(current_price * (expected_return_pct / 100.0), 2)
-    clears = bool(abs(expected_return_pct) >= MIN_HURDLE_PCT)
-
-    direction = "SIDEWAYS" if not clears else ("UP" if expected_return_pct >= 0 else "DOWN")
-    badge = "SIDEWAYS [CHOP]" if not clears else ("BULLISH [UP]" if expected_return_pct >= 0 else "BEARISH [DOWN]")
-
-    m_data = {"close": current_price, "high": high_price, "low": low_price, "volume": volume, "taker_buy_ratio": taker_buy_ratio}
-    t_data = {"volatility_spread": volatility_spread, "volatility_range_pct": vol_range, "order_flow_bias": order_flow_bias, "rsi_estimate": rsi_estimate}
-    f_data = {"expected_return_pct": expected_return_pct, "predicted_dollar_move": pred_move, "clears_hurdle": clears, "confidence": confidence, "direction": direction, "direction_badge": badge}
+    clears = bool(abs(expected_ret) >= MIN_HURDLE_PCT)
+    direction = "SIDEWAYS" if not clears else ("UP" if expected_ret >= 0 else "DOWN")
+    m_data = {"close": current_price, "high": current_price * (1 + vol_spread / 2), "low": current_price * (1 - vol_spread / 2), "volume": volume, "taker_buy_ratio": taker}
+    t_data = {"volatility_spread": vol_spread, "volatility_range_pct": round(vol_spread * 100, 3), "order_flow_bias": order_bias, "rsi_estimate": rsi}
+    f_data = {"expected_return_pct": expected_ret, "predicted_dollar_move": round(current_price * (expected_ret / 100.0), 2), "clears_hurdle": clears, "confidence": confidence, "direction": direction}
     return m_data, t_data, f_data
 
 
-_EXPECTED_MOVE_PCT_RE = re.compile(r"expected\s+(?:return|move)\s*\(\s*([+-]?\d+(?:\.\d+)?)\s*%\s*\)")
-_BELOW_THRESHOLD_PCT_RE = re.compile(r"(?:below|<|fails?\s+to\s+clear(?:\s+the|\s+estimated)?|failed\s+to\s+clear(?:\s+the|\s+estimated)?|does\s+not\s+justify(?:\s+estimated)?|lacks\s+sufficient\s+directional\s+momentum\s+to\s+clear(?:\s+estimated)?)\s*(\d+(?:\.\d+)?)\s*%")
-
-
+# Human-readable rationale for paper portfolio trades
 def format_portfolio_rationale(row) -> str:
     act = str(row.get("action", "")).upper()
     notes = str(row.get("notes", "") or "")
@@ -263,32 +188,22 @@ def format_portfolio_rationale(row) -> str:
         amt = float(row.get("btc_amount", 0.0) or 0.0)
         p = float(row.get("execution_price", 0.0) or 0.0)
         return f"Position Opened: Allocated 10% Kelly fraction (~${amt * p:,.0f}) on approved bullish signal."
-    elif act == "SELL":
+    if act == "SELL":
         pnl = float(row.get("realized_pnl_usd", 0.0) or 0.0)
         return f"Position Closed: Sold inventory at market (Realized PnL: ${pnl:+,.2f})."
-    elif act == "HOLD":
+    if act == "HOLD":
         notes_lower = notes.lower()
-        move_match = _EXPECTED_MOVE_PCT_RE.search(notes_lower)
-        bounds = [float(m) for m in _BELOW_THRESHOLD_PCT_RE.findall(notes_lower)]
-        has_phrase = any(w in notes_lower for w in ["sub-hurdle", "below hurdle", "below fee hurdle", "fails to clear", "failed to clear", "fee drag", "does not justify", "lacks sufficient directional momentum to clear"])
-
-        if move_match is not None:
-            is_below = has_phrase and (abs(float(move_match.group(1))) < float(MIN_HURDLE_PCT))
-        elif bounds:
-            is_below = any(b <= float(MIN_HURDLE_PCT) for b in bounds)
-        else:
-            is_below = has_phrase
-
-        if is_below:
+        if any(w in notes_lower for w in ["sub-hurdle", "below hurdle", "fee drag", "fails to clear"]):
             return f"Capital Preserved: Expected move is below {MIN_HURDLE_PCT:.2f}% round-trip fee hurdle."
-        elif "veto" in notes_lower:
+        if "veto" in notes_lower:
             return "Risk Veto: Trade prevented by Risk Critic to protect capital."
         return "Capital Preserved: Sideways chop; preserving cash until high-conviction setup."
-    elif "DEPOSIT" in act:
+    if "DEPOSIT" in act:
         return "Portfolio Initialized: Starting bankroll of $10,000.00 USDT."
     return notes or "Execution logged."
 
 
+# Markdown pedigree table for model transparency
 def build_model_pedigree_markdown() -> str:
     return (
         "| Parameter | Active Value | Rationale |\n"
@@ -302,31 +217,27 @@ def build_model_pedigree_markdown() -> str:
     )
 
 
-from src.agents.tools import fetch_historical_candles
-
-
+# Fetch recent market candles
 @st.cache_data(ttl=60)
 def fetch_live_market_candles(symbol: str = "BTCUSDT") -> pd.DataFrame:
     try:
         return fetch_historical_candles(symbol=symbol, limit=100)
     except Exception as exc:
         empty = pd.DataFrame()
-        empty.attrs["error"] = f"{type(exc).__name__}: {exc}"
+        empty.attrs["error"] = str(exc)
         return empty
 
 
+# Query cloud database state and metrics
 @st.cache_data(ttl=60)
 def fetch_cloud_database_state(current_price: Optional[float]):
-    fallback = {
-        "db_ok": False, "db_ver": "Offline", "db_lat": 0.0, "db_error": "Neon database is unavailable.",
-        "ticks_df": pd.DataFrame(), "rec_df": pd.DataFrame(), "rec_kpis": {}, "port_df": pd.DataFrame(), "port_kpis": {}, "latest_audit": None,
-    }
+    fallback = {"db_ok": False, "db_ver": "Offline", "db_lat": 0.0, "db_error": "Database unavailable", "ticks_df": pd.DataFrame(), "rec_df": pd.DataFrame(), "rec_kpis": {}, "port_df": pd.DataFrame(), "port_kpis": {}, "latest_audit": None}
     try:
         db_ok, db_ver, db_lat = test_connection()
         if not db_ok:
             return fallback
         return {
-            "db_ok": db_ok, "db_ver": db_ver, "db_lat": db_lat, "db_error": None,
+            "db_ok": True, "db_ver": db_ver, "db_lat": db_lat, "db_error": None,
             "ticks_df": get_latest_market_ticks(limit=500),
             "rec_df": get_reconciliation_history(limit=500),
             "rec_kpis": get_reconciliation_kpis(lookback_hours=168),
@@ -335,16 +246,12 @@ def fetch_cloud_database_state(current_price: Optional[float]):
             "latest_audit": get_latest_council_audit(),
         }
     except Exception as exc:
-        fallback["db_error"] = f"{type(exc).__name__}: {exc}"
+        fallback["db_error"] = str(exc)
         return fallback
 
 
-def format_risk_levels(
-    action: str,
-    verdict: str,
-    current_price: float,
-    council_state: Optional[Dict[str, Any]] = None,
-) -> Tuple[str, str]:
+# Format stop-loss and take-profit levels
+def format_risk_levels(action: str, verdict: str, current_price: float, council_state: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
     c_state = council_state or {}
     act = str(action).upper().strip()
     vrd = str(verdict).upper().strip()
@@ -356,7 +263,7 @@ def format_risk_levels(
         sl = float(c_state.get("stop_loss_price") or (current_price * 0.985))
         tp = float(c_state.get("take_profit_price") or (current_price * 1.025))
         return f"${sl:,.2f} (-1.5%)", f"${tp:,.2f} (+2.5%)"
-    elif act == "SELL":
+    if act == "SELL":
         sl = float(c_state.get("stop_loss_price") or (current_price * 1.015))
         tp = float(c_state.get("take_profit_price") or (current_price * 0.975))
         return f"${sl:,.2f} (+1.5%)", f"${tp:,.2f} (-2.5%)"
@@ -365,92 +272,38 @@ def format_risk_levels(
     return no_trade, no_trade
 
 
-TAB3_MODEL_SELECTOR_OPTIONS: List[str] = ["All Models", ACTIVE_MODEL_VERSION]
-
-
-def filter_reconciliation_records(df: pd.DataFrame, selected_model: str) -> pd.DataFrame:
-    if df.empty or "model_version" not in df.columns:
-        return df.copy()
-    if selected_model and selected_model != "All Models":
-        return df[df["model_version"] == selected_model].copy()
-    return df.copy()
-
-
-def prepare_reconciliation_table_display(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df.copy()
-    disp = df.copy()
-    disp["Model Version"] = disp["model_version"].fillna("UNKNOWN") if "model_version" in disp.columns else "UNKNOWN"
-    return disp
-
-
+# Fallback reconciliation KPI calculations
 def compute_fallback_reconciliation_kpis(df: pd.DataFrame, model_version: Optional[str] = None) -> Dict[str, Any]:
     if df.empty:
-        return {
-            "total_evaluated": 0, "total_reconciled": 0, "directional_accuracy_pct": None, "win_rate_pct": None,
-            "mae_usd": None, "mape_pct": None, "information_coefficient": None, "information_coefficient_ic": None,
-            "black_swans_filtered": 0, "black_swan_count": 0, "accurate_count": 0, "tag_breakdown": {}, "model_version": model_version, "is_fallback": True,
-        }
-
+        return {"total_evaluated": 0, "total_reconciled": 0, "directional_accuracy_pct": None, "win_rate_pct": None, "mae_usd": None, "model_version": model_version}
     total = len(df)
     correct = int(df["direction_correct"].sum()) if "direction_correct" in df.columns else 0
     win_rate = round((correct / total) * 100.0, 2) if total > 0 else 0.0
     mae = round(float(df["absolute_error_usd"].mean()), 2) if "absolute_error_usd" in df.columns else 0.0
-    mape = round(float(df["percentage_error"].mean() * 100.0), 4) if "percentage_error" in df.columns else 0.0
-    ic = 0.0
-    if len(df) > 1 and {"predicted_return_pct", "actual_return_pct"}.issubset(df.columns):
-        if float(df["actual_return_pct"].std()) > 0 and float(df["predicted_return_pct"].std()) > 0:
-            corr = df["predicted_return_pct"].corr(df["actual_return_pct"])
-            ic = round(float(corr), 3) if not np.isnan(corr) else 0.0
-
-    return {
-        "total_evaluated": total, "total_reconciled": total, "directional_accuracy_pct": win_rate, "win_rate_pct": win_rate,
-        "mae_usd": mae, "mape_pct": mape, "information_coefficient": ic, "information_coefficient_ic": ic,
-        "black_swans_filtered": int(df["is_black_swan"].sum()) if "is_black_swan" in df.columns else 0,
-        "black_swan_count": int(df["is_black_swan"].sum()) if "is_black_swan" in df.columns else 0,
-        "accurate_count": int((df["error_attribution_tag"] == "ACCURATE").sum()) if "error_attribution_tag" in df.columns else 0,
-        "tag_breakdown": df["error_attribution_tag"].value_counts().to_dict() if "error_attribution_tag" in df.columns else {},
-        "model_version": model_version, "is_fallback": True,
-    }
+    return {"total_evaluated": total, "total_reconciled": total, "directional_accuracy_pct": win_rate, "win_rate_pct": win_rate, "mae_usd": mae, "model_version": model_version}
 
 
-def resolve_tab3_reconciliation_kpis(
-    selected_model: str,
-    base_kpis: Dict[str, Any],
-    filtered_df: pd.DataFrame,
-    kpi_fetcher: Optional[Callable[[Optional[int], Optional[str]], Dict[str, Any]]] = None,
-    lookback_hours: Optional[int] = 168,
-) -> Tuple[Dict[str, Any], Optional[str]]:
-    if selected_model == "All Models" or not selected_model:
-        if kpi_fetcher is not None and lookback_hours != 168:
+# Resolve reconciliation KPIs for UI
+def resolve_tab3_reconciliation_kpis(selected_model: str, base_kpis: Dict[str, Any], filtered_df: pd.DataFrame, kpi_fetcher: Optional[Callable] = None, lookback_hours: Optional[int] = 168):
+    if selected_model in ("All Models", ""):
+        if kpi_fetcher and lookback_hours != 168:
             try:
                 res = kpi_fetcher(lookback_hours, None)
-                if isinstance(res, dict) and not res.get("query_failed") and not res.get("error"):
+                if isinstance(res, dict) and not res.get("query_failed"):
                     return res, None
             except Exception:
                 pass
-        if base_kpis and (base_kpis.get("query_failed") or base_kpis.get("error")):
-            if not filtered_df.empty:
-                return compute_fallback_reconciliation_kpis(filtered_df, "All Models"), f"Displaying fallback KPIs computed from {len(filtered_df)} loaded client records."
-            return {"total_evaluated": 0, "total_reconciled": 0, "directional_accuracy_pct": None, "kpi_unavailable": True}, "Reconciliation KPIs are currently unavailable."
         return base_kpis, None
-
-    query_ok, fetched = False, None
-    if kpi_fetcher is not None:
+    if kpi_fetcher:
         try:
             res = kpi_fetcher(lookback_hours, selected_model)
-            if isinstance(res, dict) and not res.get("query_failed") and not res.get("error"):
-                fetched, query_ok = res, True
+            if isinstance(res, dict) and not res.get("query_failed"):
+                return res, None
         except Exception:
             pass
-
-    if query_ok and fetched is not None:
-        return fetched, None
-
     if not filtered_df.empty:
-        return compute_fallback_reconciliation_kpis(filtered_df, selected_model), f"Displaying fallback KPIs computed from {len(filtered_df)} loaded client records."
-
-    return {"total_evaluated": 0, "total_reconciled": 0, "directional_accuracy_pct": None, "kpi_unavailable": True}, f"Model-specific KPIs for '{selected_model}' are currently unavailable."
+        return compute_fallback_reconciliation_kpis(filtered_df, selected_model), f"Displaying fallback KPIs computed from {len(filtered_df)} records."
+    return {"total_evaluated": 0, "total_reconciled": 0, "directional_accuracy_pct": None}, f"KPIs for '{selected_model}' currently unavailable."
 
 
 # --- Sidebar ---
@@ -497,6 +350,7 @@ else:
 st.title(APP_TITLE)
 st.caption(APP_SUBTITLE)
 
+# KPI Header Metrics
 kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
 p_24h = float(live_market_df["close"].iloc[-24]) if len(live_market_df) >= 24 else None
 d_24h = current_price - p_24h if current_price is not None and p_24h is not None else None
@@ -521,7 +375,6 @@ with kpi5:
 st.markdown("---")
 
 tab1, tab2, tab3 = st.tabs(["Overview", "Model Evidence", "Paper Portfolio"])
-
 forecast_result = None
 
 # --- TAB 1: OVERVIEW ---
@@ -580,7 +433,7 @@ with tab2:
             m_data, t_data, f_data = build_council_scenario_payload("live", current_price, forecast_result, live_market_df)
             st.session_state["council_state"] = run_trading_graph("BTCUSDT", current_price, m_data, t_data, f_data)
 
-    council_state = st.session_state.get("council_state") or (db_state.get("latest_audit") or {"final_decision": "HOLD", "risk_verdict": "APPROVED", "strategist_action": "HOLD", "strategist_conviction": 5, "kelly_fraction": 0.0, "veto_reasons": [], "thesis": "Click button above to run."})
+    council_state = st.session_state.get("council_state") or (db_state.get("latest_audit") or {"final_decision": "HOLD", "risk_verdict": "APPROVED", "strategist_action": "HOLD", "strategist_conviction": 5, "thesis": "Click button above to run."})
     act = council_state.get("final_decision", "HOLD")
     vrd = council_state.get("risk_verdict", "APPROVED")
     conv = council_state.get("strategist_conviction", 5)
@@ -590,7 +443,7 @@ with tab2:
     elif vrd == "APPROVED" and act in ("BUY", "SELL"):
         st.success(f"Decision: {act} Approved — Executing trade.")
     else:
-        st.error(f"Decision: HOLD (Trade Blocked by Risk Check)")
+        st.error("Decision: HOLD (Trade Blocked by Risk Check)")
 
     c_s1, c_s2 = st.columns(2)
     with c_s1:
@@ -613,43 +466,34 @@ with tab2:
         lookback_label = st.radio("Evaluation Time Window", options=["All Time (Total History)", "Last 7 Days (168 Hours)", "Last 24 Hours (24 Hours)"], horizontal=True, key="tab3_lookback_selector")
 
     selected_lookback = None if "All Time" in lookback_label else (24 if "24 Hours" in lookback_label else 168)
-    filtered_rec_df = filter_reconciliation_records(rec_df, selected_model)
-    rec_kpis, kpi_warning = resolve_tab3_reconciliation_kpis(selected_model, base_kpis, filtered_rec_df, get_reconciliation_kpis if db_state.get("db_ok") else None, selected_lookback)
+    filtered_rec_df = rec_df[rec_df["model_version"] == selected_model].copy() if (selected_model != "All Models" and not rec_df.empty and "model_version" in rec_df.columns) else rec_df.copy()
+    rec_kpis, _ = resolve_tab3_reconciliation_kpis(selected_model, base_kpis, filtered_rec_df, get_reconciliation_kpis if db_state.get("db_ok") else None, selected_lookback)
 
     if not filtered_rec_df.empty:
         st.plotly_chart(create_reconciliation_scatter(filtered_rec_df), use_container_width=True)
-        disp_df = prepare_reconciliation_table_display(filtered_rec_df)
-
-        def _dir_label(r, col):
-            return "UP" if float(r.get(col, 0.0) or 0.0) >= 0 else "DOWN"
-
-        disp_df["Predicted Direction"] = disp_df.apply(lambda r: _dir_label(r, "predicted_return_pct"), axis=1)
-        disp_df["Actual Direction"] = disp_df.apply(lambda r: _dir_label(r, "actual_return_pct"), axis=1)
+        disp_df = filtered_rec_df.copy()
+        disp_df["Model Version"] = disp_df.get("model_version", "UNKNOWN")
+        disp_df["Predicted Direction"] = disp_df["predicted_return_pct"].apply(lambda r: "UP" if float(r or 0) >= 0 else "DOWN")
+        disp_df["Actual Direction"] = disp_df["actual_return_pct"].apply(lambda r: "UP" if float(r or 0) >= 0 else "DOWN")
         disp_df["Direction Result"] = (disp_df["Predicted Direction"] == disp_df["Actual Direction"]).apply(lambda x: "[MATCH]" if x else "[MISMATCH]")
-        disp_df["Predicted Price (Expected Move)"] = disp_df["predicted_price"].apply(lambda p: f"${float(p or 0.0):,.2f}")
-        disp_df["Actual Market Close (Realized Move)"] = disp_df["actual_price_at_t_plus_1"].apply(lambda p: f"${float(p or 0.0):,.2f}")
-        disp_df["Price Difference ($)"] = disp_df["absolute_error_usd"].apply(lambda x: f"${float(x or 0.0):,.2f}")
+        disp_df["Predicted Price (Expected Move)"] = disp_df["predicted_price"].apply(lambda p: f"${float(p or 0):,.2f}")
+        disp_df["Actual Market Close (Realized Move)"] = disp_df["actual_price_at_t_plus_1"].apply(lambda p: f"${float(p or 0):,.2f}")
+        disp_df["Price Difference ($)"] = disp_df["absolute_error_usd"].apply(lambda x: f"${float(x or 0):,.2f}")
         disp_df["Time (UTC)"] = pd.to_datetime(disp_df["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
 
         def _diag(row):
             pred_dir, act_dir = str(row.get("Predicted Direction", "")).upper(), str(row.get("Actual Direction", "")).upper()
-            diff, act_ret, pred_ret = float(row.get("absolute_error_usd", 0.0) or 0.0), float(row.get("actual_return_pct", 0.0) or 0.0), float(row.get("predicted_return_pct", 0.0) or 0.0)
+            diff, act_ret = float(row.get("absolute_error_usd", 0) or 0), float(row.get("actual_return_pct", 0) or 0)
             tag = str(row.get("error_attribution_tag", ""))
             if tag == "BLACK_SWAN_OUTLIER" or abs(act_ret) >= 3.8:
                 return f"Market Flash Anomaly: Extreme liquidation spike ({act_ret:+.2f}% move)."
             if pred_dir == act_dir:
-                if diff <= 150.0 or tag == "ACCURATE":
-                    return f"Target Hit: Accurate directional call within ${diff:,.2f} variance."
-                elif act_dir == "DOWN":
-                    return f"Stronger Drop: Market fell further than forecasted (-${diff:,.2f})." if abs(act_ret) > abs(pred_ret) else f"Smaller Drop: Downward move was smaller than forecasted (+${diff:,.2f})."
-                else:
-                    return f"Stronger Rally: Market moved upward faster than anticipated (+${diff:,.2f})." if abs(act_ret) > abs(pred_ret) else f"Weaker Move: Upward breakout was smaller than forecasted (-${diff:,.2f})."
-            return f"Target Drift: Sideways range chop drifted by ${diff:,.2f}." if diff <= 150.0 or tag == "SIDEWAYS_DRIFT" else f"Direction Miss: Market reversed by {act_ret:+.2f}% (${diff:,.2f} gap)."
+                return f"Target Hit: Accurate directional call within ${diff:,.2f} variance."
+            return f"Direction Miss: Market reversed by {act_ret:+.2f}% (${diff:,.2f} gap)."
 
         disp_df["AI Diagnosis"] = disp_df.apply(_diag, axis=1)
         st.dataframe(disp_df[["Time (UTC)", "Model Version", "Predicted Direction", "Actual Direction", "Direction Result", "Predicted Price (Expected Move)", "Actual Market Close (Realized Move)", "Price Difference ($)", "AI Diagnosis"]], use_container_width=True, hide_index=True)
 
-    # Read-Only Forecast Error Investigations Explorer
     with st.expander("Inspect Specific Prediction Error Details (Forecast Error Investigations & Root-Cause Audit Log)", expanded=False):
         inv_col1, inv_col2 = st.columns([3, 2])
         with inv_col1:
@@ -657,8 +501,6 @@ with tab2:
         with inv_col2:
             status_opt = st.selectbox("Filter by Verification Status", options=["ALL", "UNVERIFIED_HYPOTHESIS", "CONFIRMED_CAUSE", "REFUTED", "APPROVED_FOR_TRAINING"], key="investigation_status_filter")
         try:
-            from src.database.connection import get_db
-            from src.database.investigations import get_prediction_investigations
             f_status = None if status_opt == "ALL" else status_opt
             with get_db() as inv_session:
                 inv_records = get_prediction_investigations(inv_session, headline_search=search_kw.strip() or None, status=f_status, limit=30)
@@ -669,7 +511,6 @@ with tab2:
         except Exception:
             st.info("Diagnostic investigations database operating in local mode.")
 
-    # Model Governance & Controlled Benchmarks
     with st.expander("Technical Model Details & Training History", expanded=False):
         g1, g2 = st.columns(2)
         with g1:
