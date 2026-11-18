@@ -49,8 +49,10 @@ from src.agents import (
     get_model_return_forecast,
     run_trading_graph,
 )
-from src.database.connection import get_db, has_tick_id_column, test_connection
-from src.database.models import CouncilAudit, MarketTick, PaperPortfolio, Reconciliation
+from src.database import (
+    CouncilAudit, MarketTick, ModelPrediction, PaperPortfolio, Reconciliation,
+    get_db, has_tick_id_column, test_connection,
+)
 
 logger = logging.getLogger("mudra.engine")
 sync_logger = logging.getLogger("mudra.sync")
@@ -813,7 +815,6 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
         reconciled_records.append(rec)
 
         try:
-            from src.database.models import ModelPrediction
             for u in session.execute(select(ModelPrediction).where(ModelPrediction.tick_id == prior.id, ModelPrediction.outcome_tick_id.is_(None))).scalars().all():
                 u.outcome_tick_id, u.evaluation_policy_version = outcome.id, "binary_exact_t1_v2"
                 u.actual_price_at_t_plus_1, u.actual_return_pct = act_p, act_ret
@@ -866,7 +867,6 @@ def get_reconciliation_summary(session: Session, limit: int = 168, model_version
 
     if model_version and model_version != "All Models":
         try:
-            from src.database.models import ModelPrediction
             stmt = select(ModelPrediction).where(ModelPrediction.model_version == model_version, ModelPrediction.outcome_tick_id.isnot(None)).order_by(desc(ModelPrediction.reconciled_at))
             records = session.execute(stmt.limit(limit) if limit and limit > 0 else stmt).scalars().all()
             if records:
