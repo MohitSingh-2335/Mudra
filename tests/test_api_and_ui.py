@@ -20,7 +20,7 @@ from src.api import (
     app as fastapi_app,
 )
 from src.database.models import Base, MarketTick, Reconciliation
-from src.engine.paper_portfolio import execute_paper_order
+from src.engine import execute_paper_order
 
 
 @pytest.fixture(scope="session")
