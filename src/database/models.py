@@ -1,46 +1,23 @@
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 from sqlalchemy import (
-    Boolean,
-    CheckConstraint,
-    Column,
-    DateTime,
-    Float,
-    ForeignKey,
-    ForeignKeyConstraint,
-    Index,
-    Integer,
-    JSON,
-    String,
-    Text,
-    UniqueConstraint,
-    text,
+    Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey,
+    ForeignKeyConstraint, Index, Integer, JSON, String, Text,
+    UniqueConstraint, text,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
-
 from config import ACTIVE_MODEL_VERSION, FEATURE_SCHEMA_VERSION
 
 __all__ = [
-    "Base",
-    "MarketTick",
-    "ApiTelemetry",
-    "CouncilAudit",
-    "Reconciliation",
-    "PaperPortfolio",
-    "ModelRegistry",
-    "ModelLifecycleEvent",
-    "ModelPrediction",
+    "Base", "MarketTick", "ApiTelemetry", "CouncilAudit", "Reconciliation",
+    "PaperPortfolio", "ModelRegistry", "ModelLifecycleEvent", "ModelPrediction",
     "PredictionInvestigation",
 ]
 
 
 class Base(DeclarativeBase):
     def to_dict(self) -> Dict[str, Any]:
-        res: Dict[str, Any] = {}
-        for col in self.__table__.columns:
-            val = getattr(self, col.name)
-            res[col.name] = val.isoformat() if hasattr(val, "isoformat") else val
-        return res
+        return {c.name: getattr(self, c.name).isoformat() if hasattr(getattr(self, c.name), "isoformat") else getattr(self, c.name) for c in self.__table__.columns}
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}(id={getattr(self, 'id', None)})>"
@@ -164,13 +141,7 @@ class PaperPortfolio(Base):
     tick = relationship("MarketTick", foreign_keys=[tick_id], back_populates="paper_portfolios")
 
     __table_args__ = (
-        Index(
-            "uq_paper_portfolio_tick_id",
-            "tick_id",
-            unique=True,
-            postgresql_where=text("tick_id IS NOT NULL"),
-            sqlite_where=text("tick_id IS NOT NULL"),
-        ),
+        Index("uq_paper_portfolio_tick_id", "tick_id", unique=True, postgresql_where=text("tick_id IS NOT NULL"), sqlite_where=text("tick_id IS NOT NULL")),
     )
 
 
@@ -195,41 +166,14 @@ class ModelRegistry(Base):
     lifecycle_seq = Column(Integer, nullable=False, default=1)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
-    lifecycle_events = relationship(
-        "ModelLifecycleEvent",
-        primaryjoin="ModelRegistry.model_version == ModelLifecycleEvent.model_version",
-        foreign_keys="ModelLifecycleEvent.model_version",
-        back_populates="model",
-        order_by="ModelLifecycleEvent.lifecycle_seq.asc()",
-    )
-    predictions = relationship(
-        "ModelPrediction",
-        primaryjoin="ModelRegistry.model_version == ModelPrediction.model_version",
-        foreign_keys="ModelPrediction.model_version",
-        back_populates="model",
-        order_by="ModelPrediction.id.asc()",
-    )
-    investigations = relationship(
-        "PredictionInvestigation",
-        primaryjoin="ModelRegistry.model_version == PredictionInvestigation.model_version",
-        foreign_keys="PredictionInvestigation.model_version",
-        back_populates="model",
-        order_by="PredictionInvestigation.id.asc()",
-    )
+    lifecycle_events = relationship("ModelLifecycleEvent", primaryjoin="ModelRegistry.model_version == ModelLifecycleEvent.model_version", foreign_keys="ModelLifecycleEvent.model_version", back_populates="model", order_by="ModelLifecycleEvent.lifecycle_seq.asc()")
+    predictions = relationship("ModelPrediction", primaryjoin="ModelRegistry.model_version == ModelPrediction.model_version", foreign_keys="ModelPrediction.model_version", back_populates="model", order_by="ModelPrediction.id.asc()")
+    investigations = relationship("PredictionInvestigation", primaryjoin="ModelRegistry.model_version == PredictionInvestigation.model_version", foreign_keys="PredictionInvestigation.model_version", back_populates="model", order_by="PredictionInvestigation.id.asc()")
 
     __table_args__ = (
         UniqueConstraint("model_version", name="uq_model_registry_model_version"),
-        CheckConstraint(
-            "current_status IN ('ACTIVE', 'CANDIDATE', 'REJECTED', 'ARCHIVED', 'ROLLED_BACK') AND lifecycle_seq >= 1",
-            name="chk_model_registry_status",
-        ),
-        Index(
-            "uq_model_registry_single_active",
-            "current_status",
-            unique=True,
-            postgresql_where=text("current_status = 'ACTIVE'"),
-            sqlite_where=text("current_status = 'ACTIVE'"),
-        ),
+        CheckConstraint("current_status IN ('ACTIVE', 'CANDIDATE', 'REJECTED', 'ARCHIVED', 'ROLLED_BACK') AND lifecycle_seq >= 1", name="chk_model_registry_status"),
+        Index("uq_model_registry_single_active", "current_status", unique=True, postgresql_where=text("current_status = 'ACTIVE'"), sqlite_where=text("current_status = 'ACTIVE'")),
     )
 
 
@@ -248,17 +192,8 @@ class ModelLifecycleEvent(Base):
     evidence_json = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
-    model = relationship(
-        "ModelRegistry",
-        primaryjoin="ModelLifecycleEvent.model_version == ModelRegistry.model_version",
-        foreign_keys=[model_version],
-        back_populates="lifecycle_events",
-    )
-    related_model = relationship(
-        "ModelRegistry",
-        primaryjoin="ModelLifecycleEvent.related_model_version == ModelRegistry.model_version",
-        foreign_keys=[related_model_version],
-    )
+    model = relationship("ModelRegistry", primaryjoin="ModelLifecycleEvent.model_version == ModelRegistry.model_version", foreign_keys=[model_version], back_populates="lifecycle_events")
+    related_model = relationship("ModelRegistry", primaryjoin="ModelLifecycleEvent.related_model_version == ModelRegistry.model_version", foreign_keys=[related_model_version])
 
     __table_args__ = (
         ForeignKeyConstraint(["model_version"], ["model_registry.model_version"], name="fk_mle_model_version"),
@@ -309,12 +244,7 @@ class ModelPrediction(Base):
 
     tick = relationship("MarketTick", foreign_keys=[tick_id], back_populates="predictions")
     outcome_tick = relationship("MarketTick", foreign_keys=[outcome_tick_id], back_populates="outcome_predictions")
-    model = relationship(
-        "ModelRegistry",
-        primaryjoin="ModelPrediction.model_version == ModelRegistry.model_version",
-        foreign_keys=[model_version],
-        back_populates="predictions",
-    )
+    model = relationship("ModelRegistry", primaryjoin="ModelPrediction.model_version == ModelRegistry.model_version", foreign_keys=[model_version], back_populates="predictions")
     parent_prediction = relationship("ModelPrediction", remote_side=[id], foreign_keys=[parent_prediction_id], backref="child_predictions")
     investigations = relationship("PredictionInvestigation", foreign_keys="PredictionInvestigation.prediction_id", back_populates="prediction")
 
@@ -388,12 +318,7 @@ class PredictionInvestigation(Base):
 
     tick = relationship("MarketTick", foreign_keys=[tick_id], back_populates="investigations")
     prediction = relationship("ModelPrediction", foreign_keys=[prediction_id], back_populates="investigations")
-    model = relationship(
-        "ModelRegistry",
-        primaryjoin="PredictionInvestigation.model_version == ModelRegistry.model_version",
-        foreign_keys=[model_version],
-        back_populates="investigations",
-    )
+    model = relationship("ModelRegistry", primaryjoin="PredictionInvestigation.model_version == ModelRegistry.model_version", foreign_keys=[model_version], back_populates="investigations")
 
     __table_args__ = (
         ForeignKeyConstraint(["tick_id"], ["market_ticks.id"], name="fk_pi_tick_id"),
