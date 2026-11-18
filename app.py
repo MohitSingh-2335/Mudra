@@ -23,7 +23,7 @@ from config import (
     ROUND_TRIP_FRICTION_PCT, TOTAL_FRICTION_PER_SIDE_PCT,
 )
 from src.agents.tools import fetch_historical_candles
-from src.agents.trading_graph import run_trading_graph
+from src.agents.council import run_trading_graph
 from src.database.connection import get_db, test_connection
 from src.database.investigations import get_prediction_investigations
 from src.database.queries import (
