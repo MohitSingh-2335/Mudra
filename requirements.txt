@@ -35,6 +35,7 @@ shap==0.45.1
 
 # RAG & Vector Store
 chromadb==0.5.3
+pysqlite3-binary
 
 # API Backend
 fastapi==0.111.1
