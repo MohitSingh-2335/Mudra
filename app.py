@@ -25,10 +25,10 @@ from config import (
 from src.agents.tools import fetch_historical_candles
 from src.agents.council import run_trading_graph
 from src.database.connection import get_db, test_connection
-from src.database.investigations import get_prediction_investigations
 from src.database.queries import (
     get_latest_council_audit, get_latest_market_ticks,
     get_portfolio_history, get_portfolio_kpis,
+    get_prediction_investigations,
     get_reconciliation_history, get_reconciliation_kpis,
 )
 from src.engine.sync import sync_hourly_quant_cycle
