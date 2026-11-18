@@ -10,8 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from config import CLASSIFIER_FEATURES, FEATURED_BTC_DATA_PATH, REGRESSOR_FEATURES
-from src.api.main import ACTIVE_MODEL_VERSION, app
-from src.api.schemas import ACTIVE_MODEL_VERSION as SCHEMA_ACTIVE_MODEL_VERSION, HealthResponse, PredictResponse
+from src.api.main import ACTIVE_MODEL_VERSION, ACTIVE_MODEL_VERSION as SCHEMA_ACTIVE_MODEL_VERSION, HealthResponse, PredictResponse, app
 from src.database.models import Base, MarketTick, Reconciliation
 from src.engine.paper_portfolio import execute_paper_order
 
