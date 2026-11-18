@@ -18,6 +18,7 @@ from src.feature_engineering import (
 )
 
 
+# Fetch recent closed candles from Binance, Coinbase, or local fallback
 def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LIMIT) -> pd.DataFrame:
     # 1. Binance primary feed
     try:
@@ -27,13 +28,12 @@ def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LI
             now_ms = datetime.now(timezone.utc).timestamp() * 1000.0
             closed = [c for c in resp.json() if float(c[6]) <= now_ms]
             if len(closed) >= 35:
-                records = [{
+                return pd.DataFrame([{
                     "timestamp": pd.to_datetime(c[0], unit="ms", utc=True),
                     "open": float(c[1]), "high": float(c[2]), "low": float(c[3]), "close": float(c[4]),
                     "volume": float(c[5]), "number_of_trades": int(c[8]),
                     "taker_buy_ratio": round(float(c[9]) / float(c[5]), 4) if float(c[5]) > 0 else 0.50,
-                } for c in closed[-limit:]]
-                return pd.DataFrame(records)
+                } for c in closed[-limit:]])
     except Exception:
         pass
 
@@ -45,16 +45,15 @@ def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LI
             now_sec = datetime.now(timezone.utc).timestamp()
             closed = [c for c in resp.json() if (float(c[0]) + 3600.0) <= now_sec]
             if len(closed) >= 35:
-                records = [{
+                return pd.DataFrame([{
                     "timestamp": pd.to_datetime(c[0], unit="s", utc=True),
                     "low": float(c[1]), "high": float(c[2]), "open": float(c[3]), "close": float(c[4]),
                     "volume": float(c[5]), "number_of_trades": None, "taker_buy_ratio": 0.50,
-                } for c in reversed(closed[:limit])]
-                return pd.DataFrame(records)
+                } for c in reversed(closed[:limit])])
     except Exception:
         pass
 
-    # 3. Local offline dataset fallback
+    # 3. Local dataset fallback
     path = FEATURED_BTC_DATA_PATH if os.path.exists(FEATURED_BTC_DATA_PATH) else BTCUSDT_1H_CSV
     if os.path.exists(path):
         from src.data_preprocessing import load_and_clean_data
@@ -66,6 +65,7 @@ def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LI
     raise ValueError(f"Unable to fetch historical candlesticks for {symbol} from any market source.")
 
 
+# LangChain tool: Get latest candle and volume flow
 @tool
 def get_live_market_data(symbol: str = "BTCUSDT") -> Dict[str, Any]:
     """Fetches latest confirmed candlestick and order-flow telemetry."""
@@ -82,6 +82,7 @@ def get_live_market_data(symbol: str = "BTCUSDT") -> Dict[str, Any]:
     }
 
 
+# LangChain tool: Compute technical indicators with strict training parity
 @tool
 def calculate_technical_signals(
     close: Optional[float] = None, high: Optional[float] = None, low: Optional[float] = None,
@@ -112,6 +113,7 @@ def calculate_technical_signals(
     return extract_features_for_inference(candles_df)
 
 
+# LangChain tool: Dual model forecast using verified models
 @tool
 def get_model_return_forecast(features: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Runs dual inference using verified XGBoost regressor and classifier."""
@@ -163,6 +165,7 @@ def get_model_return_forecast(features: Optional[Dict[str, Any]] = None) -> Dict
     }
 
 
+# LangChain tool: Query ChromaDB episodic memory
 @tool
 def query_macro_sentiment_rag(query: str = "Bitcoin macroeconomic market sentiment and regime") -> str:
     """Queries ChromaDB vector store for market regime and error memory."""
