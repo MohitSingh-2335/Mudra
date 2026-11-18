@@ -36,8 +36,7 @@ from src.agents import (
     strategist_node,
 )
 from src.backtesting import _simulate_from_signals
-from src.database.connection import init_db as real_init_db
-from src.database.models import Base, CouncilAudit, MarketTick, PaperPortfolio, Reconciliation
+from src.database import Base, CouncilAudit, MarketTick, PaperPortfolio, Reconciliation, init_db as real_init_db
 from src.engine import (
     MarketFeedExhaustedError,
     _parse_trade_count,
@@ -83,10 +82,10 @@ def isolated_db(monkeypatch):
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
     real_init_db(engine)
     Session = sessionmaker(bind=engine)
-    monkeypatch.setattr("src.database.connection.engine", engine)
-    monkeypatch.setattr("src.database.connection.SessionLocal", Session)
-    monkeypatch.setattr("src.database.connection.test_connection", lambda: (True, "SQLite 3.x", 1.0))
-    monkeypatch.setattr("src.database.connection.init_db", lambda target_engine=None: real_init_db(engine))
+    monkeypatch.setattr("src.database.engine", engine)
+    monkeypatch.setattr("src.database.SessionLocal", Session)
+    monkeypatch.setattr("src.database.test_connection", lambda: (True, "SQLite 3.x", 1.0))
+    monkeypatch.setattr("src.database.init_db", lambda target_engine=None: real_init_db(engine))
     session = Session()
     yield session, engine
     session.close()
@@ -425,7 +424,7 @@ def test_worker_failure_on_feed_error(isolated_db, temp_outbox, monkeypatch):
 
 
 def test_worker_failure_on_db_timeout(isolated_db, temp_outbox, monkeypatch):
-    monkeypatch.setattr("src.database.connection.test_connection", lambda: (False, "Timeout", 5000.0))
+    monkeypatch.setattr("src.database.test_connection", lambda: (False, "Timeout", 5000.0))
     assert worker.run_worker(force=False) is False
 
 
