@@ -1,4 +1,3 @@
-# src/model_loader.py
 import io
 import json
 import hashlib
@@ -19,15 +18,17 @@ __all__ = [
     "get_registered_models",
 ]
 
-SHA256_HEX_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
+SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def validate_sha256_digest(digest: str) -> None:
-    if not isinstance(digest, str) or not SHA256_HEX_PATTERN.match(digest.strip()):
+    # verify expected hash is a valid 64-character hex string
+    if not isinstance(digest, str) or not SHA256_PATTERN.match(digest.strip()):
         raise ValueError(f"Invalid expected SHA-256 digest format: '{digest}'. Expected 64-character hexadecimal string.")
 
 
 def compute_file_sha256(file_path: Union[str, Path]) -> str:
+    # computes sha256 hash in 64kb chunks
     p = Path(file_path)
     if not p.is_file():
         raise FileNotFoundError(f"Artifact file not found: {p}")
@@ -39,16 +40,15 @@ def compute_file_sha256(file_path: Union[str, Path]) -> str:
 
 
 def verify_model_artifact(file_path: Union[str, Path], expected_sha256: str) -> None:
+    # verifies stored model integrity against expected sha256
     validate_sha256_digest(expected_sha256)
-    p = Path(file_path)
-    if not p.is_file():
-        raise FileNotFoundError(f"Model artifact not found at configured path: {file_path}")
-    actual = compute_file_sha256(p)
+    actual = compute_file_sha256(file_path)
     if actual.lower() != expected_sha256.lower():
         raise RuntimeError(f"Cryptographic integrity verification failed for {file_path}: expected {expected_sha256}, got {actual}")
 
 
 def load_verified_model(file_path: Union[str, Path], expected_sha256: str) -> Any:
+    # verifies hash and deserializes model from verified bytes
     validate_sha256_digest(expected_sha256)
     p = Path(file_path)
     if not p.is_file():
@@ -61,12 +61,12 @@ def load_verified_model(file_path: Union[str, Path], expected_sha256: str) -> An
 
 
 def load_production_models() -> Tuple[Any, Any]:
+    # loads regressor and classifier with cpu device enforcement
     reg = load_verified_model(REGRESSOR_MODEL_PATH, REGRESSOR_MODEL_SHA256)
     clf = load_verified_model(CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256)
-    if hasattr(reg, "set_params"):
-        reg.set_params(device="cpu")
-    if hasattr(clf, "set_params"):
-        clf.set_params(device="cpu")
+    for model in (reg, clf):
+        if hasattr(model, "set_params"):
+            model.set_params(device="cpu")
     return reg, clf
 
 
@@ -74,12 +74,11 @@ def save_production_models(
     clf_model: Any, reg_model: Any, features: List[str], version: str = "xgb_v1.1.0",
     holdout_df: Optional[Any] = None, metrics: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    from config import REGRESSOR_MODEL_PATH, CLASSIFIER_MODEL_PATH, MODEL_MANIFEST_PATH, MODELS_DIR
+    # persists models, generates sha256 digests, and writes model manifest
+    from config import MODEL_MANIFEST_PATH, MODELS_DIR
     os.makedirs(MODELS_DIR, exist_ok=True)
     joblib.dump(clf_model, CLASSIFIER_MODEL_PATH)
     joblib.dump(reg_model, REGRESSOR_MODEL_PATH)
-    clf_hash = compute_file_sha256(CLASSIFIER_MODEL_PATH)
-    reg_hash = compute_file_sha256(REGRESSOR_MODEL_PATH)
 
     comp_metrics: Dict[str, Any] = {}
     if holdout_df is not None:
@@ -96,9 +95,14 @@ def save_production_models(
         comp_metrics.update(metrics)
 
     manifest = {
-        "model_version": version, "feature_schema_version": f"{version}_{len(features)}stationary",
-        "features": list(features), "classifier_features": list(features), "regressor_features": list(features),
-        "classifier_sha256": clf_hash, "regressor_sha256": reg_hash, "metrics": comp_metrics,
+        "model_version": version,
+        "feature_schema_version": f"{version}_{len(features)}stationary",
+        "features": list(features),
+        "classifier_features": list(features),
+        "regressor_features": list(features),
+        "classifier_sha256": compute_file_sha256(CLASSIFIER_MODEL_PATH),
+        "regressor_sha256": compute_file_sha256(REGRESSOR_MODEL_PATH),
+        "metrics": comp_metrics,
     }
     with open(MODEL_MANIFEST_PATH, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
@@ -106,13 +110,14 @@ def save_production_models(
 
 
 def get_registered_models() -> Dict[str, Dict[str, Any]]:
-    from config import MODELS_DIR, ACTIVE_MODEL_VERSION, REGRESSOR_MODEL_PATH, CLASSIFIER_MODEL_PATH
+    # discovers all registered model versions from manifest files
+    from config import MODELS_DIR, ACTIVE_MODEL_VERSION
     models_dir = Path(MODELS_DIR)
     if not models_dir.exists():
         return {}
 
     registered = {}
-    for m_file in sorted(list(models_dir.glob("*manifest*.json"))):
+    for m_file in sorted(models_dir.glob("*manifest*.json")):
         try:
             with open(m_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -125,17 +130,19 @@ def get_registered_models() -> Dict[str, Dict[str, Any]]:
                 continue
             clf_m = joblib.load(clf_path)
             reg_m = joblib.load(reg_path)
-            if hasattr(clf_m, "set_params"):
-                clf_m.set_params(device="cpu")
-            if hasattr(reg_m, "set_params"):
-                reg_m.set_params(device="cpu")
+            for m in (clf_m, reg_m):
+                if hasattr(m, "set_params"):
+                    m.set_params(device="cpu")
 
             registered[version] = {
                 "model_version": version,
                 "status": data.get("status", "ACTIVE" if version == ACTIVE_MODEL_VERSION else "CANDIDATE"),
-                "manifest_path": str(m_file), "classifier": clf_m, "regressor": reg_m,
+                "manifest_path": str(m_file),
+                "classifier": clf_m,
+                "regressor": reg_m,
                 "features": data.get("features") or data.get("classifier_features") or [],
-                "metrics": data.get("metrics", {}), "manifest_data": data,
+                "metrics": data.get("metrics", {}),
+                "manifest_data": data,
             }
         except Exception:
             continue
