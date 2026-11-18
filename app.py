@@ -1,9 +1,8 @@
 import os
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 ROOT_DIR = Path(__file__).resolve().parent
 if str(ROOT_DIR) not in sys.path:
@@ -12,43 +11,31 @@ if str(ROOT_DIR) not in sys.path:
 if hasattr(sys.stdout, "reconfigure") and sys.stdout.isatty():
     sys.stdout.reconfigure(encoding="utf-8")
 
-import joblib
 import numpy as np
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
 from config import (
-    ACTIVE_MODEL_VERSION,
-    APP_SUBTITLE,
-    APP_TITLE,
-    CLASSIFIER_MODEL_PATH,
-    CLASSIFIER_MODEL_SHA256,
-    FEATURE_DISPLAY_NAMES,
-    MIN_HURDLE_PCT,
-    REGRESSOR_MODEL_PATH,
-    REGRESSOR_MODEL_SHA256,
-    ROUND_TRIP_FRICTION_PCT,
-    TOTAL_FRICTION_PER_SIDE_PCT,
+    ACTIVE_MODEL_VERSION, APP_SUBTITLE, APP_TITLE,
+    CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256,
+    MIN_HURDLE_PCT, REGRESSOR_MODEL_PATH, REGRESSOR_MODEL_SHA256,
+    ROUND_TRIP_FRICTION_PCT, TOTAL_FRICTION_PER_SIDE_PCT,
 )
 from src.agents.tools import fetch_historical_candles
 from src.agents.trading_graph import run_trading_graph
 from src.database.connection import get_db, test_connection
 from src.database.investigations import get_prediction_investigations
 from src.database.queries import (
-    get_latest_council_audit,
-    get_latest_market_ticks,
-    get_portfolio_history,
-    get_portfolio_kpis,
-    get_reconciliation_history,
-    get_reconciliation_kpis,
+    get_latest_council_audit, get_latest_market_ticks,
+    get_portfolio_history, get_portfolio_kpis,
+    get_reconciliation_history, get_reconciliation_kpis,
 )
 from src.engine.sync import sync_hourly_quant_cycle
 from src.explainability import get_tree_explainer
 from src.model_loader import load_verified_model
 from src.ui.charts import (
-    create_alpha_equity_curve,
-    create_reconciliation_scatter,
+    create_alpha_equity_curve, create_reconciliation_scatter,
     create_tradingview_candlestick,
 )
 
@@ -73,16 +60,16 @@ def load_models():
 reg_model, clf_model, explainer_clf = load_models()
 
 
-# Helper to format signed USD values
 def format_signed_usd(val: Optional[float], decimals: int = 2) -> str:
+    # formats signed dollar values
     if val is None:
         return "Unavailable"
     sign = "+" if val > 0 else ("-" if val < 0 else "")
     return f"{sign}${abs(val):,.{decimals}f}"
 
 
-# Check if the market candle feed is stale
 def check_feed_staleness(df: pd.DataFrame, max_lag_hours: float = 3.0) -> Tuple[bool, float]:
+    # checks if live market candle is older than threshold
     if df is None or df.empty:
         return True, 0.0
     latest_ts = pd.to_datetime(df["timestamp"].iloc[-1], utc=True)
@@ -90,18 +77,14 @@ def check_feed_staleness(df: pd.DataFrame, max_lag_hours: float = 3.0) -> Tuple[
     return (lag > max_lag_hours or df.attrs.get("source") == "local_fallback", lag)
 
 
-# Generate next-hour return and direction predictions from live candle
 def generate_live_forecast(live_df: pd.DataFrame, reg_model: Any, clf_model: Any, is_stale: bool = False) -> Optional[Dict[str, Any]]:
+    # generates next-hour expected return and movement probability
     if is_stale or live_df is None or live_df.empty or reg_model is None or len(live_df) < 35:
         return None
-
     from src.feature_engineering import (
-        extract_features_for_inference,
-        predict_proba_with_validation,
-        predict_with_validation,
-        validate_inference_features,
+        extract_features_for_inference, predict_proba_with_validation,
+        predict_with_validation, validate_inference_features,
     )
-
     try:
         sample_input = extract_features_for_inference(live_df)
         recent = live_df.iloc[-1]
@@ -125,30 +108,20 @@ def generate_live_forecast(live_df: pd.DataFrame, reg_model: Any, clf_model: Any
                 probs = predict_proba_with_validation(clf_model, clf_df)[0]
                 prob_down, prob_up = float(probs[0]) * 100.0, float(probs[1]) * 100.0
 
-        direction_badge = "SIDEWAYS (CHOP)" if not cleared else ("BULLISH (UP)" if direction == "UP" else "BEARISH (DOWN)")
-
+        badge = "SIDEWAYS (CHOP)" if not cleared else ("BULLISH (UP)" if direction == "UP" else "BEARISH (DOWN)")
         return {
-            "raw_pred_ret": raw_pred_ret,
-            "pred_ret_pct": pred_ret_pct,
-            "pred_dollar_move": pred_move,
-            "pred_target": curr_price + pred_move,
-            "cleared_hurdle": cleared,
-            "direction_label": direction,
-            "direction_badge": direction_badge,
-            "prob_up": prob_up,
-            "prob_down": prob_down,
-            "taker": taker,
-            "spread_pct": spread,
-            "candle_range_usd": candle_range,
-            "hurdle_dollar_min": curr_price * (MIN_HURDLE_PCT / 100.0),
+            "raw_pred_ret": raw_pred_ret, "pred_ret_pct": pred_ret_pct, "pred_dollar_move": pred_move,
+            "pred_target": curr_price + pred_move, "cleared_hurdle": cleared, "direction_label": direction,
+            "direction_badge": badge, "prob_up": prob_up, "prob_down": prob_down, "taker": taker,
+            "spread_pct": spread, "candle_range_usd": candle_range, "hurdle_dollar_min": curr_price * (MIN_HURDLE_PCT / 100.0),
             "current_price": curr_price,
         }
     except Exception:
         return None
 
 
-# Build agent council scenario dictionary
 def build_council_scenario_payload(scenario_selected: str, current_price: float, live_forecast: Optional[Dict[str, Any]] = None, live_df: Optional[pd.DataFrame] = None):
+    # formats market and quantitative forecast telemetry for multi-agent council
     current_price = float(current_price)
     if scenario_selected == "live" and live_forecast:
         expected_ret = float(live_forecast.get("pred_ret_pct", 0.08))
@@ -160,17 +133,13 @@ def build_council_scenario_payload(scenario_selected: str, current_price: float,
         volume = float(live_df["volume"].iloc[-1]) if live_df is not None and not live_df.empty and "volume" in live_df.columns else 1200.0
         rsi = float(live_df["rsi"].iloc[-1]) if live_df is not None and not live_df.empty and "rsi" in live_df.columns else 50.0
     elif scenario_selected == "bullish":
-        vol_spread, volume, taker = 0.015, 5000.0, 0.65
-        order_bias, rsi, expected_ret, confidence = "STRONG_BUYER_AGGRESSION", 62.0, 0.42, 0.88
+        vol_spread, volume, taker, order_bias, rsi, expected_ret, confidence = 0.015, 5000.0, 0.65, "STRONG_BUYER_AGGRESSION", 62.0, 0.42, 0.88
     elif scenario_selected == "vol_spike":
-        vol_spread, volume, taker = 0.052, 12000.0, 0.35
-        order_bias, rsi, expected_ret, confidence = "EXTREME_LIQUIDATION", 28.0, -0.20, 0.60
+        vol_spread, volume, taker, order_bias, rsi, expected_ret, confidence = 0.052, 12000.0, 0.35, "EXTREME_LIQUIDATION", 28.0, -0.20, 0.60
     elif scenario_selected == "chop":
-        vol_spread, volume, taker = 0.004, 400.0, 0.49
-        order_bias, rsi, expected_ret, confidence = "FLAT_CHOP", 50.0, 0.02, 0.45
+        vol_spread, volume, taker, order_bias, rsi, expected_ret, confidence = 0.004, 400.0, 0.49, "FLAT_CHOP", 50.0, 0.02, 0.45
     else:
-        vol_spread, volume, taker = 0.018, 1200.0, 0.51
-        order_bias, rsi, expected_ret, confidence = "NEUTRAL", 51.0, 0.08, 0.65
+        vol_spread, volume, taker, order_bias, rsi, expected_ret, confidence = 0.018, 1200.0, 0.51, "NEUTRAL", 51.0, 0.08, 0.65
 
     clears = bool(abs(expected_ret) >= MIN_HURDLE_PCT)
     direction = "SIDEWAYS" if not clears else ("UP" if expected_ret >= 0 else "DOWN")
@@ -180,8 +149,8 @@ def build_council_scenario_payload(scenario_selected: str, current_price: float,
     return m_data, t_data, f_data
 
 
-# Human-readable rationale for paper portfolio trades
 def format_portfolio_rationale(row) -> str:
+    # explains paper portfolio trade action in plain english
     act = str(row.get("action", "")).upper()
     notes = str(row.get("notes", "") or "")
     if act == "BUY":
@@ -203,8 +172,8 @@ def format_portfolio_rationale(row) -> str:
     return notes or "Execution logged."
 
 
-# Markdown pedigree table for model transparency
 def build_model_pedigree_markdown() -> str:
+    # markdown model audit pedigree table
     return (
         "| Parameter | Active Value | Rationale |\n"
         "| :--- | :--- | :--- |\n"
@@ -217,7 +186,6 @@ def build_model_pedigree_markdown() -> str:
     )
 
 
-# Fetch recent market candles
 @st.cache_data(ttl=60)
 def fetch_live_market_candles(symbol: str = "BTCUSDT") -> pd.DataFrame:
     try:
@@ -228,9 +196,9 @@ def fetch_live_market_candles(symbol: str = "BTCUSDT") -> pd.DataFrame:
         return empty
 
 
-# Query cloud database state and metrics
 @st.cache_data(ttl=60)
 def fetch_cloud_database_state(current_price: Optional[float]):
+    # queries database snapshots and performance metrics
     fallback = {"db_ok": False, "db_ver": "Offline", "db_lat": 0.0, "db_error": "Database unavailable", "ticks_df": pd.DataFrame(), "rec_df": pd.DataFrame(), "rec_kpis": {}, "port_df": pd.DataFrame(), "port_kpis": {}, "latest_audit": None}
     try:
         db_ok, db_ver, db_lat = test_connection()
@@ -250,8 +218,8 @@ def fetch_cloud_database_state(current_price: Optional[float]):
         return fallback
 
 
-# Format stop-loss and take-profit levels
 def format_risk_levels(action: str, verdict: str, current_price: float, council_state: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
+    # formats stop-loss and take-profit pricing levels
     c_state = council_state or {}
     act = str(action).upper().strip()
     vrd = str(verdict).upper().strip()
@@ -272,15 +240,15 @@ def format_risk_levels(action: str, verdict: str, current_price: float, council_
     return no_trade, no_trade
 
 
-# Filter reconciliation records by model version
 def filter_reconciliation_records(df: pd.DataFrame, selected_model: str) -> pd.DataFrame:
+    # filters reconciliation history by active or candidate model version
     if df.empty or "model_version" not in df.columns or selected_model in ("All Models", ""):
         return df.copy()
     return df[df["model_version"] == selected_model].copy()
 
 
-# Prepare display dataframe for reconciliation table
 def prepare_reconciliation_table_display(df: pd.DataFrame) -> pd.DataFrame:
+    # prepares formatted display table for model reconciliation records
     if df.empty:
         return df.copy()
     disp = df.copy()
@@ -288,8 +256,8 @@ def prepare_reconciliation_table_display(df: pd.DataFrame) -> pd.DataFrame:
     return disp
 
 
-# Fallback reconciliation KPI calculations
 def compute_fallback_reconciliation_kpis(df: pd.DataFrame, model_version: Optional[str] = None) -> Dict[str, Any]:
+    # fallback kpi calculation when database summary fails
     if df.empty:
         return {"total_evaluated": 0, "total_reconciled": 0, "directional_accuracy_pct": None, "win_rate_pct": None, "mae_usd": None, "model_version": model_version}
     total = len(df)
@@ -299,8 +267,8 @@ def compute_fallback_reconciliation_kpis(df: pd.DataFrame, model_version: Option
     return {"total_evaluated": total, "total_reconciled": total, "directional_accuracy_pct": win_rate, "win_rate_pct": win_rate, "mae_usd": mae, "model_version": model_version}
 
 
-# Resolve reconciliation KPIs for UI
 def resolve_tab3_reconciliation_kpis(selected_model: str, base_kpis: Dict[str, Any], filtered_df: pd.DataFrame, kpi_fetcher: Optional[Callable] = None, lookback_hours: Optional[int] = 168):
+    # resolves reconciliation KPIs based on model and lookback selection
     if selected_model in ("All Models", ""):
         if kpi_fetcher and lookback_hours != 168:
             try:
