@@ -649,6 +649,51 @@ def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]
             session.add(current_tick)
             session.flush()
 
+        # evaluate and record shadow predictions for registered candidate models
+        try:
+            from src.model_loader import get_registered_models
+            all_registered = get_registered_models()
+            for cand_version, cand_spec in all_registered.items():
+                if cand_version == ACTIVE_MODEL_VERSION:
+                    continue
+                c_feats = cand_spec.get("features", [])
+                if c_feats and all(k in signals_output for k in c_feats):
+                    c_input_df = pd.DataFrame([{k: signals_output[k] for k in c_feats}])
+                    c_clf = cand_spec["classifier"]
+                    c_reg = cand_spec["regressor"]
+                    c_prob_up = float(c_clf.predict_proba(c_input_df)[0, 1]) if hasattr(c_clf, "predict_proba") else 0.5
+                    c_ret = float(c_reg.predict(c_input_df)[0])
+                    close_f = float(candle["close"])
+                    c_price = float(close_f * (1.0 + c_ret))
+                    c_ret_pct = float(((c_price - close_f) / close_f) * 100.0)
+                    c_dir = "UP" if c_ret_pct >= 0.0 else "DOWN"
+
+                    cand_pred = session.execute(
+                        select(ModelPrediction).where(
+                            ModelPrediction.tick_id == current_tick.id,
+                            ModelPrediction.model_version == cand_version,
+                        )
+                    ).scalars().first()
+
+                    if not cand_pred:
+                        cand_pred = ModelPrediction(
+                            tick_id=current_tick.id,
+                            model_version=cand_version,
+                            run_mode="SHADOW",
+                            is_canonical=True,
+                            is_primary=False,
+                            feature_schema_version=cand_spec.get("manifest_data", {}).get("feature_schema_version", "v2_36stationary"),
+                            predicted_return_pct=c_ret_pct,
+                            predicted_price_1h=c_price,
+                            direction_predicted=c_dir,
+                            direction_prob_up=c_prob_up,
+                            clears_hurdle=bool(abs(c_ret_pct) >= MIN_HURDLE_PCT),
+                        )
+                        session.add(cand_pred)
+                        session.flush()
+        except Exception as cand_exc:
+            sync_logger.warning("Failed candidate model prediction: %s", type(cand_exc).__name__)
+
         reconcile_pending_ticks(session, current_tick)
 
         council_state = run_trading_graph(
