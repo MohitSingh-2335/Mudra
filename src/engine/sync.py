@@ -1,17 +1,17 @@
-# src/engine/sync.py
-import sys
-import time
-import random
-import math
 import json
 import logging
+import math
+import random
+import sys
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Dict, Any, Tuple, Optional, Callable, List, Sequence
-import requests
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
 import pandas as pd
+import requests
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -20,17 +20,23 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from config import (
-    ACTIVE_MODEL_VERSION, FEATURE_SCHEMA_VERSION, EXCHANGE_RETRY_MAX_ATTEMPTS,
-    EXCHANGE_CONNECT_TIMEOUT, EXCHANGE_READ_TIMEOUT, EXCHANGE_RETRY_BASE_BACKOFF,
-    EXCHANGE_RETRY_BACKOFF_FACTOR, EXCHANGE_RETRY_MAX_BACKOFF, EXCHANGE_MAX_RETRY_AFTER_CAP,
+    ACTIVE_MODEL_VERSION,
+    EXCHANGE_CONNECT_TIMEOUT,
+    EXCHANGE_MAX_RETRY_AFTER_CAP,
+    EXCHANGE_READ_TIMEOUT,
+    EXCHANGE_RETRY_BACKOFF_FACTOR,
+    EXCHANGE_RETRY_BASE_BACKOFF,
+    EXCHANGE_RETRY_MAX_ATTEMPTS,
+    EXCHANGE_RETRY_MAX_BACKOFF,
     EXCHANGE_RETRY_TOTAL_DEADLINE,
+    FEATURE_SCHEMA_VERSION,
 )
-from src.database.connection import get_db, test_connection, has_tick_id_column
-from src.database.models import MarketTick, CouncilAudit, PaperPortfolio
-from src.engine.reconciliation import reconcile_pending_ticks
-from src.engine.paper_portfolio import execute_paper_order, get_portfolio_summary
-from src.agents.trading_graph import run_trading_graph
 from src.agents.tools import calculate_technical_signals, get_model_return_forecast
+from src.agents.trading_graph import run_trading_graph
+from src.database.connection import get_db, has_tick_id_column, test_connection
+from src.database.models import CouncilAudit, MarketTick, PaperPortfolio
+from src.engine.paper_portfolio import execute_paper_order, get_portfolio_summary
+from src.engine.reconciliation import reconcile_pending_ticks
 
 logger = logging.getLogger("mudra.sync")
 BINANCE_MIN_ROW_LEN: int = 10
@@ -42,9 +48,10 @@ class MarketFeedExhaustedError(RuntimeError):
     pass
 
 
+# Normalize UTC timestamps across pandas, ISO string, and datetime objects
 def _normalize_utc_timestamp(ts: Any) -> datetime:
     if ts is None or isinstance(ts, bool) or (isinstance(ts, float) and math.isnan(ts)):
-        raise ValueError("Timestamp cannot be None, boolean, or NaN.")
+        raise ValueError("Invalid timestamp.")
     if hasattr(ts, "to_pydatetime"):
         if pd.isna(ts):
             raise ValueError("Timestamp cannot be NaT.")
@@ -54,28 +61,21 @@ def _normalize_utc_timestamp(ts: Any) -> datetime:
     elif isinstance(ts, str):
         raw = ts.strip()
         if not raw:
-            raise ValueError("Timestamp string cannot be empty.")
+            raise ValueError("Empty timestamp string.")
         dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     else:
         raise TypeError(f"Unsupported timestamp type: {type(ts).__name__}")
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
 
 
+# Validate OHLCV numerical integrity of single candle dict
 def _validate_historical_candle_dict(raw_c: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(raw_c, dict) or any(k not in raw_c for k in ("timestamp", "open", "high", "low", "close", "volume")):
         return None
     try:
         c_ts = _normalize_utc_timestamp(raw_c["timestamp"])
-        ohlcv = {}
-        for f in ("open", "high", "low", "close", "volume"):
-            val = raw_c[f]
-            if isinstance(val, bool) or val is None:
-                return None
-            f_val = float(val)
-            if not math.isfinite(f_val):
-                return None
-            ohlcv[f] = f_val
-        if any(ohlcv[k] <= 0 for k in ("open", "high", "low", "close")) or ohlcv["volume"] < 0:
+        ohlcv = {f: float(raw_c[f]) for f in ("open", "high", "low", "close", "volume") if not isinstance(raw_c[f], bool)}
+        if len(ohlcv) < 5 or any(ohlcv[k] <= 0 for k in ("open", "high", "low", "close")) or ohlcv["volume"] < 0:
             return None
         if ohlcv["high"] < max(ohlcv["low"], ohlcv["open"], ohlcv["close"]) or ohlcv["low"] > min(ohlcv["open"], ohlcv["close"]):
             return None
@@ -84,6 +84,7 @@ def _validate_historical_candle_dict(raw_c: Any) -> Optional[Dict[str, Any]]:
         return None
 
 
+# Backfill missing historical candles between runs
 def backfill_missing_candles(session, candle: Dict[str, Any]) -> int:
     if not isinstance(candle, dict) or "timestamp" not in candle:
         return 0
@@ -95,32 +96,18 @@ def backfill_missing_candles(session, candle: Dict[str, Any]) -> int:
     except (ValueError, TypeError):
         return 0
 
-    candidates = {}
-    for raw_c in raw_history:
-        v = _validate_historical_candle_dict(raw_c)
-        if v and v["timestamp"] < latest_ts:
-            candidates[v["timestamp"]] = v
-        elif v is None:
-            logger.warning("[BACKFILL] Skipping malformed historical candle entry: %r", raw_c)
+    candidates = {v["timestamp"]: v for raw_c in raw_history if (v := _validate_historical_candle_dict(raw_c)) and v["timestamp"] < latest_ts}
     if not candidates:
         return 0
 
     sorted_candidates = [candidates[t] for t in sorted(candidates.keys())]
-    window_start_ts = sorted_candidates[0]["timestamp"]
-    prior = session.execute(
-        select(MarketTick).where(MarketTick.timestamp < latest_ts).order_by(MarketTick.timestamp.desc()).limit(1)
-    ).scalars().first()
+    prior = session.execute(select(MarketTick).where(MarketTick.timestamp < latest_ts).order_by(MarketTick.timestamp.desc()).limit(1)).scalars().first()
     if prior is None:
         return 0
 
     prior_ts = _normalize_utc_timestamp(prior.timestamp)
     gap_hours = (latest_ts - prior_ts).total_seconds() / 3600.0
-    if prior_ts < window_start_ts:
-        logger.warning(
-            "[BACKFILL] Outage gap of %.1f hours (last tick %s, current %s) exceeds exchange history window starting at %s. Backfilling available window candles only.",
-            gap_hours, prior_ts.isoformat(), latest_ts.isoformat(), window_start_ts.isoformat(),
-        )
-    elif gap_hours > BACKFILL_LARGE_GAP_WARNING_HOURS:
+    if gap_hours > BACKFILL_LARGE_GAP_WARNING_HOURS:
         logger.warning(
             "[BACKFILL] Detected large candle gap of %.1f hours (> %.1fh threshold) between %s and %s.",
             gap_hours, BACKFILL_LARGE_GAP_WARNING_HOURS, prior_ts.isoformat(), latest_ts.isoformat(),
@@ -150,6 +137,7 @@ def backfill_missing_candles(session, candle: Dict[str, Any]) -> int:
     return inserted
 
 
+# Check if paper trade was already logged for tick
 def is_paper_trade_executed_for_tick(session, tick_id: int) -> bool:
     if has_tick_id_column(session) and session.execute(select(PaperPortfolio.id).where(PaperPortfolio.tick_id == tick_id)).scalar_one_or_none():
         return True
@@ -157,6 +145,7 @@ def is_paper_trade_executed_for_tick(session, tick_id: int) -> bool:
     return audit is not None and (not audit.execution_notes or "[FORCED_REANALYSIS]" not in audit.execution_notes)
 
 
+# Parse Retry-After HTTP header
 def parse_retry_after(retry_after_header: Optional[str], now_dt_fn: Optional[Callable[[], datetime]] = None) -> Optional[float]:
     if not retry_after_header or not isinstance(retry_after_header, str) or not retry_after_header.strip():
         return None
@@ -170,28 +159,14 @@ def parse_retry_after(retry_after_header: Optional[str], now_dt_fn: Optional[Cal
         p_dt = parsedate_to_datetime(val)
         if p_dt is not None:
             now_dt = now_dt_fn() if now_dt_fn else datetime.now(timezone.utc)
-            if p_dt.tzinfo is None:
-                p_dt = p_dt.replace(tzinfo=timezone.utc)
-            delta = (p_dt - now_dt).total_seconds()
+            delta = ((p_dt.replace(tzinfo=timezone.utc) if p_dt.tzinfo is None else p_dt) - now_dt).total_seconds()
             return max(0.0, delta) if math.isfinite(delta) else None
     except Exception:
         pass
     return None
 
 
-def _get_retry_after_header(headers: Any) -> Optional[str]:
-    if not headers or not hasattr(headers, "get"):
-        return None
-    direct = headers.get("Retry-After")
-    if direct is not None:
-        return str(direct)
-    if hasattr(headers, "items"):
-        for k, v in headers.items():
-            if isinstance(k, str) and k.lower() == "retry-after" and v is not None:
-                return str(v)
-    return None
-
-
+# Validate strict positive trade count
 def _parse_trade_count(raw_trades: Any) -> Optional[int]:
     if raw_trades is None:
         return None
@@ -219,6 +194,7 @@ def _parse_trade_count(raw_trades: Any) -> Optional[int]:
     raise ValueError(f"Unsupported trade count type: {type(raw_trades).__name__}")
 
 
+# Validate OHLCV matrix payload from exchange
 def _validate_candle_payload(payload: Any, min_row_len: int = BINANCE_MIN_ROW_LEN, feed_name: str = "Market Feed") -> bool:
     if not isinstance(payload, list) or len(payload) == 0:
         return False
@@ -240,6 +216,7 @@ def _validate_candle_payload(payload: Any, min_row_len: int = BINANCE_MIN_ROW_LE
     return True
 
 
+# Resilient HTTP request with backoff jitter and rate-limit parsing
 def _fetch_feed_with_retry(
     url: str, headers: Optional[Dict[str, str]] = None, feed_name: str = "Binance Vision",
     deadline_ts: Optional[float] = None, max_attempts: int = EXCHANGE_RETRY_MAX_ATTEMPTS,
@@ -277,17 +254,14 @@ def _fetch_feed_with_retry(
             return None
 
         status = resp.status_code
-        if not isinstance(status, int) or clock_fn() > deadline_ts:
-            return None
-        if 400 <= status < 500 and status not in (429, 418):
+        if not isinstance(status, int) or clock_fn() > deadline_ts or (400 <= status < 500 and status not in (429, 418)):
             return None
         if status in (429, 418):
-            r_str = _get_retry_after_header(getattr(resp, "headers", None))
+            r_str = resp.headers.get("Retry-After") if hasattr(resp, "headers") else None
             r_val = parse_retry_after(r_str, now_dt_fn=now_dt_fn)
             if r_val is None or r_val > max_retry_after or attempt >= max_attempts:
                 return None
-            raw_j = jitter_fn(0.1, 0.5)
-            delay = min(max_retry_after, r_val + (raw_j if (math.isfinite(raw_j) and raw_j >= 0.0) else 0.0))
+            delay = min(max_retry_after, r_val + max(0.0, jitter_fn(0.1, 0.5)))
             if (clock_fn() + delay) > deadline_ts:
                 return None
             sleep_fn(delay)
@@ -309,68 +283,47 @@ def _fetch_feed_with_retry(
     return None
 
 
+# Fetch latest confirmed 1-hour candle with failover from Binance to Coinbase
 def fetch_latest_confirmed_candle(
     symbol: str = "BTCUSDT", sleep_fn: Optional[Callable[[float], None]] = None,
     jitter_fn: Optional[Callable[[float, float], float]] = None, clock_fn: Optional[Callable[[], float]] = None,
     now_dt_fn: Optional[Callable[[], datetime]] = None, total_deadline: Optional[float] = None,
 ) -> Dict[str, Any]:
-    _sleep_fn = sleep_fn or time.sleep
-    _jitter_fn = jitter_fn or random.uniform
-    _clock_fn = clock_fn or time.perf_counter
-    _budget = total_deadline or EXCHANGE_RETRY_TOTAL_DEADLINE
+    _sleep_fn, _jitter_fn = sleep_fn or time.sleep, jitter_fn or random.uniform
+    _clock_fn, _budget = clock_fn or time.perf_counter, total_deadline or EXCHANGE_RETRY_TOTAL_DEADLINE
 
-    # 1. Binance Vision
+    # 1. Primary: Binance Vision
     b_url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&limit=102"
-    binance_klines = _fetch_feed_with_retry(
-        url=b_url, feed_name="Binance Vision", min_row_len=BINANCE_MIN_ROW_LEN,
-        sleep_fn=_sleep_fn, jitter_fn=_jitter_fn, clock_fn=_clock_fn, now_dt_fn=now_dt_fn, total_deadline=_budget
-    )
+    binance_klines = _fetch_feed_with_retry(url=b_url, feed_name="Binance Vision", min_row_len=BINANCE_MIN_ROW_LEN, sleep_fn=_sleep_fn, jitter_fn=_jitter_fn, clock_fn=_clock_fn, now_dt_fn=now_dt_fn, total_deadline=_budget)
     if binance_klines and _validate_candle_payload(binance_klines, min_row_len=BINANCE_MIN_ROW_LEN):
         now_ms = (now_dt_fn().timestamp() if now_dt_fn else datetime.now(timezone.utc).timestamp()) * 1000.0
         confirmed = [k for k in binance_klines if float(k[6]) < now_ms]
         if len(confirmed) >= 35:
             selected = confirmed[-100:]
             c = selected[-1]
-            records = [{
-                "timestamp": pd.to_datetime(float(k[0]), unit="ms", utc=True),
-                "open": float(k[1]), "high": float(k[2]), "low": float(k[3]), "close": float(k[4]),
-                "volume": float(k[5]), "number_of_trades": _parse_trade_count(k[8]),
-                "taker_buy_ratio": round(float(k[9]) / float(k[5]), 4) if float(k[5]) > 0 else 0.5,
-            } for k in selected]
+            records = [{"timestamp": pd.to_datetime(float(k[0]), unit="ms", utc=True), "open": float(k[1]), "high": float(k[2]), "low": float(k[3]), "close": float(k[4]), "volume": float(k[5]), "number_of_trades": _parse_trade_count(k[8]), "taker_buy_ratio": round(float(k[9]) / float(k[5]), 4) if float(k[5]) > 0 else 0.5} for k in selected]
             return {
-                "timestamp": datetime.fromtimestamp(float(c[0]) / 1000.0, tz=timezone.utc),
-                "open": float(c[1]), "high": float(c[2]), "low": float(c[3]), "close": float(c[4]),
-                "volume": float(c[5]), "taker_buy_ratio": records[-1]["taker_buy_ratio"],
-                "number_of_trades": _parse_trade_count(c[8]), "candles": records,
+                "timestamp": datetime.fromtimestamp(float(c[0]) / 1000.0, tz=timezone.utc), "open": float(c[1]), "high": float(c[2]), "low": float(c[3]), "close": float(c[4]), "volume": float(c[5]), "taker_buy_ratio": records[-1]["taker_buy_ratio"], "number_of_trades": _parse_trade_count(c[8]), "candles": records,
             }
 
-    # 2. Coinbase Fallback
+    # 2. Fallback: Coinbase
     c_url = "https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=3600"
-    cb_candles = _fetch_feed_with_retry(
-        url=c_url, headers={"User-Agent": "Mudra-Sync/1.0"}, feed_name="Coinbase Institutional",
-        min_row_len=COINBASE_MIN_ROW_LEN, sleep_fn=_sleep_fn, jitter_fn=_jitter_fn,
-        clock_fn=_clock_fn, now_dt_fn=now_dt_fn, total_deadline=_budget
-    )
+    cb_candles = _fetch_feed_with_retry(url=c_url, headers={"User-Agent": "Mudra-Sync/1.0"}, feed_name="Coinbase Institutional", min_row_len=COINBASE_MIN_ROW_LEN, sleep_fn=_sleep_fn, jitter_fn=_jitter_fn, clock_fn=_clock_fn, now_dt_fn=now_dt_fn, total_deadline=_budget)
     if cb_candles and _validate_candle_payload(cb_candles, min_row_len=COINBASE_MIN_ROW_LEN):
         now_sec = now_dt_fn().timestamp() if now_dt_fn else datetime.now(timezone.utc).timestamp()
         confirmed = [k for k in cb_candles if (float(k[0]) + 3600.0) <= now_sec]
         if len(confirmed) >= 35:
             selected = list(reversed(confirmed[:100]))
             c = selected[-1]
-            records = [{
-                "timestamp": pd.to_datetime(float(k[0]), unit="s", utc=True),
-                "low": float(k[1]), "high": float(k[2]), "open": float(k[3]), "close": float(k[4]),
-                "volume": float(k[5]), "taker_buy_ratio": 0.50, "number_of_trades": None,
-            } for k in selected]
+            records = [{"timestamp": pd.to_datetime(float(k[0]), unit="s", utc=True), "low": float(k[1]), "high": float(k[2]), "open": float(c[3]), "close": float(k[4]), "volume": float(k[5]), "taker_buy_ratio": 0.50, "number_of_trades": None} for k in selected]
             return {
-                "timestamp": datetime.fromtimestamp(float(c[0]), tz=timezone.utc),
-                "open": float(c[3]), "high": float(c[2]), "low": float(c[1]), "close": float(c[4]),
-                "volume": float(c[5]), "taker_buy_ratio": 0.50, "number_of_trades": None, "candles": records,
+                "timestamp": datetime.fromtimestamp(float(c[0]), tz=timezone.utc), "open": float(c[3]), "high": float(c[2]), "low": float(c[1]), "close": float(c[4]), "volume": float(c[5]), "taker_buy_ratio": 0.50, "number_of_trades": None, "candles": records,
             }
 
     raise MarketFeedExhaustedError("Failed to fetch confirmed 1-hour candle from all market feeds.")
 
 
+# Master synchronization cycle: candle fetch, ML inference, council deliberation, and ledger
 def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, Any]]:
     db_ok, ver, _ = test_connection()
     if not db_ok:
@@ -386,10 +339,7 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
         backfill_missing_candles(session, candle)
 
         existing = session.execute(
-            select(MarketTick).where(
-                MarketTick.timestamp == latest_ts,
-                MarketTick.model_version == ACTIVE_MODEL_VERSION,
-            ).order_by(MarketTick.id.desc())
+            select(MarketTick).where(MarketTick.timestamp == latest_ts, MarketTick.model_version == ACTIVE_MODEL_VERSION).order_by(MarketTick.id.desc())
         ).scalars().first()
 
         if existing and not force:
@@ -400,9 +350,8 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
         already_executed = is_paper_trade_executed_for_tick(session, existing.id) if is_existing else False
 
         signals_output = calculate_technical_signals.invoke({
-            "close": candle["close"], "open_price": candle["open"], "high": candle["high"],
-            "low": candle["low"], "volume": candle["volume"], "taker_buy_ratio": candle.get("taker_buy_ratio"),
-            "timestamp": latest_ts, "candles": candle.get("candles"),
+            "close": candle["close"], "open_price": candle["open"], "high": candle["high"], "low": candle["low"],
+            "volume": candle["volume"], "taker_buy_ratio": candle.get("taker_buy_ratio"), "timestamp": latest_ts, "candles": candle.get("candles"),
         })
         ml_output = get_model_return_forecast.invoke({"features": signals_output})
         pred_return = float(ml_output.get("expected_return_pct", 0.0))
@@ -436,16 +385,11 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
 
         reconcile_pending_ticks(session, current_tick)
 
-        council_state = run_trading_graph(
-            symbol="BTCUSDT", current_price=candle["close"], market_data=candle,
-            engineered_features=signals_output, ml_forecast=ml_output,
-            timestamp=latest_ts.isoformat(),
-        )
+        council_state = run_trading_graph(symbol="BTCUSDT", current_price=candle["close"], market_data=candle, engineered_features=signals_output, ml_forecast=ml_output, timestamp=latest_ts.isoformat())
         decision = council_state.get("final_decision", "HOLD")
         verdict = council_state.get("risk_verdict", "VETOED")
         kelly = float(council_state.get("kelly_fraction", 0.0))
 
-        reanalysis_flag = " [FORCED_REANALYSIS]" if (is_existing and force) else ""
         audit = CouncilAudit(
             tick_id=current_tick.id,
             deliberation_latency_ms=council_state.get("latency_ms", 120.0),
@@ -456,7 +400,7 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
             veto_reasons=council_state.get("veto_reasons", []),
             kelly_fraction=kelly,
             final_decision=decision,
-            execution_notes=f"Council deliberated {decision} ({verdict}) at BTC ${candle['close']:,.2f}.{reanalysis_flag}",
+            execution_notes=f"Council deliberated {decision} ({verdict}) at BTC ${candle['close']:,.2f}." + (" [FORCED_REANALYSIS]" if (is_existing and force) else ""),
         )
         session.add(audit)
         session.flush()
@@ -467,19 +411,12 @@ def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, A
             if str(decision).upper() == "SELL":
                 try:
                     from src.engine.paper_portfolio import evaluate_spot_hold_until_profit_decision
-                    spot_guard = evaluate_spot_hold_until_profit_decision(
-                        session=session, current_price=float(candle["close"]),
-                        predicted_direction=str(ml_output.get("direction", "DOWN")),
-                        proposed_action=decision, clears_hurdle=bool(ml_output.get("clears_hurdle", False)),
-                    )
+                    spot_guard = evaluate_spot_hold_until_profit_decision(session=session, current_price=float(candle["close"]), predicted_direction=str(ml_output.get("direction", "DOWN")), proposed_action=decision, clears_hurdle=bool(ml_output.get("clears_hurdle", False)))
                     effective_action = spot_guard.get("final_spot_action", decision)
                     order_notes = spot_guard.get("reason", order_notes)
                 except Exception:
                     pass
-            execute_paper_order(
-                session=session, action=effective_action, current_price=candle["close"],
-                kelly_fraction=kelly, notes=order_notes, tick_id=current_tick.id,
-            )
+            execute_paper_order(session=session, action=effective_action, current_price=candle["close"], kelly_fraction=kelly, notes=order_notes, tick_id=current_tick.id)
 
         summary = get_portfolio_summary(session, candle["close"])
         if is_existing and already_executed:
