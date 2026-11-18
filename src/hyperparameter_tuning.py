@@ -1,4 +1,3 @@
-# src/hyperparameter_tuning.py
 from pathlib import Path
 from typing import Any, Dict, Union
 import joblib
@@ -22,6 +21,7 @@ from src.feature_engineering import create_features
 
 
 def get_best_xgboost_device() -> str:
+    # uses cuda if available, otherwise defaults to cpu
     try:
         import torch
         if torch.cuda.is_available():
@@ -32,6 +32,7 @@ def get_best_xgboost_device() -> str:
 
 
 def _suggest_xgb_params(trial: optuna.Trial, device: str = "cpu") -> dict:
+    # hyperparameter search space for tree-based estimators
     return {
         "n_estimators": trial.suggest_int("n_estimators", 50, 400, step=50),
         "max_depth": trial.suggest_int("max_depth", 3, 8),
@@ -47,30 +48,31 @@ def _suggest_xgb_params(trial: optuna.Trial, device: str = "cpu") -> dict:
     }
 
 
-def objective_regressor(trial: optuna.Trial, X_train: pd.DataFrame, y_train: pd.Series, close_train: pd.Series, target_close_train: pd.Series, device: str = "cpu") -> float:
+def objective_regressor(trial: optuna.Trial, X: pd.DataFrame, y: pd.Series, close: pd.Series, target_close: pd.Series, device: str = "cpu") -> float:
+    # cross-validation objective minimizing price forecast RMSE
     params = _suggest_xgb_params(trial, device)
     tscv = TimeSeriesSplit(n_splits=5)
     rmses = []
-    for train_idx, val_idx in tscv.split(X_train):
-        model = XGBRegressor(**params)
-        model.fit(X_train.iloc[train_idx], y_train.iloc[train_idx])
-        pred_prices = close_train.iloc[val_idx] * (1 + model.predict(X_train.iloc[val_idx]))
-        rmses.append(float(np.sqrt(mean_squared_error(target_close_train.iloc[val_idx], pred_prices))))
+    for tr, val in tscv.split(X):
+        model = XGBRegressor(**params).fit(X.iloc[tr], y.iloc[tr])
+        pred_prices = close.iloc[val] * (1.0 + model.predict(X.iloc[val]))
+        rmses.append(float(np.sqrt(mean_squared_error(target_close.iloc[val], pred_prices))))
     return float(np.mean(rmses))
 
 
-def objective_classifier(trial: optuna.Trial, X_train: pd.DataFrame, y_train: pd.Series, device: str = "cpu") -> float:
+def objective_classifier(trial: optuna.Trial, X: pd.DataFrame, y: pd.Series, device: str = "cpu") -> float:
+    # cross-validation objective maximizing directional accuracy
     params = _suggest_xgb_params(trial, device)
     tscv = TimeSeriesSplit(n_splits=5)
     accs = []
-    for train_idx, val_idx in tscv.split(X_train):
-        model = XGBClassifier(**params)
-        model.fit(X_train.iloc[train_idx], y_train.iloc[train_idx])
-        accs.append(float(accuracy_score(y_train.iloc[val_idx], model.predict(X_train.iloc[val_idx]))))
+    for tr, val in tscv.split(X):
+        model = XGBClassifier(**params).fit(X.iloc[tr], y.iloc[tr])
+        accs.append(float(accuracy_score(y.iloc[val], model.predict(X.iloc[val]))))
     return float(np.mean(accs))
 
 
 def run_tuning(data_path: Union[str, Path] = BTCUSDT_1H_CSV, n_trials: int = 50) -> Dict[str, Any]:
+    # executes Optuna bayesian search over regressor and classifier
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
     df = load_and_clean_data(data_path)
@@ -81,47 +83,31 @@ def run_tuning(data_path: Union[str, Path] = BTCUSDT_1H_CSV, n_trials: int = 50)
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     results: Dict[str, Any] = {}
 
-    # 1. Regressor tuning
-    split_1 = int(len(df) * 0.8)
-    X1_tr, X1_te = df[REGRESSOR_FEATURES].iloc[:split_1], df[REGRESSOR_FEATURES].iloc[split_1:]
-    y1_tr, y1_te = df["Target_Return"].iloc[:split_1], df["Target_Return"].iloc[split_1:]
-    c_tr, c_te = df["close"].iloc[:split_1], df["close"].iloc[split_1:]
-    tc_tr, tc_te = df["Target_Close"].iloc[:split_1], df["Target_Close"].iloc[split_1:]
+    split = int(len(df) * 0.8)
+    X1_tr, X1_te = df[REGRESSOR_FEATURES].iloc[:split], df[REGRESSOR_FEATURES].iloc[split:]
+    y1_tr, y1_te = df["Target_Return"].iloc[:split], df["Target_Return"].iloc[split:]
+    c_tr, c_te = df["close"].iloc[:split], df["close"].iloc[split:]
+    tc_tr, tc_te = df["Target_Close"].iloc[:split], df["Target_Close"].iloc[split:]
 
     study_reg = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=42))
     study_reg.optimize(lambda t: objective_regressor(t, X1_tr, y1_tr, c_tr, tc_tr, device), n_trials=n_trials)
-
     best_reg_params = {**study_reg.best_params, "tree_method": "hist", "device": device, "random_state": 42}
     best_xgbr = XGBRegressor(**best_reg_params).fit(X1_tr, y1_tr)
-    test_rmse = float(np.sqrt(mean_squared_error(tc_te, c_te * (1 + best_xgbr.predict(X1_te)))))
+    test_rmse = float(np.sqrt(mean_squared_error(tc_te, c_te * (1.0 + best_xgbr.predict(X1_te)))))
     base_rmse = float(np.sqrt(mean_squared_error(tc_te, c_te)))
-
-    with mlflow.start_run(run_name="optuna_tuned_xgboost_regressor"):
-        mlflow.log_params(best_reg_params)
-        mlflow.log_metrics({"best_cv_rmse": float(study_reg.best_value), "test_rmse_price": test_rmse, "naive_baseline_rmse": base_rmse})
-        mlflow.xgboost.log_model(best_xgbr, artifact_path="model")
 
     Path(REGRESSOR_MODEL_PATH).parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(best_xgbr, REGRESSOR_MODEL_PATH)
     results["regressor"] = {"best_params": best_reg_params, "test_rmse_price": test_rmse, "model": best_xgbr}
 
-    # 2. Classifier tuning
-    split_2 = int(len(df) * 0.8)
-    X2_tr, X2_te = df[CLASSIFIER_FEATURES].iloc[:split_2], df[CLASSIFIER_FEATURES].iloc[split_2:]
-    y2_tr, y2_te = df["Target_Movement"].iloc[:split_2], df["Target_Movement"].iloc[split_2:]
+    X2_tr, X2_te = df[CLASSIFIER_FEATURES].iloc[:split], df[CLASSIFIER_FEATURES].iloc[split:]
+    y2_tr, y2_te = df["Target_Movement"].iloc[:split], df["Target_Movement"].iloc[split:]
 
     study_clf = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=42))
     study_clf.optimize(lambda t: objective_classifier(t, X2_tr, y2_tr, device), n_trials=n_trials)
-
     best_clf_params = {**study_clf.best_params, "tree_method": "hist", "device": device, "random_state": 42}
     best_xgbc = XGBClassifier(**best_clf_params).fit(X2_tr, y2_tr)
     test_acc = float(accuracy_score(y2_te, best_xgbc.predict(X2_te)))
-    base_acc = float(accuracy_score(y2_te, pd.Series(int(y2_tr.mode()[0]), index=y2_te.index)))
-
-    with mlflow.start_run(run_name="optuna_tuned_xgboost_classifier"):
-        mlflow.log_params(best_clf_params)
-        mlflow.log_metrics({"best_cv_accuracy": float(study_clf.best_value), "test_accuracy": test_acc, "naive_baseline_accuracy": base_acc})
-        mlflow.xgboost.log_model(best_xgbc, artifact_path="model")
 
     from src.model_loader import save_production_models
     save_production_models(best_xgbc, best_xgbr, CLASSIFIER_FEATURES, "xgb_v1.1.0_tuned", {"tuned_test_accuracy": round(test_acc, 4), "tuned_test_rmse": round(test_rmse, 2)})
