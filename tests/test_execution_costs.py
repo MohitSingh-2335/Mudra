@@ -167,9 +167,7 @@ def test_ui_generate_live_forecast_hurdle(monkeypatch):
 
 
 def test_tab2_scenarios_and_graph(monkeypatch):
-    import sys
-    monkeypatch.setattr(sys.modules["src.agents.strategist_node"], "_get_gemini_api_key", lambda: None)
-    monkeypatch.setattr(sys.modules["src.agents.risk_critic_node"], "_get_gemini_api_key", lambda: None)
+    monkeypatch.setattr("src.agents.council._get_gemini_api_key", lambda: None)
 
     for scenario, expected_action in [("chop", "HOLD"), ("bullish", "BUY"), ("vol_spike", "SELL")]:
         m, t, f = app.build_council_scenario_payload(scenario, 65000.0)
