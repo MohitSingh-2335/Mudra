@@ -2,10 +2,11 @@ import pytest
 from src.agents.council import (
     AgentState,
     build_trading_graph,
+    calculate_technical_signals,
+    get_model_return_forecast,
     risk_critic_node,
     run_trading_graph,
 )
-from src.agents.tools import calculate_technical_signals, get_model_return_forecast
 
 
 def test_trading_graph_compilation():
