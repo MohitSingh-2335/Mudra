@@ -1,75 +1,49 @@
 # src/feature_engineering.py
-"""
-Feature engineering module for Mudra quantitative trading system.
-Transforms raw OHLCV and market microstructure into 39 technical features
-and generates continuous return and binary movement target variables.
-"""
-
-from typing import Optional, Union, Any, List, Dict
+from typing import Any, Union
 import numpy as np
 import pandas as pd
 import ta
 
 
-def create_features(
-    df: pd.DataFrame,
-    drop_na: bool = True,
-    is_training: bool = True
-) -> pd.DataFrame:
-    """
-    Engineers technical indicators, cyclical time embeddings, order flow microstructure,
-    macro sentiment, on-chain dynamics, and target labels.
-
-    Args:
-        df (pd.DataFrame): Raw candlestick DataFrame with OHLCV and timestamp.
-        drop_na (bool): Whether to drop initial rolling window NaNs (default: True).
-        is_training (bool): Whether to generate forward-shifted targets for training (default: True).
-
-    Returns:
-        pd.DataFrame: Engineered DataFrame containing all model features and targets.
-    """
+def create_features(df: pd.DataFrame, drop_na: bool = True, is_training: bool = True) -> pd.DataFrame:
     df = df.copy()
 
-    # Ensure timestamp column is datetime object
+    # Parse timestamp
     if "timestamp" in df.columns and not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
         try:
             df["timestamp"] = pd.to_datetime(df["timestamp"], format="%Y:%m:%d %H:%M:%S")
         except (ValueError, TypeError):
             df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-    # Basic price and volatility features
+    # Price and range features
     df["Price Change"] = df["close"] - df["open"]
     df["Volatility"] = (df["high"] - df["low"]) / df["open"]
     df["high_low_ratio"] = df["high"] / df["low"]
     df["close_open_diff"] = df["close"] - df["open"]
 
-    # Rolling window features
-    df["Rolling_Mean_Close"] = df["close"].rolling(window=5).mean()
-    df["Rolling_Std_Close"] = df["close"].rolling(window=5).std()
-    df["rolling_max_6h"] = df["close"].rolling(window=6).max()
-    df["rolling_min_6h"] = df["close"].rolling(window=6).min()
+    # Rolling price statistics
+    df["Rolling_Mean_Close"] = df["close"].rolling(5).mean()
+    df["Rolling_Std_Close"] = df["close"].rolling(5).std()
+    df["rolling_max_6h"] = df["close"].rolling(6).max()
+    df["rolling_min_6h"] = df["close"].rolling(6).min()
 
-    # Target variables for model training (strictly disabled during live inference)
+    # Shifted target variables for supervised learning
     if is_training:
         df["Target_Close"] = df["close"].shift(-1)
         df["Target_Movement"] = (df["close"].shift(-1) > df["close"]).astype(int)
-        # Continuous fractional return target: (Close_{t+1} - Close_t) / Close_t
         df["Target_Return"] = df["close"].shift(-1) / df["close"] - 1.0
 
     # Volatility and historical return features
-    window = 6
     df["vol_1h"] = df["high"] - df["low"]
-    df["vol_mean_6h"] = df["vol_1h"].rolling(window).mean()
-    df["vol_std_6h"] = df["vol_1h"].rolling(window).std()
-    df["vol_max_6h"] = df["vol_1h"].rolling(window).max()
-    df["vol_min_6h"] = df["vol_1h"].rolling(window).min()
-
-    # Backward-looking historical lag return (strictly preserves temporal causality)
+    df["vol_mean_6h"] = df["vol_1h"].rolling(6).mean()
+    df["vol_std_6h"] = df["vol_1h"].rolling(6).std()
+    df["vol_max_6h"] = df["vol_1h"].rolling(6).max()
+    df["vol_min_6h"] = df["vol_1h"].rolling(6).min()
     df["return_1h_lag"] = df["close"].pct_change(fill_method=None)
-    df["return_mean_6h"] = df["return_1h_lag"].rolling(window).mean()
-    df["return_std_6h"] = df["return_1h_lag"].rolling(window).std()
+    df["return_mean_6h"] = df["return_1h_lag"].rolling(6).mean()
+    df["return_std_6h"] = df["return_1h_lag"].rolling(6).std()
 
-    # Time-based and cyclical sinusoidal encodings
+    # Cyclical hour and day sinusoidal encodings
     if "timestamp" in df.columns:
         df["hour"] = df["timestamp"].dt.hour
         df["dayofweek"] = df["timestamp"].dt.dayofweek
@@ -82,7 +56,7 @@ def create_features(
         for col in ["hour", "dayofweek", "day", "hour_sin", "hour_cos", "day_sin", "day_cos"]:
             df[col] = 0.0
 
-    # Technical indicators
+    # Technical momentum and volatility indicators
     df["rsi"] = ta.momentum.RSIIndicator(close=df["close"], window=14).rsi()
     df["macd"] = ta.trend.MACD(close=df["close"]).macd()
     bb = ta.volatility.BollingerBands(close=df["close"])
@@ -91,7 +65,7 @@ def create_features(
     df["ema_10"] = df["close"].ewm(span=10).mean()
     df["ema_30"] = df["close"].ewm(span=30).mean()
 
-    # Stationary percentage ratios (scale-invariant across market regimes)
+    # Stationary scale-invariant percentage distance ratios
     df["candle_body_pct"] = (df["close"] - df["open"]) / df["open"]
     df["hl_range_pct"] = (df["high"] - df["low"]) / df["close"]
     df["sma_10_dist_pct"] = (df["close"] - df["Rolling_Mean_Close"]) / df["Rolling_Mean_Close"]
@@ -101,15 +75,15 @@ def create_features(
     bb_diff = (df["bb_high"] - df["bb_low"]).replace(0, np.nan)
     df["bb_pct_b"] = ((df["close"] - df["bb_low"]) / bb_diff).fillna(0.5)
 
-    # Lag and interaction features
+    # Lags and interaction features
     df["close_lag_1"] = df["close"].shift(1)
     df["volume_lag_1"] = df["volume"].shift(1)
     df["price_volatility_interaction"] = df["close"] * df["Volatility"]
 
-    # Order-flow microstructure features (neutral defaults if feed lacks taker/trades data)
+    # Order flow microstructure metrics
     if "taker_buy_ratio" in df.columns and df["taker_buy_ratio"].notna().any():
         df["taker_buy_ratio"] = pd.to_numeric(df["taker_buy_ratio"], errors="coerce").fillna(0.5)
-        df["taker_buy_ratio_mean_6h"] = df["taker_buy_ratio"].rolling(window=6).mean().fillna(0.5)
+        df["taker_buy_ratio_mean_6h"] = df["taker_buy_ratio"].rolling(6).mean().fillna(0.5)
     else:
         df["taker_buy_ratio"] = 0.5
         df["taker_buy_ratio_mean_6h"] = 0.5
@@ -119,110 +93,58 @@ def create_features(
 
     if "number_of_trades" in df.columns and df["number_of_trades"].notna().any():
         df["number_of_trades"] = pd.to_numeric(df["number_of_trades"], errors="coerce").fillna(0.0)
-        df["trades_mean_6h"] = df["number_of_trades"].rolling(window=6).mean().fillna(0.0)
+        df["trades_mean_6h"] = df["number_of_trades"].rolling(6).mean().fillna(0.0)
     else:
         df["number_of_trades"] = 0.0
         df["trades_mean_6h"] = 0.0
 
-    # Fear & Greed sentiment features (neutral 50.0 default if feed lacks sentiment)
+    # Macro sentiment features
     if "fng_value" in df.columns:
-        df["fng_mean_3d"] = df["fng_value"].rolling(window=72).mean()
+        df["fng_mean_3d"] = df["fng_value"].rolling(72).mean()
     else:
         df["fng_value"] = 50.0
         df["fng_mean_3d"] = 50.0
 
-    # On-chain network dynamics (day-over-day changes, 0.0 default if unmerged)
-    if "onchain_num_tx_change" not in df.columns:
-        if "onchain_num_tx" in df.columns:
-            df["onchain_num_tx_change"] = df["onchain_num_tx"].pct_change(fill_method=None).fillna(0.0)
+    # On-chain network dynamics
+    for col, src in [("onchain_num_tx_change", "onchain_num_tx"),
+                     ("onchain_hash_rate_change", "onchain_hash_rate"),
+                     ("onchain_miners_revenue_change", "onchain_miners_revenue_usd")]:
+        if col not in df.columns:
+            df[col] = df[src].pct_change(fill_method=None).fillna(0.0) if src in df.columns else 0.0
         else:
-            df["onchain_num_tx_change"] = 0.0
-    else:
-        df["onchain_num_tx_change"] = df["onchain_num_tx_change"].fillna(0.0)
+            df[col] = df[col].fillna(0.0)
 
-    if "onchain_hash_rate_change" not in df.columns:
-        if "onchain_hash_rate" in df.columns:
-            df["onchain_hash_rate_change"] = df["onchain_hash_rate"].pct_change(fill_method=None).fillna(0.0)
-        else:
-            df["onchain_hash_rate_change"] = 0.0
-    else:
-        df["onchain_hash_rate_change"] = df["onchain_hash_rate_change"].fillna(0.0)
+    for col in ["onchain_num_tx", "onchain_hash_rate"]:
+        if col not in df.columns:
+            df[col] = 0.0
 
-    if "onchain_miners_revenue_change" not in df.columns:
-        if "onchain_miners_revenue_usd" in df.columns:
-            df["onchain_miners_revenue_change"] = df["onchain_miners_revenue_usd"].pct_change(fill_method=None).fillna(0.0)
-        else:
-            df["onchain_miners_revenue_change"] = 0.0
-    else:
-        df["onchain_miners_revenue_change"] = df["onchain_miners_revenue_change"].fillna(0.0)
-
-    if "onchain_num_tx" not in df.columns:
-        df["onchain_num_tx"] = 0.0
-    if "onchain_hash_rate" not in df.columns:
-        df["onchain_hash_rate"] = 0.0
-
-    # Replace any infinite values from zero divisions
     df = df.replace([np.inf, -np.inf], np.nan)
-
-    # Clean rolling window NaNs and reset index
-    if drop_na:
-        df = df.dropna().reset_index(drop=True)
-
-    return df
+    return df.dropna().reset_index(drop=True) if drop_na else df
 
 
 def extract_features_for_inference(df: pd.DataFrame) -> dict:
-    """
-    Extracts engineered features for the latest confirmed candlestick in df.
-    Strictly enforces training/live parity by running create_features on the historical sequence.
-
-    Args:
-        df (pd.DataFrame): Candlestick sequence with OHLCV columns.
-                           Must contain at least 35 candles to ensure rolling window convergence.
-
-    Returns:
-        dict: Comprehensive dictionary containing all 26 REGRESSOR_FEATURES,
-              all 39 CLASSIFIER_FEATURES, raw OHLCV metrics, and telemetry indicators.
-
-    Raises:
-        ValueError: If df is None, empty, contains fewer than 35 candles, or has NaN values.
-        KeyError: If required OHLCV columns are missing.
-    """
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         raise ValueError("Market candle sequence cannot be empty.")
-
-    required_cols = {"open", "high", "low", "close", "volume"}
-    missing_cols = required_cols - set(df.columns)
+    missing_cols = {"open", "high", "low", "close", "volume"} - set(df.columns)
     if missing_cols:
         raise KeyError(f"Candle sequence missing required OHLCV columns: {missing_cols}")
+    if len(df) < 35:
+        raise ValueError(f"Insufficient historical candles for feature extraction: received {len(df)}, minimum required is 35.")
 
-    min_lookback = 35
-    if len(df) < min_lookback:
-        raise ValueError(
-            f"Insufficient historical candles for feature extraction: received {len(df)}, "
-            f"minimum required is {min_lookback}."
-        )
-
-    # Compute features over entire history without shifting future targets or dropping rows
     featured_df = create_features(df, drop_na=False, is_training=False)
     latest = featured_df.iloc[-1]
 
-    # Lazy import to avoid circular dependency
     from config import REGRESSOR_FEATURES, CLASSIFIER_FEATURES
-
-    # Validate that all required model features are non-null
-    all_required_features = sorted(list(set(REGRESSOR_FEATURES + CLASSIFIER_FEATURES)))
-    nan_features = [col for col in all_required_features if pd.isna(latest.get(col))]
+    all_required = sorted(list(set(REGRESSOR_FEATURES + CLASSIFIER_FEATURES)))
+    nan_features = [col for col in all_required if pd.isna(latest.get(col))]
     if nan_features:
         raise ValueError(f"Feature parity violation: NaNs encountered in computed features: {nan_features}")
 
-    # Build comprehensive output dictionary
     out: dict = {}
-    for col in all_required_features:
+    for col in all_required:
         val = latest[col]
         out[col] = int(val) if col in {"hour", "dayofweek", "day"} else float(val)
 
-    # Preserve all computed feature columns from featured_df for dynamic multi-model serving
     for col in featured_df.columns:
         if col not in out and col in latest and pd.notna(latest[col]):
             val = latest[col]
@@ -231,21 +153,13 @@ def extract_features_for_inference(df: pd.DataFrame) -> dict:
             elif isinstance(val, (float, np.floating)):
                 out[col] = float(val)
 
-    # Raw candlestick values
-    out["close"] = float(latest["close"])
-    out["open"] = float(latest["open"])
-    out["high"] = float(latest["high"])
-    out["low"] = float(latest["low"])
-    out["volume"] = float(latest["volume"])
-    # Convert timestamp to ISO string format so it can be safely stored as JSON
+    for k in ["close", "open", "high", "low", "volume"]:
+        out[k] = float(latest[k])
+
     if "timestamp" in latest and pd.notna(latest["timestamp"]):
         out["timestamp"] = pd.to_datetime(latest["timestamp"]).isoformat()
-    if "number_of_trades" in latest and pd.notna(latest["number_of_trades"]) and latest["number_of_trades"] > 0:
-        out["number_of_trades"] = int(latest["number_of_trades"])
-    else:
-        out["number_of_trades"] = None
+    out["number_of_trades"] = int(latest["number_of_trades"]) if "number_of_trades" in latest and pd.notna(latest["number_of_trades"]) and latest["number_of_trades"] > 0 else None
 
-    # Microstructural Telemetry
     spread = float(latest["high"] - latest["low"])
     close_price = float(latest["close"])
     spread_pct = (spread / close_price) * 100.0 if close_price > 0 else 0.0
@@ -264,191 +178,87 @@ def extract_features_for_inference(df: pd.DataFrame) -> dict:
     out["order_flow_bias"] = flow_bias
     out["rsi_estimate"] = round(float(out["rsi"]), 1)
     out["volume_usd"] = round(float(latest["volume"]), 2)
-
     return out
 
 
-def validate_inference_features(
-    features: Union[pd.DataFrame, dict],
-    model_type: str = "regressor"
-) -> pd.DataFrame:
-    """
-    Validates feature contracts and enforces strict canonical column ordering
-    prior to model inference. Prevents silent feature transposition, missing
-    columns, NaN/infinite propagation, and schema mismatch.
-
-    Args:
-        features: Input feature mapping (dict) or DataFrame.
-        model_type: "regressor" (26 features) or "classifier" (39 features).
-
-    Returns:
-        pd.DataFrame: A validated DataFrame with columns strictly ordered
-                      according to config.REGRESSOR_FEATURES or config.CLASSIFIER_FEATURES.
-
-    Raises:
-        ValueError: If model_type is unsupported, if required features are missing,
-                    if input DataFrame columns are shuffled or out of order,
-                    or if feature values contain NaNs or infinite values.
-    """
+def validate_inference_features(features: Union[pd.DataFrame, dict], model_type: str = "regressor") -> pd.DataFrame:
     from config import REGRESSOR_FEATURES, CLASSIFIER_FEATURES
-
-    model_type_normalized = model_type.strip().lower()
-    if model_type_normalized == "regressor":
-        expected_features = REGRESSOR_FEATURES
-    elif model_type_normalized == "classifier":
-        expected_features = CLASSIFIER_FEATURES
+    model_type_norm = model_type.strip().lower()
+    if model_type_norm == "regressor":
+        expected = REGRESSOR_FEATURES
+    elif model_type_norm == "classifier":
+        expected = CLASSIFIER_FEATURES
     else:
-        raise ValueError(
-            f"Unsupported model_type '{model_type}'. Expected 'regressor' or 'classifier'."
-        )
+        raise ValueError(f"Unsupported model_type '{model_type}'. Expected 'regressor' or 'classifier'.")
 
     if isinstance(features, dict):
-        missing = [col for col in expected_features if col not in features]
+        missing = [col for col in expected if col not in features]
         if missing:
-            raise ValueError(
-                f"Feature parity violation: missing required {model_type_normalized} features: {missing}"
-            )
-        # Build DataFrame with exact expected order
-        df = pd.DataFrame([{col: features[col] for col in expected_features}], columns=expected_features)
+            raise ValueError(f"Feature parity violation: missing required {model_type_norm} features: {missing}")
+        df = pd.DataFrame([{col: features[col] for col in expected}], columns=expected)
     elif isinstance(features, pd.DataFrame):
         if features.empty:
-            raise ValueError(f"Input DataFrame for {model_type_normalized} inference cannot be empty.")
-
-        missing = [col for col in expected_features if col not in features.columns]
+            raise ValueError(f"Input DataFrame for {model_type_norm} inference cannot be empty.")
+        missing = [col for col in expected if col not in features.columns]
         if missing:
-            raise ValueError(
-                f"Feature parity violation: missing required {model_type_normalized} features: {missing}"
-            )
-
-        # Enforce exact column order on the first len(expected_features) columns
+            raise ValueError(f"Feature parity violation: missing required {model_type_norm} features: {missing}")
         actual_cols = list(features.columns)
-        if actual_cols[:len(expected_features)] != expected_features:
+        if actual_cols[:len(expected)] != expected:
             raise ValueError(
-                f"Feature ordering contract violation for {model_type_normalized}: "
+                f"Feature ordering contract violation for {model_type_norm}: "
                 f"Input columns are shuffled or out of order. "
-                f"Expected canonical order: {expected_features}, "
-                f"got: {actual_cols[:len(expected_features)]}"
+                f"Expected canonical order: {expected}, got: {actual_cols[:len(expected)]}"
             )
-
-        extra_cols = [c for c in actual_cols if c not in expected_features]
-        if extra_cols:
-            raise ValueError(
-                f"Feature schema violation for {model_type_normalized}: "
-                f"Input DataFrame contains unexpected extra columns: {extra_cols}"
-            )
-
-        df = features[expected_features].copy()
+        extra = [c for c in actual_cols if c not in expected]
+        if extra:
+            raise ValueError(f"Feature schema violation for {model_type_norm}: Input DataFrame contains unexpected extra columns: {extra}")
+        df = features[expected].copy()
     else:
-        raise ValueError(
-            f"Unsupported input type for features: {type(features).__name__}. Expected dict or pd.DataFrame."
-        )
+        raise ValueError(f"Unsupported input type for features: {type(features).__name__}. Expected dict or pd.DataFrame.")
 
-    # Enforce real numeric types and convert valid numbers stored in object-typed columns
-    for col in expected_features:
+    for col in expected:
         if pd.api.types.is_bool_dtype(df[col]) or (df[col].dtype == object and df[col].map(lambda v: isinstance(v, (bool, np.bool_))).any()):
-            raise ValueError(
-                f"Feature integrity violation: Boolean values not permitted in {model_type_normalized} input feature '{col}'."
-            )
+            raise ValueError(f"Feature integrity violation: Boolean values not permitted in {model_type_norm} input feature '{col}'.")
         if pd.api.types.is_complex_dtype(df[col]) or (df[col].dtype == object and df[col].map(lambda v: isinstance(v, (complex, np.complexfloating))).any()):
-            raise ValueError(
-                f"Feature integrity violation: Complex values not permitted in {model_type_normalized} input feature '{col}'."
-            )
+            raise ValueError(f"Feature integrity violation: Complex values not permitted in {model_type_norm} input feature '{col}'.")
         if not (pd.api.types.is_float_dtype(df[col]) or pd.api.types.is_integer_dtype(df[col])):
             try:
                 df[col] = pd.to_numeric(df[col], errors="raise")
             except (ValueError, TypeError):
-                raise ValueError(
-                    f"Feature integrity violation: Non-numeric values encountered in {model_type_normalized} input feature '{col}'."
-                )
+                raise ValueError(f"Feature integrity violation: Non-numeric values encountered in {model_type_norm} input feature '{col}'.")
             if not (pd.api.types.is_float_dtype(df[col]) or pd.api.types.is_integer_dtype(df[col])):
-                raise ValueError(
-                    f"Feature integrity violation: Non-numeric values encountered in {model_type_normalized} input feature '{col}'."
-                )
+                raise ValueError(f"Feature integrity violation: Non-numeric values encountered in {model_type_norm} input feature '{col}'.")
 
-    # Validate NaN values
     if df.isna().any().any():
-        nan_cols = [c for c in expected_features if df[c].isna().any()]
-        raise ValueError(
-            f"Feature integrity violation: NaNs encountered in {model_type_normalized} input features: {nan_cols}"
-        )
-
-    # Validate Infinite values across all required features
-    if np.isinf(df[expected_features]).any().any():
-        inf_cols = [c for c in expected_features if np.isinf(df[c]).any()]
-        raise ValueError(
-            f"Feature integrity violation: Infinite values encountered in {model_type_normalized} input features: {inf_cols}"
-        )
-
+        nan_cols = [c for c in expected if df[c].isna().any()]
+        raise ValueError(f"Feature integrity violation: NaNs encountered in {model_type_norm} input features: {nan_cols}")
+    if np.isinf(df[expected]).any().any():
+        inf_cols = [c for c in expected if np.isinf(df[c]).any()]
+        raise ValueError(f"Feature integrity violation: Infinite values encountered in {model_type_norm} input features: {inf_cols}")
     return df
 
 
-def predict_with_validation(
-    model: Any,
-    features: Union[pd.DataFrame, dict],
-    model_type: str = "regressor"
-) -> np.ndarray:
-    """
-    Validates feature contracts, executes model.predict() on strictly ordered columns,
-    and enforces finite (non-NaN, non-Inf) real numerical outputs.
-
-    Args:
-        model: Trained model artifact with a .predict() method.
-        features: Input feature mapping (dict) or DataFrame.
-        model_type: "regressor" or "classifier".
-
-    Returns:
-        np.ndarray: Finite model predictions.
-
-    Raises:
-        ValueError: If model lacks .predict, features fail schema/order/type/finite checks,
-                    or model prediction output contains NaNs or infinite values.
-    """
+def predict_with_validation(model: Any, features: Union[pd.DataFrame, dict], model_type: str = "regressor") -> np.ndarray:
     if model is None or not hasattr(model, "predict"):
         raise ValueError("Invalid model provided: must implement .predict().")
     validated_df = validate_inference_features(features, model_type=model_type)
-    raw_preds = model.predict(validated_df)
-    preds = np.asarray(raw_preds)
+    preds = np.asarray(model.predict(validated_df))
     if preds.size == 0:
         raise ValueError(f"Model inference integrity violation: {model_type} model returned empty predictions.")
     if np.isnan(preds).any() or np.isinf(preds).any():
-        raise ValueError(
-            f"Model inference integrity violation: Non-finite values (NaN or Inf) returned by {model_type} model."
-        )
+        raise ValueError(f"Model inference integrity violation: Non-finite values (NaN or Inf) returned by {model_type} model.")
     return preds
 
 
-def predict_proba_with_validation(
-    model: Any,
-    features: Union[pd.DataFrame, dict]
-) -> np.ndarray:
-    """
-    Validates classifier feature contracts, executes model.predict_proba(),
-    and verifies that probabilities are finite and within [0.0, 1.0].
-
-    Args:
-        model: Trained classifier artifact with a .predict_proba() method.
-        features: Input feature mapping (dict) or DataFrame.
-
-    Returns:
-        np.ndarray: Predicted class probabilities.
-
-    Raises:
-        ValueError: If classifier lacks .predict_proba, features fail validation,
-                    or output probabilities are non-finite or outside [0.0, 1.0].
-    """
+def predict_proba_with_validation(model: Any, features: Union[pd.DataFrame, dict]) -> np.ndarray:
     if model is None or not hasattr(model, "predict_proba"):
         raise ValueError("Invalid classifier provided: must implement .predict_proba().")
     validated_df = validate_inference_features(features, model_type="classifier")
-    raw_probs = model.predict_proba(validated_df)
-    probs = np.asarray(raw_probs)
+    probs = np.asarray(model.predict_proba(validated_df))
     if probs.size == 0:
         raise ValueError("Classifier predict_proba integrity violation: returned empty probabilities.")
     if np.isnan(probs).any() or np.isinf(probs).any():
-        raise ValueError(
-            "Classifier predict_proba integrity violation: Probabilities contain non-finite values (NaN or Inf)."
-        )
+        raise ValueError("Classifier predict_proba integrity violation: Probabilities contain non-finite values (NaN or Inf).")
     if (probs < 0.0).any() or (probs > 1.0).any():
-        raise ValueError(
-            "Classifier predict_proba integrity violation: Probabilities must fall strictly within [0.0, 1.0]."
-        )
+        raise ValueError("Classifier predict_proba integrity violation: Probabilities must fall strictly within [0.0, 1.0].")
     return probs
