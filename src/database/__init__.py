@@ -25,6 +25,20 @@ from .connection import (
     SessionLocal,
     has_tick_id_column,
 )
+from .queries import (
+    get_latest_market_ticks,
+    get_reconciliation_history,
+    get_reconciliation_kpis,
+    get_portfolio_history,
+    get_portfolio_kpis,
+    get_latest_council_audit,
+    ALLOWED_VERIFICATION_STATUSES,
+    record_prediction_investigation,
+    get_prediction_investigations,
+    get_prediction_investigation_details,
+    update_prediction_investigation_status,
+    get_training_approved_investigations,
+)
 
 __all__ = [
     "Base",
@@ -49,4 +63,16 @@ __all__ = [
     "engine",
     "SessionLocal",
     "has_tick_id_column",
+    "get_latest_market_ticks",
+    "get_reconciliation_history",
+    "get_reconciliation_kpis",
+    "get_portfolio_history",
+    "get_portfolio_kpis",
+    "get_latest_council_audit",
+    "ALLOWED_VERIFICATION_STATUSES",
+    "record_prediction_investigation",
+    "get_prediction_investigations",
+    "get_prediction_investigation_details",
+    "update_prediction_investigation_status",
+    "get_training_approved_investigations",
 ]
