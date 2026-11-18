@@ -176,12 +176,24 @@ def load_models():
         clf = load_verified_model(CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256)
         reg.set_params(device="cpu")
         clf.set_params(device="cpu")
-        return reg, clf
+
+        # Load Model 2 (Stationary) if available in registered models
+        m2_reg, m2_clf = None, None
+        try:
+            from src.model_loader import get_registered_models
+            reg_dict = get_registered_models()
+            if "xgb_v2.0.0" in reg_dict:
+                m2_reg = reg_dict["xgb_v2.0.0"]["regressor"]
+                m2_clf = reg_dict["xgb_v2.0.0"]["classifier"]
+        except Exception:
+            pass
+
+        return reg, clf, m2_reg, m2_clf
     except Exception:
-        return None, None
+        return None, None, None, None
 
 
-reg_model, clf_model = load_models()
+reg_model, clf_model, m2_reg_model, m2_clf_model = load_models()
 
 
 def format_signed_usd(val: Optional[float], decimals: int = 2) -> str:
@@ -236,6 +248,35 @@ def generate_live_forecast(live_df: pd.DataFrame, reg_model: Any, clf_model: Any
             "direction_badge": badge, "prob_up": prob_up, "prob_down": prob_down, "taker": taker,
             "spread_pct": spread, "candle_range_usd": candle_range, "hurdle_dollar_min": curr_price * (MIN_HURDLE_PCT / 100.0),
             "current_price": curr_price,
+        }
+    except Exception:
+        return None
+
+
+def generate_m2_forecast(live_df: pd.DataFrame, m2_reg: Any, m2_clf: Any) -> Optional[Dict[str, Any]]:
+    # generates live next-hour target and direction for Model 2 (Stationary)
+    if live_df is None or live_df.empty or m2_reg is None or len(live_df) < 35:
+        return None
+    try:
+        from src.model_loader import get_registered_models
+        from src.feature_engineering import extract_features_for_inference
+        reg_dict = get_registered_models()
+        if "xgb_v2.0.0" not in reg_dict:
+            return None
+        c_feats = reg_dict["xgb_v2.0.0"].get("features", [])
+        f_dict = extract_features_for_inference(live_df)
+        if not c_feats or not all(k in f_dict for k in c_feats):
+            return None
+        inp = pd.DataFrame([{k: f_dict[k] for k in c_feats}])
+        m2_ret = float(m2_reg.predict(inp)[0])
+        curr_price = float(live_df["close"].iloc[-1])
+        m2_move = curr_price * m2_ret
+        m2_dir = "UP" if m2_ret >= 0 else "DOWN"
+        return {
+            "pred_target": curr_price + m2_move,
+            "pred_dollar_move": m2_move,
+            "pred_ret_pct": m2_ret * 100.0,
+            "direction_label": m2_dir,
         }
     except Exception:
         return None
@@ -479,6 +520,8 @@ else:
 st.title("Mudra — Bitcoin 1-Hour AI Forecasting & Ground Truth Evaluation")
 st.caption("Dual XGBoost Inference • Multi-Agent LangGraph Reasoning • Live Neon PostgreSQL Ground-Truth Verification")
 
+m2_forecast_result = generate_m2_forecast(live_df=live_market_df, m2_reg=m2_reg_model, m2_clf=m2_clf_model)
+
 # Top Headline Metric Cards (5 Columns in 1 Row)
 c1, c2, c3, c4, c5 = st.columns(5)
 p_24h = float(live_market_df["close"].iloc[-24]) if len(live_market_df) >= 24 else None
@@ -491,29 +534,26 @@ with c1:
 
 with c2:
     if forecast_result:
-        st.metric("Next 1h AI Target", f"${forecast_result['pred_target']:,.2f}", f"{format_signed_usd(forecast_result['pred_dollar_move'])} ({forecast_result['pred_ret_pct']:+.2f}%)")
+        st.metric("Model 1 Target (Active)", f"${forecast_result['pred_target']:,.2f}", f"{forecast_result['direction_label']} ({forecast_result['pred_ret_pct']:+.2f}%)")
     else:
-        st.metric("Next 1h AI Target", "Computing...", "Awaiting Candle")
+        st.metric("Model 1 Target (Active)", "Computing...", "Awaiting Candle")
 
 with c3:
-    if forecast_result:
-        dir_lbl = forecast_result["direction_label"]
-        prob = forecast_result["prob_up"] if dir_lbl == "UP" else forecast_result["prob_down"]
-        st.metric("Predicted Direction", dir_lbl, f"{prob:.1f}% Confidence")
+    if m2_forecast_result:
+        st.metric("Model 2 Target (Shadow)", f"${m2_forecast_result['pred_target']:,.2f}", f"{m2_forecast_result['direction_label']} ({m2_forecast_result['pred_ret_pct']:+.2f}%)")
     else:
-        st.metric("Predicted Direction", "Computing...", "Awaiting Inference")
+        st.metric("Model 2 Target (Shadow)", "Standby", "Stationary Model")
 
 with c4:
-    st.metric("Model 1 Accuracy (Active)", "53.26%", "XGBoost v1 (39 Features)")
+    st.metric("Model 1 Accuracy", "53.26% Active", "XGBoost v1 (39 Features)")
 
 with c5:
-    st.metric("Model 2 Accuracy (Shadow)", "52.49%", "XGBoost v2 (Stationary)")
+    st.metric("Model 2 Accuracy", "52.49% Shadow", "XGBoost v2 (Stationary)")
 
 st.markdown("---")
 
 # Section 2: Previous Model Predictions vs. Real Market Outcomes (Ground Truth)
 st.subheader("Previous AI Model Predictions vs. Real Market Outcomes (Ground Truth)")
-st.caption("Delayed T+1h ground-truth verification: Compares what each AI model predicted against the real Bitcoin closing price 1 hour later.")
 
 rec_df = db_state.get("rec_df", pd.DataFrame())
 rec_kpis = db_state.get("rec_kpis", {})
@@ -531,10 +571,21 @@ if not rec_df.empty:
     with rk3:
         st.metric("Mean Dollar Error (MAE)", f"${float(mae):,.2f}", "Next-Hour Price Move")
 
+    mf1, mf2 = st.columns([3, 1])
+    with mf1:
+        st.caption("Delayed T+1h ground-truth verification: Compares what each AI model predicted against the real Bitcoin closing price 1 hour later.")
+    with mf2:
+        model_options = ["All Models", "Model 1 (39 Feat)", "Model 2 (Stationary)"]
+        selected_model = st.selectbox("Filter Table by Model:", model_options, index=0)
+
     # Format Display Table
     table_df = rec_df.copy()
     table_df["Time (UTC)"] = pd.to_datetime(table_df["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
     table_df["Model"] = table_df["model_version"].fillna("xgb_v1").apply(lambda m: "Model 1 (39 Feat)" if "v1" in str(m) else "Model 2 (Stationary)")
+
+    if selected_model != "All Models":
+        table_df = table_df[table_df["Model"] == selected_model]
+
     table_df["BTC Price at Prediction"] = table_df.get("close", table_df["predicted_price"]).apply(lambda x: f"${float(x or 0):,.2f}")
     table_df["AI Forecast Target"] = table_df["predicted_price"].apply(lambda x: f"${float(x or 0):,.2f}")
     table_df["Actual Next-Hour Close"] = table_df["actual_price_at_t_plus_1"].apply(lambda x: f"${float(x or 0):,.2f}")
