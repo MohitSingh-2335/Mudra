@@ -51,7 +51,7 @@ def get_live_btc_derivatives_pulse() -> Dict[str, Any]:
 def get_live_btc_spot_and_range() -> Dict[str, Any]:
     """Returns the latest confirmed 1h BTC/USDT spot candle and predicted price range."""
     from src.database.queries import get_latest_market_ticks
-    from src.engine.model_consensus import estimate_next_hour_price_range_usd
+    from src.engine.sync import estimate_next_hour_price_range_usd
     df = get_latest_market_ticks(limit=48)
     if df.empty:
         return {"status": "OFFLINE_FALLBACK", "current_price": 65000.0, "predicted_range_usd": 650.0}
