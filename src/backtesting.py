@@ -28,7 +28,7 @@ TAKER_FEE_RATE = CONFIG_TAKER_FEE_RATE
 SLIPPAGE_RATE = CONFIG_SLIPPAGE_RATE
 
 
-# Load holdout out-of-sample data for backtesting
+# Load holdout out-of-sample data for backtesting evaluation
 def load_backtest_data(data_path: Union[str, Path] = FEATURED_BTC_DATA_PATH, split_ratio: float = 0.8) -> pd.DataFrame:
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"Dataset not found at: {data_path}")
@@ -38,6 +38,7 @@ def load_backtest_data(data_path: Union[str, Path] = FEATURED_BTC_DATA_PATH, spl
     return df.iloc[int(len(df) * split_ratio):].reset_index(drop=True)
 
 
+# Load verified production models
 def load_production_models() -> Tuple[Any, Any]:
     return loader_load_production_models()
 
@@ -101,6 +102,7 @@ def run_backtest_simulation(
     return _simulate_from_signals(test_df, signals, taker_fee_rate=taker_fee_rate or TAKER_FEE_RATE, slippage_rate=slippage_rate or SLIPPAGE_RATE)
 
 
+# Legacy backtest wrapper with scaler support
 def run_backtest(test_df: pd.DataFrame, model: Any, scaler: Optional[Any] = None, threshold: float = 0.5, taker_fee_rate: Optional[float] = None, slippage_rate: Optional[float] = None, feature_cols: Optional[List[str]] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
     cols = feature_cols or [c for c in CLASSIFIER_FEATURES if c in test_df.columns]
     X = scaler.transform(test_df[cols]) if scaler else test_df[cols]
@@ -108,7 +110,7 @@ def run_backtest(test_df: pd.DataFrame, model: Any, scaler: Optional[Any] = None
     return _simulate_from_signals(test_df, signals, taker_fee_rate=taker_fee_rate or TAKER_FEE_RATE, slippage_rate=slippage_rate or SLIPPAGE_RATE)
 
 
-# Calculate standard quantitative metrics: Sharpe, Sortino, Calmar, MaxDD, Win Rate
+# Calculate key portfolio performance metrics: Sharpe, Sortino, Max Drawdown, Win Rate
 def calculate_quant_metrics(equity_curve_df: pd.DataFrame, trade_log_df: pd.DataFrame, test_df: pd.DataFrame) -> Dict[str, Any]:
     final_eq = equity_curve_df["equity"].iloc[-1]
     total_ret = ((final_eq / INITIAL_CAPITAL) - 1.0) * 100.0
