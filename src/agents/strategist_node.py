@@ -1,46 +1,29 @@
-# src/agents/strategist_node.py
-"""
-Node 1: Quantitative Strategist Agent for Mudra LangGraph System.
-
-Orchestrates multi-source telemetry gathering, model inference, and RAG retrieval:
-  1. Gathers live/cached market data (Binance / Coinbase / Local).
-  2. Computes microstructural technical signals (taker buy ratio, spreads).
-  3. Executes dual XGBoost inference (expected return % and directional probability).
-  4. Dispatches regime-conditioned semantic queries to ChromaDB vector store.
-  5. Synthesizes a structured trade thesis via LLM gateway (Gemini) or engages
-     the deterministic rule-engine circuit breaker on quota exhaustion/network faults.
-"""
-
-import os
 import json
-from typing import Dict, Any, Optional
+import os
 from datetime import datetime, timezone
+from typing import Any, Dict, Optional
 
 from config import (
     MIN_HURDLE_PCT,
-    TOTAL_FRICTION_PER_SIDE_PCT,
     ROUND_TRIP_FRICTION_PCT,
+    TOTAL_FRICTION_PER_SIDE_PCT,
 )
 from src.agents.graph_state import AgentState
+from src.agents.market_analyst_agent import _clean_json_response, _get_gemini_api_key, generate_with_gemini_fallback
 from src.agents.tools import (
-    get_live_market_data,
     calculate_technical_signals,
+    get_live_market_data,
     get_model_return_forecast,
-    query_macro_sentiment_rag
+    query_macro_sentiment_rag,
 )
-from src.agents.market_analyst_agent import _get_gemini_api_key, _clean_json_response, generate_with_gemini_fallback
 
 
+# Node 1: Quantitative Strategist Agent synthesizes trade thesis from models and RAG
 def strategist_node(state: AgentState) -> AgentState:
-    """
-    Node 1 Execution Function:
-    Orchestrates quantitative tools, generates numerical forecasts,
-    and constructs a comprehensive trade thesis.
-    """
     state["tools_called"] = state.get("tools_called", [])
     symbol = state.get("symbol", "BTCUSDT")
 
-    # 1. Gather Market Telemetry via Tool if missing
+    # 1. Market Telemetry
     if not state.get("market_data") or state.get("current_price", 0.0) <= 0.0:
         market_res = get_live_market_data.invoke({"symbol": symbol})
         state["market_data"] = market_res
@@ -49,140 +32,89 @@ def strategist_node(state: AgentState) -> AgentState:
     else:
         market_res = state["market_data"]
 
-    # 2. Gather Technical Signals via Tool if missing
+    # 2. Microstructure Signals
     if not state.get("engineered_features"):
         tech_input = {
-            "close": state["current_price"],
-            "high": float(market_res.get("high", state["current_price"] * 1.01)),
-            "low": float(market_res.get("low", state["current_price"] * 0.99)),
-            "volume": float(market_res.get("volume", 1500.0)),
+            "close": state["current_price"], "high": float(market_res.get("high", state["current_price"] * 1.01)),
+            "low": float(market_res.get("low", state["current_price"] * 0.99)), "volume": float(market_res.get("volume", 1500.0)),
         }
         if isinstance(market_res, dict) and market_res.get("taker_buy_ratio") is not None:
             tech_input["taker_buy_ratio"] = float(market_res["taker_buy_ratio"])
-        if isinstance(market_res, dict) and "candles" in market_res and market_res["candles"] is not None:
+        if isinstance(market_res, dict) and market_res.get("candles") is not None:
             tech_input["candles"] = market_res["candles"]
-
-        tech_res = calculate_technical_signals.invoke(tech_input)
-        state["engineered_features"] = tech_res
+        state["engineered_features"] = calculate_technical_signals.invoke(tech_input)
         state["tools_called"].append("calculate_technical_signals")
 
-    # 3. Gather ML Return Forecast via Tool if missing
+    # 3. Model Forecasts
     if not state.get("ml_forecast"):
-        forecast_input = {**state.get("engineered_features", {}), "close": state["current_price"]}
-        ml_res = get_model_return_forecast.invoke({"features": forecast_input})
-        state["ml_forecast"] = ml_res
+        state["ml_forecast"] = get_model_return_forecast.invoke({"features": {**state.get("engineered_features", {}), "close": state["current_price"]}})
         state["tools_called"].append("get_model_return_forecast")
 
-    # 4. Gather RAG Macro Context via Tool if missing (Regime-Conditioned Dispatch)
+    # 4. Regime-Conditioned RAG Context
     if not state.get("rag_context"):
         vol_spread = state.get("engineered_features", {}).get("volatility_range_pct", 1.0)
         taker_ratio = state.get("engineered_features", {}).get("taker_buy_ratio", 0.50)
         clears_hurdle = state.get("ml_forecast", {}).get("clears_hurdle", False)
 
         if vol_spread > 3.8:
-            rag_query = f"{symbol} extreme volatility liquidation flush cascade risk"
+            query = f"{symbol} extreme volatility liquidation flush cascade risk"
         elif clears_hurdle and taker_ratio >= 0.52:
-            rag_query = f"{symbol} bullish momentum spot ETF inflows institutional accumulation"
+            query = f"{symbol} bullish momentum spot ETF inflows institutional accumulation"
         elif taker_ratio < 0.48:
-            rag_query = f"{symbol} distribution selling pressure retail fear capitulation"
+            query = f"{symbol} distribution selling pressure retail fear capitulation"
         else:
-            rag_query = f"{symbol} sideways chop mean reversion range regime"
+            query = f"{symbol} sideways chop mean reversion range regime"
 
-        rag_res = query_macro_sentiment_rag.invoke({"query": rag_query})
-        state["rag_context"] = rag_res
+        state["rag_context"] = query_macro_sentiment_rag.invoke({"query": query})
         state["tools_called"].append("query_macro_sentiment_rag")
 
     if not state.get("timestamp"):
         state["timestamp"] = datetime.now(timezone.utc).isoformat()
 
-    # Extract key values for reasoning
     pred_return = state["ml_forecast"].get("expected_return_pct", 0.0)
     pred_move = state["ml_forecast"].get("predicted_dollar_move", 0.0)
     clears_hurdle = state["ml_forecast"].get("clears_hurdle", False)
     taker_ratio = state["market_data"].get("taker_buy_ratio", 0.50)
-
     direction = state["ml_forecast"].get("direction", "SIDEWAYS")
     direction_badge = state["ml_forecast"].get("direction_badge", "NEUTRAL")
     prob_up = state["ml_forecast"].get("direction_probability_up", 50.0)
 
-    # 5. Synthesize Thesis via Gemini API or Circuit Breaker
+    # 5. Gemini API Call with Circuit Breaker Fallback
     api_key = _get_gemini_api_key()
-
     if api_key:
         try:
-            prompt = f"""You are the Lead Quantitative Strategist at Mudra.
-Analyze the following telemetry and return strict JSON:
-- Symbol: {symbol}
-- Current Price: ${state['current_price']:,.2f}
-- XGBoost Return Forecast: {pred_return:+.4f}% (${pred_move:+,.2f})
-- Directional Prediction: {direction} ({direction_badge}) | Up Probability: {prob_up:.1f}%
-- Fee Hurdle Status: {'CLEARED (>=' + f'{MIN_HURDLE_PCT:.2f}%)' if clears_hurdle else 'SUB-HURDLE'}
-- Taker Buy Ratio: {taker_ratio:.4f}
-- Macro RAG & Error Memory Context: {state['rag_context'][:450]}
+            prompt = f"""You are the Lead Quantitative Strategist at Mudra. Return strict JSON:
+- Symbol: {symbol} | Price: ${state['current_price']:,.2f}
+- XGBoost Return: {pred_return:+.4f}% (${pred_move:+,.2f}) | Direction: {direction} ({direction_badge}) | Up Prob: {prob_up:.1f}%
+- Fee Hurdle: {'CLEARED' if clears_hurdle else 'SUB-HURDLE'} | Taker Ratio: {taker_ratio:.4f}
+- Context: {state['rag_context'][:450]}
+JSON Keys: trade_action (BUY/SELL/HOLD), conviction_score (1-10), executive_summary, strategist_thesis"""
 
-Respond ONLY with valid JSON with these keys:
-{{
-  "trade_action": "BUY" or "SELL" or "HOLD",
-  "conviction_score": integer 1 to 10,
-  "executive_summary": "2 sentence strategic summary in plain English with dollar amounts",
-  "strategist_thesis": "Full quantitative rationale"
-}}"""
-
-            raw_llm_text = generate_with_gemini_fallback(api_key, prompt)
-            clean_text = _clean_json_response(raw_llm_text)
-            parsed = json.loads(clean_text)
-
-            raw_action = str(parsed.get("trade_action", "HOLD")).strip().upper()
-            state["trade_action"] = raw_action if raw_action in ("BUY", "SELL", "HOLD") else "HOLD"
-
-            try:
-                raw_conv = int(parsed.get("conviction_score", 5))
-                state["conviction_score"] = max(1, min(10, raw_conv))
-            except (ValueError, TypeError):
-                state["conviction_score"] = 5
-
+            parsed = json.loads(_clean_json_response(generate_with_gemini_fallback(api_key, prompt)))
+            action = str(parsed.get("trade_action", "HOLD")).strip().upper()
+            state["trade_action"] = action if action in ("BUY", "SELL", "HOLD") else "HOLD"
+            state["conviction_score"] = max(1, min(10, int(parsed.get("conviction_score", 5))))
             state["executive_summary"] = str(parsed.get("executive_summary", ""))
             state["strategist_thesis"] = str(parsed.get("strategist_thesis", ""))
             state["circuit_breaker_active"] = False
             return state
         except Exception:
-            # Trip circuit breaker on any LLM gateway failure or quota exhaustion
             pass
 
-    # 6. Deterministic Heuristic Engine Fallback (Circuit Breaker)
+    # 6. Deterministic Rule-Engine Fallback
     state["circuit_breaker_active"] = True
-
     if clears_hurdle and (pred_return > 0 or direction == "UP") and taker_ratio >= 0.50:
-        action = "BUY"
-        conviction = min(9, int(5 + (pred_return * 20) + (taker_ratio - 0.5) * 10))
-        summary = (
-            f"Bullish quantitative setup: Expected return of {pred_return:+.4f}% clears the "
-            f"{MIN_HURDLE_PCT:.2f}% estimated round-trip hurdle ({direction_badge}, Up Prob: {prob_up:.1f}%) with favorable taker buying ({taker_ratio:.2%})."
-        )
+        action, conviction = "BUY", min(9, int(5 + (pred_return * 20) + (taker_ratio - 0.5) * 10))
+        summary = f"Bullish setup: Return {pred_return:+.4f}% clears {MIN_HURDLE_PCT:.2f}% estimated round-trip hurdle ({direction_badge}, Up: {prob_up:.1f}%) with taker buying {taker_ratio:.2%}."
     elif clears_hurdle and (pred_return < 0 or direction == "DOWN") and taker_ratio < 0.50:
-        action = "SELL"
-        conviction = min(9, int(5 + abs(pred_return * 20)))
-        summary = (
-            f"Bearish momentum: Expected return of {pred_return:+.4f}% clears {MIN_HURDLE_PCT:.2f}% "
-            f"estimated round-trip hurdle ({direction_badge}) with aggressive taker sell dominance ({taker_ratio:.2%})."
-        )
+        action, conviction = "SELL", min(9, int(5 + abs(pred_return * 20)))
+        summary = f"Bearish momentum: Return {pred_return:+.4f}% clears {MIN_HURDLE_PCT:.2f}% estimated round-trip hurdle ({direction_badge}) with taker selling {taker_ratio:.2%}."
     else:
-        action = "HOLD"
-        conviction = 4
-        summary = (
-            f"Chop / sub-hurdle regime: Expected move ({pred_return:+.4f}%) does not justify "
-            f"estimated {ROUND_TRIP_FRICTION_PCT:.2f}% round-trip exchange friction ({TOTAL_FRICTION_PER_SIDE_PCT:.2f}% per side). Capital preservation recommended."
-        )
+        action, conviction = "HOLD", 4
+        summary = f"Chop / sub-hurdle: Expected move ({pred_return:+.4f}%) does not justify {ROUND_TRIP_FRICTION_PCT:.2f}% friction ({TOTAL_FRICTION_PER_SIDE_PCT:.2f}% per side). Cash preserved."
 
     state["trade_action"] = action
     state["conviction_score"] = conviction
     state["executive_summary"] = summary
-    state["strategist_thesis"] = (
-        f"Quantitative Strategist Rule-Engine Signal: {action} (Conviction: {conviction}/10). "
-        f"XGBoost forecasts 1-hour price delta of ${pred_move:+,.2f} ({pred_return:+.4f}%). "
-        f"Taker buy ratio sits at {taker_ratio:.4f}. "
-        f"Fee-hurdle clearance: {clears_hurdle}."
-    )
-
+    state["strategist_thesis"] = f"Strategist Rule Signal: {action} ({conviction}/10). XGBoost forecasts ${pred_move:+,.2f} ({pred_return:+.4f}%). Taker ratio: {taker_ratio:.4f}. Fee-hurdle: {clears_hurdle}."
     return state
-
