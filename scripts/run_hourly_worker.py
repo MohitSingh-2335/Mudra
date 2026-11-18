@@ -1,4 +1,3 @@
-# scripts/run_hourly_worker.py
 import sys
 import json
 from datetime import datetime, timezone
@@ -20,6 +19,7 @@ __all__ = ["run_worker", "flush_outbox", "log_telemetry", "fetch_latest_candle"]
 
 
 def log_telemetry(session, service: str, endpoint: str, latency_ms: float, status_code: int, error_msg: Optional[str] = None) -> None:
+    # logs external api call latency and status code
     try:
         session.add(ApiTelemetry(
             timestamp=datetime.now(timezone.utc), service_name=service, endpoint=endpoint,
@@ -31,6 +31,7 @@ def log_telemetry(session, service: str, endpoint: str, latency_ms: float, statu
 
 
 def flush_outbox(session: Optional[Any] = None) -> int:
+    # flushes cached ticks from local outbox file to database
     if not OUTBOX_FILE.exists():
         return 0
     try:
@@ -79,27 +80,17 @@ def flush_outbox(session: Optional[Any] = None) -> int:
 
 
 def run_worker(force: bool = False) -> bool:
-    ok, ver, _ = db_conn.test_connection()
+    # performs connection check, outbox flush, and quantitative sync cycle
+    ok, _, _ = db_conn.test_connection()
     if not ok:
         return False
     try:
         db_conn.verify_db_schema()
-    except Exception:
-        return False
-
-    try:
         flush_outbox()
-    except Exception:
-        pass
-
-    try:
         synced, msg, summary = sync_hourly_quant_cycle(force=force)
+        return bool(synced or "already recorded" in msg or (isinstance(summary, dict) and "tick_id" in summary))
     except Exception:
         return False
-
-    if synced or "already recorded" in msg or (isinstance(summary, dict) and "tick_id" in summary):
-        return True
-    return False
 
 
 if __name__ == "__main__":
