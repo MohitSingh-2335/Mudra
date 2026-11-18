@@ -34,6 +34,7 @@ from config import (
 from src.agents import fetch_historical_candles, run_trading_graph
 from src.database import (
     get_db, get_latest_council_audit, get_latest_market_ticks,
+    get_portfolio_history, get_portfolio_kpis,
     get_reconciliation_history, get_reconciliation_kpis,
     test_connection,
 )
@@ -92,6 +93,29 @@ def create_tradingview_candlestick(df: pd.DataFrame) -> go.Figure:
     fig.update_yaxes(title_text="Price (USD)", row=1, col=1, gridcolor="#222733")
     fig.update_yaxes(title_text="Volume (BTC)", row=2, col=1, gridcolor="#222733")
     fig.update_xaxes(title_text="Time (UTC)", row=2, col=1, gridcolor="#222733")
+    return fig
+
+
+def create_alpha_equity_curve(df: pd.DataFrame) -> go.Figure:
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty or "total_equity_usd" not in df.columns:
+        fig = go.Figure()
+        fig.update_layout(title="No Portfolio Data Available", template="plotly_dark")
+        return fig
+
+    df_plot = df.copy()
+    if "timestamp" in df_plot.columns:
+        df_plot = df_plot.sort_values("timestamp")
+    x_axis = df_plot["timestamp"] if "timestamp" in df_plot.columns else df_plot.index
+    fig = go.Figure()
+    fig.add_hline(y=float(INITIAL_CAPITAL_USD), line_dash="dot", line_color="#888888", annotation_text=f"Initial Capital (${INITIAL_CAPITAL_USD:,.2f})", annotation_position="bottom right")
+
+    if "benchmark_btc_equity" in df_plot.columns:
+        fig.add_trace(go.Scatter(x=x_axis, y=df_plot["benchmark_btc_equity"], mode="lines", name="Bitcoin Buy & Hold Benchmark ($)", line=dict(color="#F7931A", width=1.5, dash="dash")))
+    fig.add_trace(go.Scatter(x=x_axis, y=df_plot["total_equity_usd"], mode="lines+markers", name="AI Strategy Equity ($)", line=dict(color="#00F2FE", width=2.5), marker=dict(size=4, color="#00C087")))
+
+    fig.update_layout(**_base_chart_layout("Paper Trading Portfolio Equity vs. $10,000 Baseline", height=380), hovermode="x unified")
+    fig.update_yaxes(title_text="Portfolio Equity (USD)", gridcolor="#222733")
+    fig.update_xaxes(title_text="Time (UTC)", gridcolor="#222733")
     return fig
 
 
@@ -315,7 +339,11 @@ def fetch_live_market_candles(symbol: str = "BTCUSDT") -> pd.DataFrame:
 
 @st.cache_data(ttl=60)
 def fetch_cloud_database_state(current_price: Optional[float]):
-    fallback = {"db_ok": False, "db_ver": "Offline", "db_lat": 0.0, "db_error": "Database unavailable", "ticks_df": pd.DataFrame(), "rec_df": pd.DataFrame(), "rec_kpis": {}, "latest_audit": None}
+    fallback = {
+        "db_ok": False, "db_ver": "Offline", "db_lat": 0.0, "db_error": "Database unavailable",
+        "ticks_df": pd.DataFrame(), "rec_df": pd.DataFrame(), "rec_kpis": {}, "latest_audit": None,
+        "port_df": pd.DataFrame(), "port_kpis": {},
+    }
     try:
         db_ok, db_ver, db_lat = test_connection()
         if not db_ok:
@@ -326,6 +354,8 @@ def fetch_cloud_database_state(current_price: Optional[float]):
             "rec_df": get_reconciliation_history(limit=500),
             "rec_kpis": get_reconciliation_kpis(lookback_hours=168),
             "latest_audit": get_latest_council_audit(),
+            "port_df": get_portfolio_history(limit=500),
+            "port_kpis": get_portfolio_kpis(current_price=current_price or 90000.0),
         }
     except Exception as exc:
         fallback["db_error"] = str(exc)
@@ -443,11 +473,59 @@ if current_price is not None and forecast_result is not None:
 
 st.markdown("---")
 
-# Section 3: Visual Price vs. Forecast Chart
+# Section 3: Paper Trading Account & Live Model PnL ($10,000 Base)
+st.subheader("💰 Paper Trading Account & Live Model PnL ($10,000 Base)")
+st.caption(
+    "Simulated execution accounting: Higher-confidence AI model (Active 53.26% vs. Shadow 52.49%) drives BUY/SELL/HOLD decisions. "
+    "Deducts real exchange fees (0.14% round-trip friction) and tracks net portfolio earnings over time."
+)
+
+port_df = db_state.get("port_df", pd.DataFrame())
+port_kpis = db_state.get("port_kpis", {})
+
+total_equity = float(port_kpis.get("total_equity_usd") or 10000.0)
+realized_pnl = float(port_kpis.get("realized_pnl_usd") or 0.0)
+cash_balance = float(port_kpis.get("cash_balance") or 10000.0)
+btc_balance = float(port_kpis.get("btc_balance") or 0.0)
+pnl_diff = total_equity - INITIAL_CAPITAL_USD
+pnl_pct = (pnl_diff / INITIAL_CAPITAL_USD) * 100.0
+
+p1, p2, p3, p4 = st.columns(4)
+with p1:
+    st.metric("Total Account Equity", f"${total_equity:,.2f}", f"{format_signed_usd(pnl_diff)} ({pnl_pct:+.2f}%)")
+with p2:
+    st.metric("Net Realized PnL", f"{format_signed_usd(realized_pnl)}", f"After {ROUND_TRIP_FRICTION_PCT:.2f}% Fee Friction")
+with p3:
+    st.metric("Available Cash", f"${cash_balance:,.2f}", "USDT Liquid Reserve")
+with p4:
+    btc_val = btc_balance * (current_price or 0.0)
+    st.metric("Bitcoin Held", f"{btc_balance:.4f} BTC", f"${btc_val:,.2f} Value")
+
+if not port_df.empty:
+    st.plotly_chart(create_alpha_equity_curve(port_df), use_container_width=True)
+
+    st.markdown("**Recent Paper Trading Order Log & Strategy Rationale:**")
+    t_disp = port_df.iloc[::-1].copy().head(15)
+    t_disp["Time (UTC)"] = pd.to_datetime(t_disp["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
+    t_disp["Order Action"] = t_disp["action"].apply(lambda a: f"[{str(a).upper().strip()}]")
+    t_disp["Execution Price"] = t_disp.apply(lambda r: f"${float(r.get('execution_price', 0.0)):,.2f}" if str(r.get("action")).upper() in ["BUY", "SELL"] and float(r.get("execution_price", 0.0)) > 0 else "-", axis=1)
+    t_disp["Trade Size"] = t_disp.apply(lambda r: f"{float(r.get('btc_amount', 0.0)):+.4f} BTC" if str(r.get("action")).upper() in ["BUY", "SELL"] else "-", axis=1)
+    t_disp["Fee Deducted ($)"] = t_disp.apply(lambda r: f"${float(r.get('fee_deducted_usd', 0.0)) + float(r.get('slippage_usd', 0.0)):,.2f}", axis=1)
+    t_disp["Portfolio Equity ($)"] = t_disp["total_equity_usd"].apply(lambda eq: f"${float(eq or 10000.0):,.2f}")
+    t_disp["Strategy Rationale"] = t_disp.apply(format_portfolio_rationale, axis=1)
+
+    show_port_cols = ["Time (UTC)", "Order Action", "Execution Price", "Trade Size", "Fee Deducted ($)", "Portfolio Equity ($)", "Strategy Rationale"]
+    st.dataframe(t_disp[show_port_cols], use_container_width=True, hide_index=True)
+else:
+    st.info("Portfolio initialized with $10,000.00 USDT virtual bankroll.")
+
+st.markdown("---")
+
+# Section 4: Visual Price vs. Forecast Chart
 st.subheader("📊 Bitcoin Price Action & Technical Volatility")
 st.plotly_chart(create_tradingview_candlestick(live_market_df), use_container_width=True)
 
-# Section 4: Live Neon PostgreSQL Reconciliation Table (Delayed Ground Truth)
+# Section 5: Live Neon PostgreSQL Reconciliation Table (Delayed Ground Truth)
 st.markdown("---")
 st.subheader("📜 Live Ground-Truth Evaluation Log (Queried Directly from Neon PostgreSQL)")
 st.caption("Delayed T+1h reconciliation compares each prediction against actual market closing prices 1 hour later.")
