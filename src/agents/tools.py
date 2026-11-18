@@ -1,4 +1,3 @@
-# src/agents/tools.py
 import os
 import requests
 import pandas as pd
@@ -20,7 +19,7 @@ from src.feature_engineering import (
 
 
 def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LIMIT) -> pd.DataFrame:
-    # 1. Binance Dedicated Vision
+    # 1. Binance primary feed
     try:
         url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&limit={limit + 2}"
         resp = requests.get(url, timeout=5)
@@ -34,13 +33,11 @@ def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LI
                     "volume": float(c[5]), "number_of_trades": int(c[8]),
                     "taker_buy_ratio": round(float(c[9]) / float(c[5]), 4) if float(c[5]) > 0 else 0.50,
                 } for c in closed[-limit:]]
-                df_out = pd.DataFrame(records)
-                df_out.attrs["source"] = "binance"
-                return df_out
+                return pd.DataFrame(records)
     except Exception:
         pass
 
-    # 2. Coinbase Fallback
+    # 2. Coinbase fallback feed
     try:
         cb_symbol = "BTC-USD" if "BTC" in symbol else symbol
         resp = requests.get(f"https://api.exchange.coinbase.com/products/{cb_symbol}/candles?granularity=3600", headers={"User-Agent": "Mudra-Quant/1.0"}, timeout=5)
@@ -53,32 +50,25 @@ def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LI
                     "low": float(c[1]), "high": float(c[2]), "open": float(c[3]), "close": float(c[4]),
                     "volume": float(c[5]), "number_of_trades": None, "taker_buy_ratio": 0.50,
                 } for c in reversed(closed[:limit])]
-                df_out = pd.DataFrame(records)
-                df_out.attrs["source"] = "coinbase"
-                return df_out
+                return pd.DataFrame(records)
     except Exception:
         pass
 
-    # 3. Local Dataset Fallback
-    try:
-        path = FEATURED_BTC_DATA_PATH if os.path.exists(FEATURED_BTC_DATA_PATH) else BTCUSDT_1H_CSV
-        if os.path.exists(path):
-            from src.data_preprocessing import load_and_clean_data
-            df_local = pd.read_csv(path) if path == FEATURED_BTC_DATA_PATH else load_and_clean_data(path)
-            if len(df_local) >= 35:
-                df_local["timestamp"] = pd.to_datetime(df_local["timestamp"], utc=True)
-                df_out = df_local.tail(limit).reset_index(drop=True)
-                df_out.attrs["source"] = "local_fallback"
-                return df_out
-    except Exception:
-        pass
+    # 3. Local offline dataset fallback
+    path = FEATURED_BTC_DATA_PATH if os.path.exists(FEATURED_BTC_DATA_PATH) else BTCUSDT_1H_CSV
+    if os.path.exists(path):
+        from src.data_preprocessing import load_and_clean_data
+        df_local = pd.read_csv(path) if path == FEATURED_BTC_DATA_PATH else load_and_clean_data(path)
+        if len(df_local) >= 35:
+            df_local["timestamp"] = pd.to_datetime(df_local["timestamp"], utc=True)
+            return df_local.tail(limit).reset_index(drop=True)
 
     raise ValueError(f"Unable to fetch historical candlesticks for {symbol} from any market source.")
 
 
 @tool
 def get_live_market_data(symbol: str = "BTCUSDT") -> Dict[str, Any]:
-    """Fetches the latest live market candlestick and order-flow telemetry."""
+    """Fetches latest confirmed candlestick and order-flow telemetry."""
     df_candles = fetch_historical_candles(symbol=symbol, limit=LIVE_FETCH_LIMIT)
     latest = df_candles.iloc[-1]
     raw_trades = latest.get("number_of_trades")
@@ -99,37 +89,32 @@ def calculate_technical_signals(
     timestamp: Optional[Union[str, datetime]] = None, candles: Optional[Union[pd.DataFrame, List[Dict[str, Any]]]] = None,
     symbol: str = "BTCUSDT"
 ) -> Dict[str, Any]:
-    """Computes technical and microstructural indicators with strict training parity."""
-    if candles is not None:
-        candles_df = pd.DataFrame(candles) if isinstance(candles, list) else candles.copy()
-    else:
-        candles_df = fetch_historical_candles(symbol=symbol, limit=LIVE_FETCH_LIMIT)
-
+    """Computes technical indicators with strict training parity."""
+    candles_df = pd.DataFrame(candles) if isinstance(candles, list) else (candles.copy() if candles is not None else fetch_historical_candles(symbol=symbol, limit=LIVE_FETCH_LIMIT))
     if not candles_df.empty:
         idx = candles_df.index[-1]
-        if close is not None and close > 0:
+        if close and close > 0:
             candles_df.at[idx, "close"] = float(close)
-        if high is not None and high > 0:
+        if high and high > 0:
             candles_df.at[idx, "high"] = float(high)
-        if low is not None and low > 0:
+        if low and low > 0:
             candles_df.at[idx, "low"] = float(low)
         if volume is not None and volume >= 0:
             candles_df.at[idx, "volume"] = float(volume)
-        if open_price is not None and open_price > 0:
+        if open_price and open_price > 0:
             candles_df.at[idx, "open"] = float(open_price)
         if taker_buy_ratio is not None:
             candles_df.at[idx, "taker_buy_ratio"] = float(taker_buy_ratio)
         elif "taker_buy_ratio" not in candles_df.columns:
             candles_df["taker_buy_ratio"] = 0.50
-        if timestamp is not None:
+        if timestamp:
             candles_df.at[idx, "timestamp"] = pd.to_datetime(timestamp)
-
     return extract_features_for_inference(candles_df)
 
 
 @tool
 def get_model_return_forecast(features: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Runs dual inference using the Optuna-tuned XGBoost Regressor and Classifier."""
+    """Runs dual inference using verified XGBoost regressor and classifier."""
     if not features or not isinstance(features, dict):
         raise ValueError("Invalid features dictionary passed to get_model_return_forecast.")
 
@@ -160,19 +145,16 @@ def get_model_return_forecast(features: Optional[Dict[str, Any]] = None) -> Dict
 
     expected_return_pct = raw_pred_return * 100.0
     pred_dollar_move = close * raw_pred_return
-    target_price = close + pred_dollar_move
     clears_hurdle = abs(expected_return_pct) >= MIN_HURDLE_PCT
-    direction = "UP" if move_code == 1 else "DOWN"
-    direction_badge = "SIDEWAYS / CHOP" if not clears_hurdle else ("BULLISH" if move_code == 1 else "BEARISH")
 
     return {
         "expected_return_pct": round(expected_return_pct, 4),
         "predicted_dollar_move": round(pred_dollar_move, 2),
-        "predicted_target_price": round(target_price, 2),
+        "predicted_target_price": round(close + pred_dollar_move, 2),
         "clears_hurdle": clears_hurdle,
         "hurdle_threshold_pct": round(MIN_HURDLE_PCT, 4),
-        "direction": direction,
-        "direction_badge": direction_badge,
+        "direction": "UP" if move_code == 1 else "DOWN",
+        "direction_badge": "SIDEWAYS / CHOP" if not clears_hurdle else ("BULLISH" if move_code == 1 else "BEARISH"),
         "direction_probability_up": round(prob_up * 100.0, 2),
         "direction_probability_down": round(prob_down * 100.0, 2),
         "confidence": round(max(prob_up, prob_down), 4),
@@ -183,7 +165,7 @@ def get_model_return_forecast(features: Optional[Dict[str, Any]] = None) -> Dict
 
 @tool
 def query_macro_sentiment_rag(query: str = "Bitcoin macroeconomic market sentiment and regime") -> str:
-    """Queries the ChromaDB vector database to retrieve foundational market regime knowledge."""
+    """Queries ChromaDB vector store for market regime and error memory."""
     try:
         from src.agents.rag_agent import get_rag_agent, query_similar_error_memories
         rag = get_rag_agent()
