@@ -8,9 +8,8 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-import src.database.connection as db_conn
-from src.database.connection import get_db
-from src.database.models import MarketTick, ApiTelemetry
+import src.database as db_conn
+from src.database import ApiTelemetry, MarketTick, get_db
 from src.engine import sync_hourly_quant_cycle, fetch_latest_confirmed_candle
 
 OUTBOX_FILE = ROOT_DIR / "data" / "sync_outbox.json"
