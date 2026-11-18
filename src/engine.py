@@ -815,15 +815,47 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
         reconciled_records.append(rec)
 
         try:
-            for u in session.execute(select(ModelPrediction).where(ModelPrediction.tick_id == prior.id, ModelPrediction.outcome_tick_id.is_(None))).scalars().all():
-                u.outcome_tick_id, u.evaluation_policy_version = outcome.id, "binary_exact_t1_v2"
-                u.actual_price_at_t_plus_1, u.actual_return_pct = act_p, act_ret
-                u.direction_realized, u.direction_correct = dir_real, (u.direction_predicted == dir_real)
-                u.residual_error, u.absolute_error_usd = act_ret - float(u.predicted_return_pct), abs_err
-                u.percentage_error, u.is_black_swan = pct_err, is_swan
-                u.error_attribution_tag, u.reconciled_at = tag, datetime.now(timezone.utc)
-        except Exception:
-            pass
+            with session.begin_nested():
+                for u in session.execute(select(ModelPrediction).where(ModelPrediction.tick_id == prior.id, ModelPrediction.outcome_tick_id.is_(None))).scalars().all():
+                    u_pred_price = float(u.predicted_price_1h)
+                    u_pred_ret = float(u.predicted_return_pct)
+                    u_abs_err = abs(act_p - u_pred_price)
+                    u_pct_err = (u_abs_err / act_p) * 100.0
+                    u_residual = act_ret - u_pred_ret
+                    u_dir_real = "UP" if act_ret >= 0.0 else "DOWN"
+                    u_dir_correct = (u.direction_predicted == u_dir_real)
+                    u_is_swan = bool(abs(act_ret) >= 3.8 or abs(u_residual) >= 3.8)
+
+                    if u_is_swan:
+                        u_tag = "BLACK_SWAN_OUTLIER"
+                    elif u_dir_correct:
+                        if u_pct_err <= 0.35:
+                            u_tag = "ACCURATE"
+                        elif abs(act_ret) > abs(u_pred_ret):
+                            u_tag = "MOMENTUM_UNDERESTIMATED"
+                        else:
+                            u_tag = "MOMENTUM_OVERESTIMATED"
+                    else:
+                        if u_pct_err <= 0.20 or u_abs_err < 150.0:
+                            u_tag = "SIDEWAYS_DRIFT"
+                        else:
+                            u_tag = "DIRECTION_MISALIGNED"
+
+                    u.outcome_tick_id = outcome.id
+                    u.evaluation_policy_version = "binary_exact_t1_v2"
+                    u.actual_price_at_t_plus_1 = act_p
+                    u.actual_return_pct = act_ret
+                    u.direction_realized = u_dir_real
+                    u.direction_correct = u_dir_correct
+                    u.residual_error = u_residual
+                    u.absolute_error_usd = u_abs_err
+                    u.percentage_error = u_pct_err
+                    u.is_black_swan = u_is_swan
+                    u.error_attribution_tag = u_tag
+                    u.reconciled_at = datetime.now(timezone.utc)
+                session.flush()
+        except Exception as exc:
+            logger.warning("Could not update model_predictions for tick %s: %s", prior.id, exc)
 
         audit = session.execute(select(CouncilAudit).where(CouncilAudit.tick_id == prior.id).order_by(CouncilAudit.id.desc())).scalars().first()
         if audit:
