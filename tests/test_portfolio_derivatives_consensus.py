@@ -89,7 +89,7 @@ def test_plain_english_reconciliation_story_and_mcp_fallback(monkeypatch):
 def test_gemini_model_fallback_and_mcp_trade_plan(monkeypatch):
     import sys
     import types
-    from src.agents.market_analyst_agent import generate_with_gemini_fallback, get_gemini_status
+    from src.agents.council import generate_with_gemini_fallback, get_gemini_status
     from src.mcp.mudra_mcp_server import get_spot_and_futures_trade_plan
 
     called_models = []
