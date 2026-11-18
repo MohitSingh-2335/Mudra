@@ -29,7 +29,8 @@ from sqlalchemy.orm import DeclarativeBase, Session, attributes, defer, relation
 from config import ACTIVE_MODEL_VERSION, FEATURE_SCHEMA_VERSION
 
 logger = logging.getLogger("mudra.database")
-SECRETS_FILE = Path(".streamlit/secrets.toml")
+ROOT_DIR = Path(__file__).resolve().parent.parent
+SECRETS_FILE = ROOT_DIR / ".streamlit" / "secrets.toml"
 
 # ---------------------------------------------------------------------------
 # 1. ORM DATA MODELS
@@ -525,7 +526,7 @@ def get_database_url() -> str:
                 return _normalize_db_url(data["neondb"]["DATABASE_URL"])
         except Exception:
             pass
-    fallback = Path("data/mudra_operational.db")
+    fallback = ROOT_DIR / "data" / "mudra_operational.db"
     fallback.parent.mkdir(parents=True, exist_ok=True)
     return f"sqlite:///{fallback.as_posix()}"
 
