@@ -53,6 +53,7 @@ from src.database.connection import get_db, has_tick_id_column, test_connection
 from src.database.models import CouncilAudit, MarketTick, PaperPortfolio, Reconciliation
 
 logger = logging.getLogger("mudra.engine")
+sync_logger = logging.getLogger("mudra.sync")
 
 BINANCE_MIN_ROW_LEN: int = 10
 COINBASE_MIN_ROW_LEN: int = 6
@@ -329,6 +330,7 @@ def _validate_historical_candle_dict(raw_c: Any) -> Optional[Dict[str, Any]]:
 
 
 def backfill_missing_candles(session, candle: Dict[str, Any]) -> int:
+    # inserts missing confirmed candles preceding the current sync tick
     if not isinstance(candle, dict) or "timestamp" not in candle:
         return 0
     raw_history = candle.get("candles")
@@ -348,218 +350,304 @@ def backfill_missing_candles(session, candle: Dict[str, Any]) -> int:
     if prior is None:
         return 0
 
+    prior_ts = _normalize_utc_timestamp(prior.timestamp)
+    gap_hours = (latest_ts - prior_ts).total_seconds() / 3600.0
+    if gap_hours > BACKFILL_LARGE_GAP_WARNING_HOURS:
+        sync_logger.warning("Detected large candle gap of %.1f hours (%s -> %s).", gap_hours, prior_ts, latest_ts)
+    existing_rows = session.execute(select(MarketTick.timestamp).where(MarketTick.timestamp < latest_ts)).scalars().all()
+    existing_ts = {_normalize_utc_timestamp(r) for r in existing_rows if r is not None}
+    anchor_ts = min(existing_ts | {prior_ts})
+
     inserted = 0
-    for cand in sorted_candidates:
-        cand_ts = cand["timestamp"]
-        if cand_ts <= prior.timestamp or cand_ts >= latest_ts:
+    for c_data in sorted_candidates:
+        c_ts = c_data["timestamp"]
+        if c_ts <= anchor_ts or c_ts in existing_ts:
             continue
-        exists = session.execute(select(MarketTick.id).where(MarketTick.timestamp == cand_ts).limit(1)).scalar()
-        if exists is not None:
-            continue
+        tick = MarketTick(
+            timestamp=c_ts, open=c_data["open"], high=c_data["high"], low=c_data["low"],
+            close=c_data["close"], volume=c_data["volume"], model_version=ACTIVE_MODEL_VERSION,
+            feature_schema_version=FEATURE_SCHEMA_VERSION,
+        )
         try:
             with session.begin_nested():
-                tick = MarketTick(
-                    timestamp=cand_ts, symbol=candle.get("symbol", "BTCUSDT"),
-                    open=cand["open"], high=cand["high"], low=cand["low"], close=cand["close"], volume=cand["volume"],
-                    number_of_trades=cand.get("number_of_trades"),
-                    taker_buy_ratio=cand.get("taker_buy_ratio", 0.50),
-                    model_version=candle.get("model_version", ACTIVE_MODEL_VERSION),
-                    feature_version=candle.get("feature_version", FEATURE_SCHEMA_VERSION),
-                )
                 session.add(tick)
                 session.flush()
                 inserted += 1
+                existing_ts.add(c_ts)
         except IntegrityError:
             pass
     return inserted
 
 
-def _parse_retry_after_header(header_value: Optional[str]) -> Optional[float]:
-    if not header_value or not isinstance(header_value, str):
+def _parse_trade_count(raw_trades: Any) -> Optional[int]:
+    # validates non-negative integer trade counts
+    if raw_trades is None:
         return None
-    header_clean = header_value.strip()
+    if isinstance(raw_trades, bool):
+        raise ValueError("Boolean value not permitted for trade count")
+    if isinstance(raw_trades, int):
+        if raw_trades < 0:
+            raise ValueError(f"Negative trade count: {raw_trades}")
+        return raw_trades
+    if isinstance(raw_trades, float):
+        if not math.isfinite(raw_trades) or raw_trades < 0.0 or not raw_trades.is_integer():
+            raise ValueError(f"Invalid float trade count: {raw_trades}")
+        return int(raw_trades)
+    if isinstance(raw_trades, str):
+        s = raw_trades.strip()
+        if not s or s.startswith("-"):
+            raise ValueError(f"Invalid trade count: {raw_trades!r}")
+        try:
+            dec = Decimal(s)
+            if not dec.is_finite() or dec < 0 or dec != int(dec):
+                raise ValueError
+            return int(dec)
+        except Exception as exc:
+            raise ValueError(f"Invalid trade count: {raw_trades!r}") from exc
+    raise ValueError(f"Unsupported trade count type: {type(raw_trades).__name__}")
+
+
+def parse_retry_after(retry_after_header: Optional[str], now_dt_fn: Optional[Callable[[], datetime]] = None) -> Optional[float]:
+    # parses HTTP Retry-After header into delay seconds
+    if not retry_after_header or not isinstance(retry_after_header, str) or not retry_after_header.strip():
+        return None
+    val = retry_after_header.strip()
     try:
-        seconds = float(header_clean)
-        return min(seconds, EXCHANGE_MAX_RETRY_AFTER_CAP) if seconds >= 0.0 else None
+        sec = float(val)
+        return sec if (math.isfinite(sec) and sec >= 0.0) else None
     except ValueError:
         pass
     try:
-        dt = parsedate_to_datetime(header_clean)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        diff = (dt - datetime.now(timezone.utc)).total_seconds()
-        return min(max(0.0, diff), EXCHANGE_MAX_RETRY_AFTER_CAP)
+        p_dt = parsedate_to_datetime(val)
+        if p_dt is not None:
+            now_dt = now_dt_fn() if now_dt_fn else datetime.now(timezone.utc)
+            delta = ((p_dt.replace(tzinfo=timezone.utc) if p_dt.tzinfo is None else p_dt) - now_dt).total_seconds()
+            return max(0.0, delta) if math.isfinite(delta) else None
     except Exception:
-        return None
-
-
-def _compute_exponential_backoff_seconds(attempt: int, base: float = EXCHANGE_RETRY_BASE_BACKOFF, factor: float = EXCHANGE_RETRY_BACKOFF_FACTOR, max_backoff: float = EXCHANGE_RETRY_MAX_BACKOFF) -> float:
-    attempt_bounded = max(0, min(int(attempt), 10))
-    backoff = min(base * (factor ** attempt_bounded), max_backoff)
-    return backoff * (1.0 + random.uniform(-0.15, 0.15))
-
-
-def _fetch_feed_with_retry(fetch_fn: Callable[[], Optional[Dict[str, Any]]], feed_name: str, max_attempts: int = EXCHANGE_RETRY_MAX_ATTEMPTS, sleeper: Callable[[float], None] = time.sleep, time_provider: Callable[[], float] = time.monotonic) -> Optional[Dict[str, Any]]:
-    deadline = time_provider() + EXCHANGE_RETRY_TOTAL_DEADLINE
-    for attempt in range(max_attempts):
-        now = time_provider()
-        if now >= deadline:
-            return None
-        try:
-            result = fetch_fn()
-            if result is not None:
-                return result
-        except requests.HTTPError as exc:
-            status_code = getattr(exc.response, "status_code", None)
-            if status_code in (429, 500, 502, 503, 504):
-                pass
-            else:
-                return None
-        except (requests.ConnectionError, requests.Timeout):
-            pass
-        except Exception:
-            return None
-
-        if attempt < max_attempts - 1:
-            backoff_sec = _compute_exponential_backoff_seconds(attempt)
-            if time_provider() + backoff_sec >= deadline:
-                return None
-            sleeper(backoff_sec)
+        pass
     return None
 
 
-def fetch_latest_confirmed_candle(symbol: str = "BTCUSDT") -> Dict[str, Any]:
-    def _fetch_binance() -> Optional[Dict[str, Any]]:
-        url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&limit=36"
-        resp = requests.get(url, timeout=(EXCHANGE_CONNECT_TIMEOUT, EXCHANGE_READ_TIMEOUT))
-        resp.raise_for_status()
-        data = resp.json()
-        if not isinstance(data, list) or len(data) < 2:
+_parse_retry_after_header = parse_retry_after
+
+
+def _validate_candle_payload(payload: Any, min_row_len: int = BINANCE_MIN_ROW_LEN) -> bool:
+    # validates structure and numeric bounds of raw exchange klines
+    if not isinstance(payload, list) or len(payload) == 0:
+        return False
+    for row in payload:
+        if not isinstance(row, (list, tuple)) or len(row) < min_row_len:
+            return False
+        for idx in range(1, 6):
+            try:
+                val = float(row[idx])
+                if not math.isfinite(val) or isinstance(row[idx], bool):
+                    return False
+            except Exception:
+                return False
+    return True
+
+
+def _fetch_feed_with_retry(
+    url: str, headers: Optional[Dict[str, str]] = None, feed_name: str = "Binance Vision",
+    deadline_ts: Optional[float] = None, max_attempts: int = EXCHANGE_RETRY_MAX_ATTEMPTS,
+    connect_timeout: float = EXCHANGE_CONNECT_TIMEOUT, read_timeout: float = EXCHANGE_READ_TIMEOUT,
+    base_backoff: float = EXCHANGE_RETRY_BASE_BACKOFF, backoff_factor: float = EXCHANGE_RETRY_BACKOFF_FACTOR,
+    max_backoff: float = EXCHANGE_RETRY_MAX_BACKOFF, max_retry_after: float = EXCHANGE_MAX_RETRY_AFTER_CAP,
+    total_deadline: float = EXCHANGE_RETRY_TOTAL_DEADLINE, min_row_len: Optional[int] = None,
+    sleep_fn: Callable[[float], None] = time.sleep, jitter_fn: Callable[[float, float], float] = random.uniform,
+    clock_fn: Callable[[], float] = time.perf_counter, now_dt_fn: Optional[Callable[[], datetime]] = None,
+) -> Optional[List[Any]]:
+    # resilient HTTP request execution with exponential backoff and rate limit handling
+    if deadline_ts is None:
+        deadline_ts = clock_fn() + total_deadline
+    req_row_len = min_row_len or (BINANCE_MIN_ROW_LEN if "binance" in feed_name.lower() else COINBASE_MIN_ROW_LEN)
+
+    def _sleep_backoff(attempt: int) -> bool:
+        backoff = min(max_backoff, base_backoff * (backoff_factor ** (attempt - 1)))
+        raw_j = jitter_fn(0.1, 0.5)
+        delay = backoff + (raw_j if (math.isfinite(raw_j) and raw_j >= 0.0) else 0.0)
+        if (clock_fn() + delay) > deadline_ts:
+            return False
+        sleep_fn(delay)
+        return True
+
+    for attempt in range(1, max_attempts + 1):
+        rem = deadline_ts - clock_fn()
+        if rem < 0.5:
             return None
-        now_ms = datetime.now(timezone.utc).timestamp() * 1000.0
-        closed_candidates = [c for c in data if float(c[6]) <= now_ms and len(c) >= BINANCE_MIN_ROW_LEN]
-        if not closed_candidates:
+        try:
+            resp = requests.get(url, headers=headers, timeout=(min(connect_timeout, rem), min(read_timeout, rem)))
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError):
+            if attempt >= max_attempts or not _sleep_backoff(attempt):
+                return None
+            continue
+        except Exception:
             return None
-        latest = closed_candidates[-1]
-        c_open, c_high, c_low, c_close, vol = float(latest[1]), float(latest[2]), float(latest[3]), float(latest[4]), float(latest[5])
-        if any(v <= 0 for v in (c_open, c_high, c_low, c_close)) or vol < 0:
+
+        status = resp.status_code
+        if not isinstance(status, int) or clock_fn() > deadline_ts or (400 <= status < 500 and status not in (429, 418)):
             return None
-        history = [
-            {"timestamp": pd.to_datetime(c[0], unit="ms", utc=True), "open": float(c[1]), "high": float(c[2]), "low": float(c[3]), "close": float(c[4]), "volume": float(c[5]), "number_of_trades": int(c[8]), "taker_buy_ratio": round(float(c[9]) / float(c[5]), 4) if float(c[5]) > 0 else 0.50}
-            for c in closed_candidates if len(c) >= BINANCE_MIN_ROW_LEN and float(c[1]) > 0
-        ]
-        return {
-            "timestamp": pd.to_datetime(latest[0], unit="ms", utc=True),
-            "open": c_open, "high": c_high, "low": c_low, "close": c_close, "volume": vol,
-            "number_of_trades": int(latest[8]),
-            "taker_buy_ratio": round(float(latest[9]) / vol, 4) if vol > 0 else 0.50,
-            "candles": history,
-        }
-
-    res = _fetch_feed_with_retry(_fetch_binance, "Binance")
-    if res is not None:
-        return res
-
-    def _fetch_coinbase() -> Optional[Dict[str, Any]]:
-        cb_symbol = "BTC-USD" if "BTC" in symbol else symbol
-        url = f"https://api.exchange.coinbase.com/products/{cb_symbol}/candles?granularity=3600"
-        headers = {"User-Agent": "Mudra-Quant/1.0", "Accept": "application/json"}
-        resp = requests.get(url, headers=headers, timeout=(EXCHANGE_CONNECT_TIMEOUT, EXCHANGE_READ_TIMEOUT))
-        resp.raise_for_status()
-        data = resp.json()
-        if not isinstance(data, list) or len(data) < 2:
+        if status in (429, 418):
+            r_str = resp.headers.get("Retry-After") if hasattr(resp, "headers") else None
+            r_val = parse_retry_after(r_str, now_dt_fn=now_dt_fn)
+            if r_val is None or r_val > max_retry_after or attempt >= max_attempts:
+                return None
+            delay = min(max_retry_after, r_val + max(0.0, jitter_fn(0.1, 0.5)))
+            if (clock_fn() + delay) > deadline_ts:
+                return None
+            sleep_fn(delay)
+            continue
+        if status in (500, 502, 503, 504):
+            if attempt >= max_attempts or not _sleep_backoff(attempt):
+                return None
+            continue
+        if status == 200:
+            try:
+                data = resp.json()
+                if isinstance(data, list) and len(data) > 0 and len(data[0]) >= req_row_len:
+                    return data
+            except Exception:
+                pass
             return None
-        now_sec = datetime.now(timezone.utc).timestamp()
-        closed_candidates = [c for c in data if (float(c[0]) + 3600.0) <= now_sec and len(c) >= COINBASE_MIN_ROW_LEN]
-        if not closed_candidates:
-            return None
-        latest = closed_candidates[0]
-        c_low, c_high, c_open, c_close, vol = float(latest[1]), float(latest[2]), float(latest[3]), float(latest[4]), float(latest[5])
-        if any(v <= 0 for v in (c_open, c_high, c_low, c_close)) or vol < 0:
-            return None
-        history = [
-            {"timestamp": pd.to_datetime(c[0], unit="s", utc=True), "low": float(c[1]), "high": float(c[2]), "open": float(c[3]), "close": float(c[4]), "volume": float(c[5]), "number_of_trades": None, "taker_buy_ratio": 0.50}
-            for c in reversed(closed_candidates[:36]) if len(c) >= COINBASE_MIN_ROW_LEN and float(c[3]) > 0
-        ]
-        return {
-            "timestamp": pd.to_datetime(latest[0], unit="s", utc=True),
-            "open": c_open, "high": c_high, "low": c_low, "close": c_close, "volume": vol,
-            "number_of_trades": None, "taker_buy_ratio": 0.50, "candles": history,
-        }
-
-    res_cb = _fetch_feed_with_retry(_fetch_coinbase, "Coinbase")
-    if res_cb is not None:
-        return res_cb
-
-    raise MarketFeedExhaustedError("All market feeds exhausted.")
+    return None
 
 
-# ---------------------------------------------------------------------------
-# 3. END-TO-END HOURLY QUANT SYNC CYCLE
-# ---------------------------------------------------------------------------
+def fetch_latest_confirmed_candle(
+    symbol: str = "BTCUSDT", sleep_fn: Optional[Callable[[float], None]] = None,
+    jitter_fn: Optional[Callable[[float, float], float]] = None, clock_fn: Optional[Callable[[], float]] = None,
+    now_dt_fn: Optional[Callable[[], datetime]] = None, total_deadline: Optional[float] = None,
+) -> Dict[str, Any]:
+    # fetches confirmed 1-hour candle from Binance Vision with Coinbase fallback
+    _sleep_fn, _jitter_fn = sleep_fn or time.sleep, jitter_fn or random.uniform
+    _clock_fn, _budget = clock_fn or time.perf_counter, total_deadline or EXCHANGE_RETRY_TOTAL_DEADLINE
 
-def sync_hourly_quant_cycle(candle: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    ok, db_type, lat = test_connection()
-    if not ok:
-        raise RuntimeError("Database unreachable.")
+    b_url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&limit=102"
+    binance_klines = _fetch_feed_with_retry(
+        url=b_url, feed_name="Binance Vision", min_row_len=BINANCE_MIN_ROW_LEN,
+        sleep_fn=_sleep_fn, jitter_fn=_jitter_fn, clock_fn=_clock_fn, now_dt_fn=now_dt_fn, total_deadline=_budget,
+    )
+    if binance_klines and _validate_candle_payload(binance_klines, min_row_len=BINANCE_MIN_ROW_LEN):
+        now_ms = (now_dt_fn().timestamp() if now_dt_fn else datetime.now(timezone.utc).timestamp()) * 1000.0
+        confirmed = [k for k in binance_klines if float(k[6]) < now_ms]
+        if len(confirmed) >= 35:
+            selected = confirmed[-100:]
+            c = selected[-1]
+            records = [
+                {
+                    "timestamp": pd.to_datetime(float(k[0]), unit="ms", utc=True),
+                    "open": float(k[1]), "high": float(k[2]), "low": float(k[3]), "close": float(k[4]),
+                    "volume": float(k[5]), "number_of_trades": _parse_trade_count(k[8]),
+                    "taker_buy_ratio": round(float(k[9]) / float(k[5]), 4) if float(k[5]) > 0 else 0.5,
+                }
+                for k in selected
+            ]
+            return {
+                "timestamp": datetime.fromtimestamp(float(c[0]) / 1000.0, tz=timezone.utc),
+                "open": float(c[1]), "high": float(c[2]), "low": float(c[3]), "close": float(c[4]),
+                "volume": float(c[5]), "taker_buy_ratio": records[-1]["taker_buy_ratio"],
+                "number_of_trades": _parse_trade_count(c[8]), "candles": records,
+            }
+
+    c_url = "https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=3600"
+    cb_candles = _fetch_feed_with_retry(
+        url=c_url, headers={"User-Agent": "Mudra-Sync/1.0"}, feed_name="Coinbase Institutional",
+        min_row_len=COINBASE_MIN_ROW_LEN, sleep_fn=_sleep_fn, jitter_fn=_jitter_fn,
+        clock_fn=_clock_fn, now_dt_fn=now_dt_fn, total_deadline=_budget,
+    )
+    if cb_candles and _validate_candle_payload(cb_candles, min_row_len=COINBASE_MIN_ROW_LEN):
+        now_sec = now_dt_fn().timestamp() if now_dt_fn else datetime.now(timezone.utc).timestamp()
+        confirmed = [k for k in cb_candles if (float(k[0]) + 3600.0) <= now_sec]
+        if len(confirmed) >= 35:
+            selected = list(reversed(confirmed[:100]))
+            c = selected[-1]
+            records = [
+                {
+                    "timestamp": pd.to_datetime(float(k[0]), unit="s", utc=True),
+                    "low": float(k[1]), "high": float(k[2]), "open": float(k[3]), "close": float(k[4]),
+                    "volume": float(k[5]), "taker_buy_ratio": 0.50, "number_of_trades": None,
+                }
+                for k in selected
+            ]
+            return {
+                "timestamp": datetime.fromtimestamp(float(c[0]), tz=timezone.utc),
+                "open": float(c[3]), "high": float(c[2]), "low": float(c[1]), "close": float(c[4]),
+                "volume": float(c[5]), "taker_buy_ratio": 0.50, "number_of_trades": None, "candles": records,
+            }
+
+    raise MarketFeedExhaustedError("Failed to fetch confirmed 1-hour candle from all market feeds.")
+
+
+def is_paper_trade_executed_for_tick(session: Session, tick_id: int) -> bool:
+    # prevents duplicate paper trading execution on the same market tick
+    if has_tick_id_column(session) and session.execute(select(PaperPortfolio.id).where(PaperPortfolio.tick_id == tick_id)).scalar_one_or_none():
+        return True
+    audit = session.execute(select(CouncilAudit).where(CouncilAudit.tick_id == tick_id).order_by(CouncilAudit.id.asc())).scalars().first()
+    return audit is not None and (not audit.execution_notes or "[FORCED_REANALYSIS]" not in audit.execution_notes)
+
+
+def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]] = None) -> Tuple[bool, str, Dict[str, Any]]:
+    # executes end-to-end quantitative cycle: candle ingestion, ML inference, multi-agent council, and ledger
+    db_ok, ver, _ = test_connection()
+    if not db_ok:
+        return False, f"Database unreachable: {ver}", {}
 
     if candle is None:
-        candle = fetch_latest_confirmed_candle("BTCUSDT")
-
-    latest_ts = _normalize_utc_timestamp(candle["timestamp"])
+        try:
+            candle = fetch_latest_confirmed_candle()
+        except MarketFeedExhaustedError as exc:
+            return False, f"Market feed error: {exc}", {}
 
     with get_db() as session:
-        existing = session.execute(select(MarketTick).where(MarketTick.timestamp == latest_ts)).scalars().first()
-        if existing and existing.predicted_price_1h is not None:
-            recs = reconcile_pending_ticks(session, existing)
-            return {"status": "already_synced", "tick_id": existing.id, "reconciliations_performed": len(recs), "candle": candle}
+        latest_ts = _normalize_utc_timestamp(candle["timestamp"])
+        backfill_missing_candles(session, candle)
 
-        backfilled = backfill_missing_candles(session, candle)
+        existing = session.execute(
+            select(MarketTick).where(MarketTick.timestamp == latest_ts, MarketTick.model_version == ACTIVE_MODEL_VERSION).order_by(MarketTick.id.desc())
+        ).scalars().first()
 
-        raw_history = candle.get("candles")
-        candles_payload = list(raw_history) if raw_history and isinstance(raw_history, Sequence) and not isinstance(raw_history, (str, bytes)) else [candle]
+        if existing and not force:
+            reconcile_pending_ticks(session, existing)
+            return False, f"Candle for {latest_ts.strftime('%H:00 UTC')} already recorded in Neon.", {"tick_id": existing.id}
 
-        tech_signals_input = {
-            "close": candle["close"], "open_price": candle["open"], "high": candle["high"],
-            "low": candle["low"], "volume": candle["volume"],
-            "taker_buy_ratio": candle.get("taker_buy_ratio", 0.50),
-            "timestamp": latest_ts, "candles": candles_payload, "symbol": candle.get("symbol", "BTCUSDT"),
-        }
-        signals_output = calculate_technical_signals.invoke(tech_signals_input)
+        is_existing = existing is not None
+        already_executed = is_paper_trade_executed_for_tick(session, existing.id) if is_existing else False
 
-        features_for_inference = {**signals_output, "close": candle["close"], "current_price": candle["close"]}
-        ml_output = get_model_return_forecast.invoke({"features": features_for_inference})
+        signals_output = calculate_technical_signals.invoke({
+            "close": candle["close"], "open_price": candle["open"], "high": candle["high"], "low": candle["low"],
+            "volume": candle["volume"], "taker_buy_ratio": candle.get("taker_buy_ratio"), "timestamp": latest_ts, "candles": candle.get("candles"),
+        })
+        ml_output = get_model_return_forecast.invoke({"features": signals_output})
+        pred_return = float(ml_output.get("expected_return_pct", 0.0))
+        pred_price = float(ml_output.get("predicted_target_price", candle["close"]))
+        confidence = float(ml_output.get("confidence", 0.50))
+        clears_hurdle = ml_output.get("clears_hurdle", False)
+        volatility = float(signals_output.get("volatility_range_pct", 0.02))
+        regime = "HIGH_VOL_CHOP" if volatility > 3.8 else ("BULL_MOMENTUM" if (clears_hurdle and pred_return > 0) else ("BEAR_DISTRIBUTION" if (clears_hurdle and pred_return < 0) else "SIDEWAYS_RANGE"))
 
-        predicted_target_price = float(ml_output.get("predicted_target_price", candle["close"]))
-        direction = ml_output.get("direction", "SIDEWAYS")
-        prob_up = float(ml_output.get("direction_probability_up", 50.0))
-        prob_down = float(ml_output.get("direction_probability_down", 50.0))
+        safe_features = json.loads(json.dumps(signals_output, default=str)) if signals_output else None
 
-        if existing is not None:
-            existing.open = candle["open"]
-            existing.high = candle["high"]
-            existing.low = candle["low"]
-            existing.close = candle["close"]
-            existing.volume = candle["volume"]
-            existing.number_of_trades = candle.get("number_of_trades")
-            existing.taker_buy_ratio = candle.get("taker_buy_ratio", 0.50)
-            existing.predicted_price_1h = predicted_target_price
-            existing.predicted_direction = direction
-            existing.predicted_probability_up = prob_up
-            existing.predicted_probability_down = prob_down
-            tick = existing
+        if is_existing:
+            current_tick = existing
+            if force:
+                current_tick.market_regime = regime
+                current_tick.predicted_return_1h = pred_return
+                current_tick.predicted_price_1h = pred_price
+                current_tick.model_confidence = confidence
+                current_tick.features = safe_features
+                session.flush()
         else:
-            tick = MarketTick(
-                timestamp=latest_ts, symbol=candle.get("symbol", "BTCUSDT"),
-                open=candle["open"], high=candle["high"], low=candle["low"], close=candle["close"],
-                volume=candle["volume"], number_of_trades=candle.get("number_of_trades"),
-                taker_buy_ratio=candle.get("taker_buy_ratio", 0.50),
-                predicted_price_1h=predicted_target_price, predicted_direction=direction,
-                predicted_probability_up=prob_up, predicted_probability_down=prob_down,
-                model_version=ACTIVE_MODEL_VERSION, feature_version=FEATURE_SCHEMA_VERSION,
+            current_tick = MarketTick(
+                timestamp=latest_ts, open=candle["open"], high=candle["high"], low=candle["low"],
+                close=candle["close"], volume=candle["volume"], model_version=ACTIVE_MODEL_VERSION,
+                feature_schema_version=FEATURE_SCHEMA_VERSION, market_regime=regime,
+                predicted_return_1h=pred_return, predicted_price_1h=pred_price,
+                model_confidence=confidence, features=safe_features,
             )
-            session.add(tick)
-        session.flush()
+            session.add(current_tick)
+            session.flush()
+
+        reconcile_pending_ticks(session, current_tick)
 
         council_state = run_trading_graph(
             symbol="BTCUSDT", current_price=candle["close"], market_data=candle,
@@ -570,63 +658,79 @@ def sync_hourly_quant_cycle(candle: Optional[Dict[str, Any]] = None) -> Dict[str
         kelly = float(council_state.get("kelly_fraction", 0.0))
 
         audit = CouncilAudit(
-            tick_id=tick.id, timestamp=latest_ts,
-            final_decision=decision, risk_verdict=verdict,
+            tick_id=current_tick.id,
             deliberation_latency_ms=council_state.get("latency_ms", 120.0),
             strategist_action=council_state.get("strategist_action", decision),
             strategist_conviction=council_state.get("strategist_conviction", 5),
             rag_context_summary=council_state.get("rag_context", "Normal quant market regime"),
-            critique_summary=council_state.get("risk_critic_critique", "Risk evaluation complete."),
+            risk_verdict=verdict,
             veto_reasons=council_state.get("veto_reasons", []),
-            position_size_fraction=kelly,
-            stop_loss_price=council_state.get("stop_loss_price"),
-            take_profit_price=council_state.get("take_profit_price"),
+            kelly_fraction=kelly,
+            final_decision=decision,
+            execution_notes=f"Council deliberated {decision} ({verdict}) at BTC ${candle['close']:,.2f}." + (" [FORCED_REANALYSIS]" if (is_existing and force) else ""),
         )
         session.add(audit)
+        session.flush()
 
-        portfolio_action = decision
-        if verdict == "APPROVED" and decision in ("BUY", "SELL"):
-            spot_eval = evaluate_spot_hold_until_profit_decision(
-                session, current_price=candle["close"], predicted_direction=direction,
-                proposed_action=decision, clears_hurdle=ml_output.get("clears_hurdle", True),
+        if not (is_existing and already_executed):
+            effective_action = decision
+            order_notes = f"Executed {decision} ({verdict}) at BTC ${candle['close']:,.2f}."
+            if str(decision).upper() == "SELL":
+                try:
+                    spot_guard = evaluate_spot_hold_until_profit_decision(
+                        session=session, current_price=float(candle["close"]),
+                        predicted_direction=str(ml_output.get("direction", "DOWN")),
+                        proposed_action=decision, clears_hurdle=bool(ml_output.get("clears_hurdle", False)),
+                    )
+                    effective_action = spot_guard.get("final_spot_action", decision)
+                    order_notes = spot_guard.get("reason", order_notes)
+                except Exception:
+                    pass
+            execute_paper_order(
+                session=session, action=effective_action, current_price=candle["close"],
+                kelly_fraction=kelly, notes=order_notes, tick_id=current_tick.id,
             )
-            portfolio_action = spot_eval.get("final_spot_action", decision)
 
-        paper_rec = execute_paper_order(
-            session=session, action=portfolio_action, current_price=candle["close"],
-            kelly_fraction=kelly, notes=f"Council Action: {decision} | Execution: {portfolio_action} | Kelly: {kelly:.2%}",
-            tick_id=tick.id,
-        )
-
-        reconciled = reconcile_pending_ticks(session, tick)
-
-        session.commit()
-        return {
-            "status": "success", "tick_id": tick.id, "timestamp": latest_ts.isoformat(),
-            "close": candle["close"], "predicted_price_1h": predicted_target_price,
-            "decision": decision, "risk_verdict": verdict, "reconciliations": len(reconciled),
-            "backfilled_candles": backfilled,
-        }
+        summary = get_portfolio_summary(session, candle["close"])
+        if is_existing and already_executed:
+            return True, f"Updated forecast for existing tick #{current_tick.id} at ${candle['close']:,.2f} ({decision} | Trade deduplicated | No fees)", summary
+        return True, f"Recorded tick #{current_tick.id} at ${candle['close']:,.2f} ({decision} | Kelly: {kelly*100:.1f}%)", summary
 
 
 # ---------------------------------------------------------------------------
 # 4. MULTI-MODEL CONSENSUS & PRICE RANGE ESTIMATION
 # ---------------------------------------------------------------------------
 
-def estimate_next_hour_price_range_usd(current_price: float, volatility_spread_pct: float) -> Tuple[float, float, float]:
-    p = max(1.0, float(current_price))
-    half_range_pct = max(0.10, float(volatility_spread_pct) / 2.0)
-    move = p * (half_range_pct / 100.0)
-    return round(p - move, 2), round(p + move, 2), round(move * 2.0, 2)
+def estimate_next_hour_price_range_usd(live_df: pd.DataFrame, current_price: float) -> Dict[str, float]:
+    if live_df is None or live_df.empty or current_price <= 0:
+        return {"predicted_range_usd": 0.0, "predicted_range_pct": 0.0, "predicted_high_1h": current_price, "predicted_low_1h": current_price}
+
+    highs = pd.to_numeric(live_df["high"], errors="coerce")
+    lows = pd.to_numeric(live_df["low"], errors="coerce")
+    closes = pd.to_numeric(live_df["close"], errors="coerce").replace(0, np.nan)
+    range_pct_series = ((highs - lows) / closes).dropna()
+
+    if range_pct_series.empty:
+        return {"predicted_range_usd": 0.0, "predicted_range_pct": 0.0, "predicted_high_1h": current_price, "predicted_low_1h": current_price}
+
+    last_1h = float(range_pct_series.iloc[-1])
+    ema_6h = float(range_pct_series.tail(6).ewm(span=6, adjust=False).mean().iloc[-1])
+    mean_24h = float(range_pct_series.tail(24).mean())
+    pred_range_rate = (0.45 * last_1h) + (0.35 * ema_6h) + (0.20 * mean_24h)
+    pred_range_usd = float(current_price * pred_range_rate)
+    half_range = pred_range_usd / 2.0
+
+    return {
+        "predicted_range_usd": round(pred_range_usd, 2), "predicted_range_pct": round(pred_range_rate * 100.0, 4),
+        "predicted_high_1h": round(current_price + half_range, 2), "predicted_low_1h": round(max(1.0, current_price - half_range), 2),
+    }
 
 
 def evaluate_multi_angle_consensus(
-    primary_direction: str, primary_prob_up: float, primary_pred_dollar_move: float,
-    current_price: float, volatility_spread_pct: float,
-    shadow_direction: Optional[str] = None, shadow_prob_up: Optional[float] = None,
+    current_price: float, primary_direction: str, primary_prob_up: float, primary_pred_dollar_move: float,
+    predicted_range_usd: float, shadow_direction: Optional[str] = None, shadow_prob_up: Optional[float] = None,
     model_votes: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    low_b, high_b, predicted_range_usd = estimate_next_hour_price_range_usd(current_price, volatility_spread_pct)
     hurdle_dollar_min = current_price * (MIN_HURDLE_PCT / 100.0)
 
     if model_votes and len(model_votes) > 0:
