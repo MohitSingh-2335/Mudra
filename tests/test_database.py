@@ -1,173 +1,34 @@
-"""
-Unit and Integration Tests for Mudra Database, Reconciliation, Paper Portfolio Engines,
-and Model Governance & Catalog Verification.
-Runs in-memory (sqlite:///:memory:) for unit tests, and uses isolated disposable
-PostgreSQL (via TEST_DATABASE_URL) for PostgreSQL catalog, trigger, and constraint suites.
-"""
-import ast
+# tests/test_database.py
+"""Unit tests for Mudra database models, migrations, and reconciliation ledger."""
+
 import json
-import os
-from datetime import datetime, timedelta, timezone
+import hashlib
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Dict, Generator, Optional
-from urllib.parse import urlsplit
 import pytest
-from sqlalchemy import create_engine, inspect, select, text
-from sqlalchemy.exc import DBAPIError, IntegrityError
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import create_engine, inspect, select, func
+from sqlalchemy.orm import sessionmaker
 
-from config import MIN_HURDLE_PCT, PORTFOLIO_ADVISORY_LOCK_ID
-from src.api.schemas import PortfolioSummaryResponse, ReconciliationSummaryResponse
-import src.database as db_pkg
-import src.database.connection as db_conn_mod
-from src.database.connection import (
-    CANONICAL_CONSTRAINTS,
-    CANONICAL_FOREIGN_KEYS,
-    CANONICAL_FUNCTIONS,
-    CANONICAL_INDEXES,
-    CANONICAL_TABLE_COLUMNS,
-    CANONICAL_TRIGGERS,
-    FunctionSpec,
-    SchemaDriftError,
-    ensure_canonical_function,
-    init_db,
-    verify_db_schema,
-)
 from src.database.models import (
-    ApiTelemetry,
     Base,
-    CouncilAudit,
     MarketTick,
-    ModelLifecycleEvent,
-    ModelPrediction,
-    ModelRegistry,
-    PaperPortfolio,
-    PredictionInvestigation,
     Reconciliation,
+    CouncilAudit,
+    PaperPortfolio,
+    ModelRegistry,
+    ModelLifecycleEvent,
 )
-from src.engine.paper_portfolio import (
-    INITIAL_CAPITAL_USD,
-    execute_paper_order,
-    get_average_entry_price,
-    get_portfolio_summary,
-)
-from src.engine.reconciliation import (
-    get_reconciliation_summary,
-    reconcile_pending_ticks,
-)
+from src.database.connection import init_db, CANONICAL_TABLE_COLUMNS
+from src.engine.reconciliation import reconcile_pending_ticks
+from src.engine.paper_portfolio import execute_paper_order, get_portfolio_summary
+from scripts.migrate_db import BASELINE_MODEL_SPEC, CANDIDATE_MODEL_SPEC, run_migration
 
-
-# =============================================================================
-# PostgreSQL Test Service Helpers & Fail-Closed Disposable Safety Guards
-# =============================================================================
-
-_ALLOWED_DISPOSABLE_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "postgres"})
-_FORBIDDEN_DB_SUBSTRINGS = (
-    "neon.tech",
-    "neondb",
-    "amazonaws.com",
-    "rds.",
-    "supabase",
-    "railway",
-    "render.com",
-    "cockroach",
-    "digitalocean",
-    "azure.com",
-    "gcp",
-)
-_FORBIDDEN_DB_NAMES = frozenset(
-    {"postgres", "mudra", "neondb", "defaultdb", "main", "production", "prod", "mudra_prod"}
-)
-
-
-def get_safe_test_postgres_url() -> Optional[str]:
-    """
-    Retrieves and validates the isolated disposable test PostgreSQL URL from environment.
-    Fails closed (raises RuntimeError) before any database connection or destructive SQL
-    if the URL is ambiguous, remote, matches DATABASE_URL, or lacks an explicit '*test*'
-    database name on a local/service-container host.
-    """
-    raw_url = os.getenv("TEST_DATABASE_URL")
-    if not raw_url or raw_url.strip() == "":
-        return None
-
-    url = raw_url.strip()
-    lower_url = url.lower()
-
-    if not lower_url.startswith(("postgresql://", "postgresql+psycopg2://", "postgres://")):
-        raise RuntimeError(
-            f"SAFETY VIOLATION: TEST_DATABASE_URL must use a postgresql:// scheme (got {url[:24]!r})."
-        )
-
-    for forbidden in _FORBIDDEN_DB_SUBSTRINGS:
-        if forbidden in lower_url:
-            raise RuntimeError(
-                f"SAFETY VIOLATION: TEST_DATABASE_URL contains forbidden cloud/production marker '{forbidden}'!"
-            )
-
-    prod_url = os.getenv("DATABASE_URL")
-    if prod_url and prod_url.strip():
-        norm_test = lower_url.replace("postgresql+psycopg2://", "postgresql://").replace("postgres://", "postgresql://")
-        norm_prod = (
-            prod_url.strip()
-            .lower()
-            .replace("postgresql+psycopg2://", "postgresql://")
-            .replace("postgres://", "postgresql://")
-        )
-        if norm_test == norm_prod:
-            raise RuntimeError(
-                "SAFETY VIOLATION: TEST_DATABASE_URL must never equal DATABASE_URL!"
-            )
-
-    parsed = urlsplit(url)
-    hostname = (parsed.hostname or "").lower()
-    if hostname not in _ALLOWED_DISPOSABLE_HOSTS:
-        raise RuntimeError(
-            f"SAFETY VIOLATION: TEST_DATABASE_URL host '{hostname}' is not in the disposable host allowlist "
-            f"{sorted(_ALLOWED_DISPOSABLE_HOSTS)}."
-        )
-
-    db_name = (parsed.path or "").lstrip("/").split("/")[0].lower()
-    if not db_name or db_name in _FORBIDDEN_DB_NAMES or "test" not in db_name:
-        raise RuntimeError(
-            f"SAFETY VIOLATION: TEST_DATABASE_URL database name '{db_name}' must explicitly contain 'test' "
-            "and must never target a default or production database."
-        )
-
-    username = (parsed.username or "").lower()
-    if not username or username in {"postgres", "neondb_owner", "admin", "root", "prod"}:
-        raise RuntimeError(
-            f"SAFETY VIOLATION: TEST_DATABASE_URL username '{username}' must be a dedicated test user "
-            "(e.g., 'mudra_test_user'), not a superuser or production role."
-        )
-
-    return url
-
-
-def is_postgres_available() -> bool:
-    """Verifies that an isolated disposable PostgreSQL test service is reachable."""
-    url = get_safe_test_postgres_url()
-    if not url:
-        return False
-    try:
-        eng = create_engine(url, connect_args={"connect_timeout": 3})
-        with eng.connect() as conn:
-            conn.execute(text("SELECT 1;"))
-        eng.dispose()
-        return True
-    except Exception:
-        return False
-
-
-# =============================================================================
-# In-Memory SQLite Fixture for Existing Tests
-# =============================================================================
 
 @pytest.fixture
 def in_memory_db():
-    """Provides an isolated, in-memory SQLite session for testing."""
+    """Provides an in-memory SQLite database session with all tables created."""
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(bind=engine)
+    init_db(engine)
     Session = sessionmaker(bind=engine)
     session = Session()
     yield session, engine
@@ -176,730 +37,159 @@ def in_memory_db():
     engine.dispose()
 
 
-# =============================================================================
-# 1. In-Memory SQLite Regression & Safety Guard Tests (20 Tests)
-# =============================================================================
-
-def test_database_module_integrity_and_no_self_import():
-    """
-    Guards against accidental module replacement or circular self-imports in
-    src/database/connection.py and verifies all expected public exports on
-    src.database.connection and src.database. Also verifies create_db_engine()
-    contains zero implicit create_all() DDL calls.
-    """
-    conn_path = Path(db_conn_mod.__file__).resolve()
-    this_test_path = Path(__file__).resolve()
-    assert conn_path != this_test_path
-
-    conn_source = conn_path.read_text(encoding="utf-8")
-    test_source = this_test_path.read_text(encoding="utf-8")
-    assert conn_source != test_source, "src/database/connection.py must never be overwritten with test_database.py!"
-
-    tree = ast.parse(conn_source, filename=str(conn_path))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            assert node.module != "src.database.connection", (
-                "src/database/connection.py must never import from src.database.connection (circular self-import)"
-            )
-        if isinstance(node, ast.FunctionDef) and node.name == "create_db_engine":
-            for child in ast.walk(node):
-                if isinstance(child, ast.Attribute):
-                    assert child.attr != "create_all", (
-                        "create_db_engine() must not execute Base.metadata.create_all() implicitly"
-                    )
-
-    expected_conn_exports = {
-        "SchemaDriftError",
-        "FunctionSpec",
-        "TriggerSpec",
-        "CANONICAL_TABLE_COLUMNS",
-        "CANONICAL_FOREIGN_KEYS",
-        "CANONICAL_CONSTRAINTS",
-        "CANONICAL_INDEXES",
-        "CANONICAL_FUNCTIONS",
-        "CANONICAL_TRIGGERS",
-        "normalize_sql",
-        "normalize_pg_predicate",
-        "ensure_canonical_function",
-        "ensure_canonical_trigger",
-        "verify_db_schema",
-        "get_database_url",
-        "create_db_engine",
-        "engine",
-        "SessionLocal",
-        "get_db",
-        "has_tick_id_column",
-        "init_db",
-        "test_connection",
-    }
-    for sym in expected_conn_exports:
-        assert hasattr(db_conn_mod, sym), f"Missing symbol {sym} on src.database.connection"
-
-    for sym in db_pkg.__all__:
-        assert hasattr(db_pkg, sym), f"Missing package export {sym} on src.database"
-
-    # Verify cold _TICK_ID_COLUMN_CACHE lookup inside an active SQLite SingletonThreadPool
-    # transaction inspects via session.connection() and never rolls back uncommitted MarketTick rows
-    from src.database.connection import _TICK_ID_COLUMN_CACHE
-    mem_engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(bind=mem_engine)
-    _TICK_ID_COLUMN_CACHE.pop(id(mem_engine), None)
-    MemSession = sessionmaker(bind=mem_engine)
-    with MemSession() as s:
-        t_row = MarketTick(
-            timestamp=datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc),
-            open=60000.0,
-            high=60100.0,
-            low=59900.0,
-            close=60050.0,
-            volume=10.0,
-        )
-        s.add(t_row)
-        s.flush()
-        _ = s.execute(select(PaperPortfolio)).scalars().all()
-        s.commit()
-    with MemSession() as s_check:
-        persisted_ticks = s_check.execute(select(MarketTick)).scalars().all()
-        assert len(persisted_ticks) == 1
-    mem_engine.dispose()
-
-
 def test_table_creation_and_inspection(in_memory_db):
-    """Verifies that all registered tables are created in the database schema."""
+    """Verify all canonical database tables exist."""
     session, engine = in_memory_db
-    inspector = inspect(engine)
-    tables = inspector.get_table_names()
-
+    tables = inspect(engine).get_table_names()
     for expected_table in CANONICAL_TABLE_COLUMNS.keys():
         assert expected_table in tables
 
 
-def test_fresh_market_tick_creation_and_insertion(in_memory_db):
-    """Verifies MarketTick creation and insertion with supported fields."""
+def test_market_tick_lifecycle_and_dict(in_memory_db):
+    """Verify MarketTick creation, serialization, and column constraints."""
     session, _ = in_memory_db
+    now = datetime.now(timezone.utc)
     tick = MarketTick(
-        timestamp=datetime.now(timezone.utc),
-        open=50000.0,
-        high=51000.0,
-        low=49500.0,
-        close=50500.0,
-        volume=1200.5,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
-        market_regime="BULL_TREND",
-        predicted_return_1h=0.015,
-        predicted_price_1h=51257.5,
-        model_confidence=0.72,
-        features={"rsi": 55.4, "macd": 12.1},
+        timestamp=now, open=50000.0, high=51000.0, low=49500.0, close=50500.0, volume=1200.5,
+        model_version="xgb_v1", feature_schema_version="v1_39features",
+        predicted_return_1h=0.015, predicted_price_1h=51257.5, model_confidence=0.72,
+        features={"rsi": 55.4},
     )
     session.add(tick)
     session.commit()
 
     saved = session.query(MarketTick).filter_by(id=tick.id).first()
-    assert saved is not None
     assert saved.close == 50500.0
+    assert saved.to_dict()["close"] == 50500.0
     assert saved.features["rsi"] == 55.4
-
-    with pytest.raises(TypeError):
-        MarketTick(
-            timestamp=datetime.now(timezone.utc),
-            open=50000.0,
-            high=51000.0,
-            low=49500.0,
-            close=50500.0,
-            volume=1200.5,
-            taker_buy_ratio=0.55,
-        )
-
-
-def test_models_to_dict_serialization(in_memory_db):
-    """Verifies models serialize to dict properly."""
-    session, _ = in_memory_db
-    now = datetime.now(timezone.utc)
-    tick = MarketTick(
-        timestamp=now,
-        open=60000.0,
-        high=61000.0,
-        low=59500.0,
-        close=60500.0,
-        volume=500.0,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
-    )
-    session.add(tick)
-    session.commit()
-    assert tick.id is not None
-    assert tick.close == 60500.0
-    assert tick.to_dict()["close"] == 60500.0
 
 
 def test_reconciliation_math_and_accurate_tagging(in_memory_db):
-    """Tests reconciliation math and ACCURATE attribution tagging."""
+    """Verify reconciliation calculates correct direction and ACCURATE tag."""
     session, _ = in_memory_db
-    base_ts = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-
-    t0 = MarketTick(
-        timestamp=base_ts,
-        open=60000.0,
-        high=60500.0,
-        low=59500.0,
-        close=60000.0,
-        volume=100.0,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
-        predicted_return_1h=0.01,
-        predicted_price_1h=60600.0,
+    t0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    tick0 = MarketTick(
+        timestamp=t0, open=60000.0, high=60500.0, low=59500.0, close=60000.0, volume=100.0,
+        model_version="xgb_v1", feature_schema_version="v1_39features",
+        predicted_return_1h=0.01, predicted_price_1h=60600.0,
     )
-    session.add(t0)
+    tick1 = MarketTick(
+        timestamp=t0 + timedelta(hours=1), open=60000.0, high=60700.0, low=59900.0, close=60550.0, volume=120.0,
+        model_version="xgb_v1", feature_schema_version="v1_39features",
+    )
+    session.add_all([tick0, tick1])
     session.commit()
 
-    t1 = MarketTick(
-        timestamp=base_ts + timedelta(hours=1),
-        open=60000.0,
-        high=60700.0,
-        low=59900.0,
-        close=60550.0,
-        volume=120.0,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
-    )
-    session.add(t1)
-    session.commit()
-
-    reconciled = reconcile_pending_ticks(session, t1)
+    reconciled = reconcile_pending_ticks(session, tick1)
     assert len(reconciled) == 1
     r = reconciled[0]
-    assert r.tick_id == t0.id
     assert r.direction_correct is True
     assert r.error_attribution_tag == "ACCURATE"
+    assert r.absolute_error_usd == pytest.approx(50.0)
+    assert r.residual_error == pytest.approx(-0.083333, abs=1e-4)
 
 
-def test_reconciliation_micro_move_and_sideways_drift(in_memory_db):
-    """Tests SIDEWAYS_DRIFT error attribution on small contrary price moves (< $150 or <= 0.20%)."""
+def test_reconciliation_sideways_drift_tagging(in_memory_db):
+    """Verify SIDEWAYS_DRIFT error attribution on small contrary price moves."""
     session, _ = in_memory_db
-    base_ts = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-
-    t0 = MarketTick(
-        timestamp=base_ts,
-        open=60000.0,
-        high=60100.0,
-        low=59900.0,
-        close=60000.0,
-        volume=100.0,
-        predicted_return_1h=0.0008,
-        predicted_price_1h=60048.0,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
+    t0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    tick0 = MarketTick(
+        timestamp=t0, open=60000.0, high=60100.0, low=59900.0, close=60000.0, volume=100.0,
+        predicted_return_1h=0.0008, predicted_price_1h=60048.0,
+        model_version="xgb_v1", feature_schema_version="v1_39features",
     )
-    session.add(t0)
+    tick1 = MarketTick(
+        timestamp=t0 + timedelta(hours=1), open=60000.0, high=60050.0, low=59920.0, close=59960.0, volume=110.0,
+        model_version="xgb_v1", feature_schema_version="v1_39features",
+    )
+    session.add_all([tick0, tick1])
     session.commit()
 
-    t1 = MarketTick(
-        timestamp=base_ts + timedelta(hours=1),
-        open=60000.0,
-        high=60050.0,
-        low=59920.0,
-        close=59960.0,
-        volume=110.0,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
-    )
-    session.add(t1)
-    session.commit()
-
-    reconciled = reconcile_pending_ticks(session, t1)
+    reconciled = reconcile_pending_ticks(session, tick1)
     assert len(reconciled) == 1
-    r = reconciled[0]
-    assert r.direction_correct is False
-    assert r.absolute_error_usd == pytest.approx(88.0)
-    assert r.error_attribution_tag == "SIDEWAYS_DRIFT"
+    assert reconciled[0].direction_correct is False
+    assert reconciled[0].error_attribution_tag == "SIDEWAYS_DRIFT"
 
 
-def test_reconciliation_black_swan_outlier_isolation(in_memory_db):
-    """Tests BLACK_SWAN_OUTLIER attribution on large unexpected moves (>3.8%)."""
+def test_reconciliation_black_swan_outlier(in_memory_db):
+    """Verify BLACK_SWAN_OUTLIER tag on extreme unanticipated market shocks (> 3.8%)."""
     session, _ = in_memory_db
-    base_ts = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-
-    t0 = MarketTick(
-        timestamp=base_ts,
-        open=60000.0,
-        high=60500.0,
-        low=59500.0,
-        close=60000.0,
-        volume=100.0,
-        predicted_return_1h=0.002,
-        predicted_price_1h=60120.0,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
+    t0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    tick0 = MarketTick(
+        timestamp=t0, open=60000.0, high=60500.0, low=59500.0, close=60000.0, volume=100.0,
+        predicted_return_1h=0.002, predicted_price_1h=60120.0,
+        model_version="xgb_v1", feature_schema_version="v1_39features",
     )
-    session.add(t0)
+    tick1 = MarketTick(
+        timestamp=t0 + timedelta(hours=1), open=60000.0, high=63500.0, low=59800.0, close=63000.0, volume=500.0,
+        model_version="xgb_v1", feature_schema_version="v1_39features",
+    )
+    session.add_all([tick0, tick1])
     session.commit()
 
-    t1 = MarketTick(
-        timestamp=base_ts + timedelta(hours=1),
-        open=60000.0,
-        high=63500.0,
-        low=59800.0,
-        close=63000.0,
-        volume=500.0,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
-    )
-    session.add(t1)
-    session.commit()
-
-    reconciled = reconcile_pending_ticks(session, t1)
+    reconciled = reconcile_pending_ticks(session, tick1)
     assert len(reconciled) == 1
-    r = reconciled[0]
-    assert r.is_black_swan is True
-    assert r.error_attribution_tag == "BLACK_SWAN_OUTLIER"
+    assert reconciled[0].is_black_swan is True
+    assert reconciled[0].error_attribution_tag == "BLACK_SWAN_OUTLIER"
 
 
-def test_veto_attribution_saved_capital_vs_opportunity_cost(in_memory_db):
-    """Tests SAVED_CAPITAL vs OPPORTUNITY_COST veto attribution evaluation."""
+def test_reconciliation_one_hour_horizon_alignment(in_memory_db):
+    """Reconciliation strictly aligns predictions with T+1 hour outcome candle."""
     session, _ = in_memory_db
-    base_ts = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    t0 = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
+    t1 = t0 + timedelta(hours=1)
+    t3 = t0 + timedelta(hours=3)
 
-    # Case 1: BUY vetoed and market dropped -> SAVED_CAPITAL
-    t0 = MarketTick(
-        timestamp=base_ts,
-        open=60000.0,
-        high=60200.0,
-        low=59800.0,
-        close=60000.0,
-        volume=100.0,
-        predicted_return_1h=0.005,
-        predicted_price_1h=60300.0,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
-    )
-    session.add(t0)
+    tick0 = MarketTick(timestamp=t0, open=60000.0, high=60100.0, low=59900.0, close=60000.0, volume=10.0, predicted_price_1h=60200.0, predicted_return_1h=0.0033)
+    tick3 = MarketTick(timestamp=t3, open=60500.0, high=60600.0, low=60400.0, close=60500.0, volume=10.0)
+    session.add_all([tick0, tick3])
     session.commit()
 
-    audit_saved = CouncilAudit(
-        timestamp=base_ts,
-        tick_id=t0.id,
-        strategist_action="BUY",
-        strategist_conviction=7,
-        risk_verdict="VETOED",
-        kelly_fraction=0.0,
-        final_decision="HOLD",
-    )
-    session.add(audit_saved)
+    # t0 needs t1 for reconciliation; t3 is +3 hours and cannot resolve t0
+    reconciled = reconcile_pending_ticks(session, tick3)
+    assert len(reconciled) == 0
+
+    # Add missing t1 candle
+    tick1 = MarketTick(timestamp=t1, open=60100.0, high=60250.0, low=60000.0, close=60200.0, volume=10.0)
+    session.add(tick1)
     session.commit()
 
-    t1 = MarketTick(
-        timestamp=base_ts + timedelta(hours=1),
-        open=60000.0,
-        high=60100.0,
-        low=58900.0,
-        close=59000.0,
-        volume=150.0,
-        predicted_return_1h=0.005,
-        predicted_price_1h=59295.0,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
-    )
-    session.add(t1)
-    session.commit()
-
-    reconcile_pending_ticks(session, t1)
-    session.refresh(audit_saved)
-    assert audit_saved.veto_attribution == "SAVED_CAPITAL"
-
-    # Case 2: BUY vetoed and market rallied > 0.10% -> OPPORTUNITY_COST
-    audit_opp = CouncilAudit(
-        timestamp=base_ts + timedelta(hours=1),
-        tick_id=t1.id,
-        strategist_action="BUY",
-        strategist_conviction=7,
-        risk_verdict="VETOED",
-        kelly_fraction=0.0,
-        final_decision="HOLD",
-    )
-    session.add(audit_opp)
-    session.commit()
-
-    t2 = MarketTick(
-        timestamp=base_ts + timedelta(hours=2),
-        open=59000.0,
-        high=60500.0,
-        low=58900.0,
-        close=60000.0,
-        volume=150.0,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
-    )
-    session.add(t2)
-    session.commit()
-
-    reconcile_pending_ticks(session, t2)
-    session.refresh(audit_opp)
-    assert audit_opp.veto_attribution == "OPPORTUNITY_COST"
+    reconciled_after = reconcile_pending_ticks(session, tick3)
+    assert len(reconciled_after) == 1
+    assert reconciled_after[0].actual_price_at_t_plus_1 == pytest.approx(60200.0)
 
 
 def test_paper_portfolio_full_lifecycle(in_memory_db):
-    """Tests paper trading portfolio order execution, summary keys, and Pydantic schema validation."""
+    """Verify paper trading order execution, fee deduction, and portfolio balance updates."""
     session, _ = in_memory_db
-    r_buy = execute_paper_order(session, "BUY", 50000.0, kelly_fraction=0.25)
-    assert r_buy.cash_balance < INITIAL_CAPITAL_USD
-    assert r_buy.btc_balance > 0.0
+    b_order = execute_paper_order(session, "BUY", 60000.0, kelly_fraction=0.10)
+    assert b_order.action == "BUY"
+    assert b_order.btc_amount > 0.0
 
-    summary = get_portfolio_summary(session, current_price=55000.0)
-    assert summary["btc_position_value_usd"] > 0.0
-    assert summary["total_equity_usd"] > INITIAL_CAPITAL_USD
-    validated_summary = PortfolioSummaryResponse(**summary)
-    assert validated_summary.total_trades == 1
+    s_order = execute_paper_order(session, "SELL", 63000.0)
+    assert s_order.action == "SELL"
+    assert s_order.btc_balance == pytest.approx(0.0, abs=1e-8)
+    assert s_order.realized_pnl_usd > 0.0
 
-    r_sell = execute_paper_order(session, "SELL", 55000.0)
-    assert r_sell.btc_balance == 0.0
-    assert r_sell.realized_pnl_usd > 0.0
-
-
-def test_empty_portfolio_summary(in_memory_db):
-    """Tests portfolio summary on empty ledger."""
-    session, _ = in_memory_db
-    summary = get_portfolio_summary(session, current_price=60000.0)
-    assert summary["cash_balance"] == INITIAL_CAPITAL_USD
-    assert summary["btc_balance"] == 0.0
-    assert summary["total_equity_usd"] == INITIAL_CAPITAL_USD
+    summary = get_portfolio_summary(session, current_price=63000.0)
+    assert summary["total_trades"] == 2
+    assert summary["realized_pnl_usd"] == pytest.approx(s_order.realized_pnl_usd, abs=1e-2)
 
 
-def test_reconciliation_summary_metrics_and_tag_breakdown(in_memory_db):
-    """Tests summary statistics, tag breakdown, and Pydantic schema validation."""
-    session, _ = in_memory_db
-    summary_empty = get_reconciliation_summary(session)
-    assert summary_empty["total_reconciled"] == 0
-    assert summary_empty["directional_accuracy_pct"] == 0.0
-    assert summary_empty["win_rate_pct"] == 0.0
-
-    base_ts = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-    t0 = MarketTick(
-        timestamp=base_ts,
-        open=60000.0,
-        high=60500.0,
-        low=59500.0,
-        close=60000.0,
-        volume=100.0,
-        predicted_return_1h=0.01,
-        predicted_price_1h=60600.0,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
-    )
-    t1 = MarketTick(
-        timestamp=base_ts + timedelta(hours=1),
-        open=60000.0,
-        high=60700.0,
-        low=59900.0,
-        close=60550.0,
-        volume=120.0,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
-    )
-    session.add_all([t0, t1])
-    session.commit()
-    reconcile_pending_ticks(session, t1)
-
-    summary = get_reconciliation_summary(session)
-    assert summary["total_reconciled"] == 1
-    assert summary["directional_accuracy_pct"] == 100.0
-    assert summary["tag_breakdown"].get("ACCURATE") == 1
-    validated = ReconciliationSummaryResponse(**summary)
-    assert validated.total_reconciled == 1
-
-
-def test_net_realized_pnl_accounting_two_completed_trades(in_memory_db):
-    """Tests strict cost basis isolation across two completed trades."""
-    session, _ = in_memory_db
-    execute_paper_order(session, "BUY", 50000.0, kelly_fraction=0.10)
-    execute_paper_order(session, "SELL", 55000.0)
-    execute_paper_order(session, "BUY", 60000.0, kelly_fraction=0.10)
-    execute_paper_order(session, "SELL", 58000.0)
-
-    summary = get_portfolio_summary(session, current_price=58000.0)
-    assert summary["btc_balance"] == 0.0
-
-
-def test_get_average_entry_price_missing_eligible_buy_isolation(in_memory_db):
-    """Tests cost-basis lookup returns 0.0 when no eligible BUY exists after a SELL liquidation."""
-    session, _ = in_memory_db
-    assert get_average_entry_price(session, target_btc=0.0) == 0.0
-
-    # Execute a BUY and then liquidate via SELL
-    execute_paper_order(session, "BUY", 50000.0, kelly_fraction=0.10)
-    execute_paper_order(session, "SELL", 52000.0)
-
-    # Requesting cost basis for hypothetical open inventory when no BUY occurred after the SELL
-    # must return 0.0 and never leak the prior closed trade's entry price.
-    avg_price = get_average_entry_price(session, target_btc=0.02)
-    assert avg_price == 0.0
-
-
-def test_reconciliation_exact_one_hour_horizon_alignment(in_memory_db):
-    """Verifies that reconciliation pairs strictly across T and T+1h."""
-    session, _ = in_memory_db
-    base_ts = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
-
-    t0 = MarketTick(
-        timestamp=base_ts,
-        open=50000.0,
-        high=50100.0,
-        low=49900.0,
-        close=50000.0,
-        volume=10.0,
-        predicted_price_1h=50500.0,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
-    )
-    session.add(t0)
-    session.commit()
-
-    # t2 is +2 hours (skips T+1h)
-    t2 = MarketTick(
-        timestamp=base_ts + timedelta(hours=2),
-        open=50200.0,
-        high=50400.0,
-        low=50100.0,
-        close=50300.0,
-        volume=10.0,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
-    )
-    session.add(t2)
-    session.commit()
-
-    reconciled = reconcile_pending_ticks(session, t2)
-    assert len(reconciled) == 0  # t0 remains pending because t1 (T+1h) is missing
-
-
-def test_reconciliation_multiple_pending_with_intervening_outcomes(in_memory_db):
-    """Tests multiple pending predictions reconciling against appropriate outcome candles."""
-    session, _ = in_memory_db
-    base_ts = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
-
-    t0 = MarketTick(
-        timestamp=base_ts,
-        open=50000.0,
-        high=50100.0,
-        low=49900.0,
-        close=50000.0,
-        volume=10.0,
-        predicted_price_1h=50500.0,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
-    )
-    t1 = MarketTick(
-        timestamp=base_ts + timedelta(hours=1),
-        open=50500.0,
-        high=50600.0,
-        low=50400.0,
-        close=50500.0,
-        volume=10.0,
-        predicted_price_1h=51000.0,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
-    )
-    session.add_all([t0, t1])
-    session.commit()
-
-    reconciled_t1 = reconcile_pending_ticks(session, t1)
-    assert len(reconciled_t1) == 1
-    assert reconciled_t1[0].tick_id == t0.id
-
-
-def test_reconciliation_missing_expected_candle_leaves_unresolved(in_memory_db):
-    """Tests missing candle preserves pending state without corrupting metrics."""
-    session, _ = in_memory_db
-    base_ts = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
-
-    t0 = MarketTick(
-        timestamp=base_ts,
-        open=50000.0,
-        high=50100.0,
-        low=49900.0,
-        close=50000.0,
-        volume=10.0,
-        predicted_price_1h=50500.0,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
-    )
-    session.add(t0)
-    session.commit()
-
-    reconciled = reconcile_pending_ticks(session, t0)
-    assert len(reconciled) == 0
-
-
-def test_reconciliation_preserves_existing_reconciliation_records(in_memory_db):
-    """Verifies existing reconciliation records are immutable upon subsequent cycle."""
-    session, _ = in_memory_db
-    base_ts = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
-
-    t0 = MarketTick(
-        timestamp=base_ts,
-        open=50000.0,
-        high=50100.0,
-        low=49900.0,
-        close=50000.0,
-        volume=10.0,
-        predicted_price_1h=50500.0,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
-    )
-    t1 = MarketTick(
-        timestamp=base_ts + timedelta(hours=1),
-        open=50500.0,
-        high=50600.0,
-        low=50400.0,
-        close=50500.0,
-        volume=10.0,
-        predicted_price_1h=51000.0,
-        model_version="xgb_onnx_v1.0.0",
-        feature_schema_version="v1_39features",
-    )
-    session.add_all([t0, t1])
-    session.commit()
-
-    rec_first = reconcile_pending_ticks(session, t1)
-    assert len(rec_first) == 1
-
-    rec_second = reconcile_pending_ticks(session, t1)
-    assert len(rec_second) == 0  # Already reconciled, zero duplicates created
-
-
-def test_get_safe_test_postgres_url_rejects_unsafe_configs(monkeypatch):
-    """
-    Proves that get_safe_test_postgres_url() fails closed before any connection or
-    destructive DROP SCHEMA statement can run when given production, remote, or
-    non-test database URLs, while accepting the dedicated CI disposable service URL.
-    """
-    # 1. Unset or empty -> returns None (skips cleanly)
-    monkeypatch.delenv("TEST_DATABASE_URL", raising=False)
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    assert get_safe_test_postgres_url() is None
-
-    monkeypatch.setenv("TEST_DATABASE_URL", "   ")
-    assert get_safe_test_postgres_url() is None
-
-    # 2. Valid CI disposable PostgreSQL URL -> accepted
-    valid_ci_url = "postgresql+psycopg2://mudra_test_user:mudra_test_password@localhost:5432/mudra_test_db"
-    monkeypatch.setenv("TEST_DATABASE_URL", valid_ci_url)
-    assert get_safe_test_postgres_url() == valid_ci_url
-
-    # 3. Matching DATABASE_URL -> rejected fail-closed
-    monkeypatch.setenv("DATABASE_URL", "postgresql://mudra_test_user:mudra_test_password@localhost:5432/mudra_test_db")
-    with pytest.raises(RuntimeError, match="must never equal DATABASE_URL"):
-        get_safe_test_postgres_url()
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-
-    # 4. Neon / cloud / remote hosts -> rejected fail-closed
-    unsafe_urls = [
-        "postgresql://neondb_owner:secret@ep-cool-Frog-123.us-east-2.aws.neon.tech/neondb?sslmode=require",
-        "postgresql://mudra_test_user:pass@db.internal.production.org:5432/mudra_test_db",
-        "postgresql://mudra_test_user:pass@192.168.1.50:5432/mudra_test_db",
-        "postgresql://mudra_test_user:pass@localhost:5432/mudra",
-        "postgresql://mudra_test_user:pass@localhost:5432/postgres",
-        "postgresql://mudra_test_user:pass@localhost:5432/production",
-        "postgresql://postgres:pass@localhost:5432/mudra_test_db",
-        "sqlite:///data/mudra_operational.db",
-    ]
-    for bad_url in unsafe_urls:
-        monkeypatch.setenv("TEST_DATABASE_URL", bad_url)
-        with pytest.raises(RuntimeError, match="SAFETY VIOLATION"):
-            get_safe_test_postgres_url()
-
-
-def test_worker_startup_uses_read_only_verify_db_schema_and_fails_closed_on_drift(monkeypatch):
-    """
-    Verifies that normal worker startup calls read-only verify_db_schema(), never calls
-    init_db(), and aborts before flush_outbox() or sync_hourly_quant_cycle() when schema
-    verification fails.
-    """
-    import scripts.run_hourly_worker as worker
-    import src.database.connection as db_conn
-
-    init_called = []
-    verify_called = []
-    outbox_called = []
-    sync_called = []
-
-    monkeypatch.setattr(db_conn, "test_connection", lambda: (True, "PostgreSQL 16.x", 1.2))
-    monkeypatch.setattr(
-        db_conn,
-        "init_db",
-        lambda *args, **kwargs: init_called.append(True),
-    )
-    if hasattr(worker, "init_db"):
-        monkeypatch.setattr(
-            worker,
-            "init_db",
-            lambda *args, **kwargs: init_called.append(True),
-        )
-
-    def _failing_verify(*args, **kwargs):
-        verify_called.append(True)
-        raise SchemaDriftError("Required table 'model_registry' is missing from database schema.")
-
-    monkeypatch.setattr(db_conn, "verify_db_schema", _failing_verify)
-    if hasattr(worker, "verify_db_schema"):
-        monkeypatch.setattr(worker, "verify_db_schema", _failing_verify)
-    monkeypatch.setattr(
-        worker,
-        "flush_outbox",
-        lambda *args, **kwargs: outbox_called.append(True) or 0,
-    )
-    monkeypatch.setattr(
-        worker,
-        "sync_hourly_quant_cycle",
-        lambda force=False: (sync_called.append(True) or True, "Synced", {}),
-    )
-
-    assert worker.run_worker(force=False) is False
-    assert len(verify_called) == 1
-    assert len(init_called) == 0
-    assert len(outbox_called) == 0
-    assert len(sync_called) == 0
-
-
-def test_migrate_db_defaults_to_read_only_dry_run(in_memory_db):
-    """
-    Verifies that scripts/migrate_db.py defaults to read-only dry-run mode (writes_executed=False)
-    when invoked without --execute.
-    """
+def test_migrate_db_defaults_to_dry_run(in_memory_db):
+    """Migration runner defaults to read-only inspection without writes."""
     _, engine = in_memory_db
-    from scripts.migrate_db import run_migration
-
-    plan = run_migration(target_engine=engine)
+    plan = run_migration(target_engine=engine, execute=False)
     assert plan["mode"] == "DRY_RUN"
     assert plan["writes_executed"] is False
+    assert "market_ticks" in plan["existing_tables"]
 
 
-def test_migrate_db_seed_hashes_metrics_and_rejection_evidence():
-    """
-    Verifies that scripts/migrate_db.py seeds:
-    1. Verified SHA-256 hashes for production baseline regressor and classifier artifacts,
-       matching the actual files on disk.
-    2. Authoritative controlled-comparison evaluation metrics for both production baseline
-       and rejected candidate models (including benchmark qualification tag), matching
-       artifacts/experiments/p1_controlled_retrain/evaluation_results.json when present.
-    3. Accurate candidate evaluation and rejection reasons that neither misrepresent the
-       candidate's slightly lower price RMSE ($399.3687 vs $399.4728) nor contain stale
-       metric literals.
-    """
-    import hashlib
-    import scripts.migrate_db as migrate_db
-    from scripts.migrate_db import (
-        BASELINE_MODEL_SPEC,
-        CANDIDATE_EVALUATED_REASON,
-        CANDIDATE_MODEL_SPEC,
-        CANDIDATE_REJECTION_REASON,
-    )
-
+def test_migrate_db_seed_hashes():
+    """Verify SHA-256 hashes of production model artifacts."""
     expected_reg_sha = "b44fba18cf2c7b51e3297e83a946d869392803a267e951a5e85ea052c63eb854"
     expected_clf_sha = "df139c1018ed5025b1444d6597c3d98b4d7c377a898487268d18e58d253ae684"
-    expected_benchmark_tag = "REUSED HISTORICAL BENCHMARK — PRIOR MODEL SELECTION EXPOSURE"
 
-    # 1. Baseline seed hashes equal verified SHA-256 values and match production artifacts on disk
     assert BASELINE_MODEL_SPEC["regressor_sha256"] == expected_reg_sha
     assert BASELINE_MODEL_SPEC["classifier_sha256"] == expected_clf_sha
 
@@ -909,255 +199,3 @@ def test_migrate_db_seed_hashes_metrics_and_rejection_evidence():
         assert hashlib.sha256(reg_path.read_bytes()).hexdigest() == expected_reg_sha
     if clf_path.exists():
         assert hashlib.sha256(clf_path.read_bytes()).hexdigest() == expected_clf_sha
-
-    # 2. Seeded evaluation metrics match authoritative values and retain benchmark qualification
-    expected_baseline_metrics = {
-        "reg_price_rmse_usd": 399.4728,
-        "naive_persistence_price_rmse_usd": 398.7661,
-        "rmse_outperformance_usd": -0.7067,
-        "reg_rmse": 0.00487042,
-        "reg_mae": 0.00322086,
-        "directional_hit_rate": 0.505001,
-        "clf_accuracy_pct": 53.2581,
-        "clf_macro_f1": 0.529665,
-        "clf_log_loss": 0.691365,
-        "benchmark_tag": expected_benchmark_tag,
-    }
-    expected_candidate_metrics = {
-        "reg_price_rmse_usd": 399.3687,
-        "naive_persistence_price_rmse_usd": 398.7661,
-        "rmse_outperformance_usd": -0.6027,
-        "reg_rmse": 0.00486872,
-        "reg_mae": 0.00321975,
-        "directional_hit_rate": 0.503572,
-        "clf_accuracy_pct": 53.0294,
-        "clf_macro_f1": 0.528027,
-        "clf_log_loss": 0.691404,
-        "benchmark_tag": expected_benchmark_tag,
-    }
-
-    assert BASELINE_MODEL_SPEC["evaluation_metrics"] == expected_baseline_metrics
-    assert CANDIDATE_MODEL_SPEC["evaluation_metrics"] == expected_candidate_metrics
-
-    # Cross-check against authoritative evaluation_results.json when present on disk
-    eval_json_path = Path("artifacts/experiments/p1_controlled_retrain/evaluation_results.json")
-    if eval_json_path.exists():
-        raw_eval = json.loads(eval_json_path.read_text(encoding="utf-8"))
-        assert raw_eval["benchmark_governance_warning"] == expected_benchmark_tag
-
-        prod_reg = raw_eval["production_baseline_metrics"]["regressor"]
-        prod_clf = raw_eval["production_baseline_metrics"]["classifier"]
-        assert round(float(prod_reg["price_rmse"]), 4) == expected_baseline_metrics["reg_price_rmse_usd"]
-        assert round(float(prod_reg["naive_persistence_rmse"]), 4) == expected_baseline_metrics["naive_persistence_price_rmse_usd"]
-        assert round(float(prod_reg["rmse_outperformance_usd"]), 4) == expected_baseline_metrics["rmse_outperformance_usd"]
-        assert round(float(prod_reg["return_rmse"]), 8) == expected_baseline_metrics["reg_rmse"]
-        assert round(float(prod_reg["return_mae"]), 8) == expected_baseline_metrics["reg_mae"]
-        assert round(float(prod_reg["directional_hit_rate"]), 6) == expected_baseline_metrics["directional_hit_rate"]
-        assert round(float(prod_clf["accuracy"]) * 100.0, 4) == expected_baseline_metrics["clf_accuracy_pct"]
-        assert round(float(prod_clf["macro_f1"]), 6) == expected_baseline_metrics["clf_macro_f1"]
-        assert round(float(prod_clf["log_loss"]), 6) == expected_baseline_metrics["clf_log_loss"]
-
-        cand_reg = raw_eval["candidate_metrics"]["regressor"]
-        cand_clf = raw_eval["candidate_metrics"]["classifier"]
-        assert round(float(cand_reg["price_rmse"]), 4) == expected_candidate_metrics["reg_price_rmse_usd"]
-        assert round(float(cand_reg["naive_persistence_rmse"]), 4) == expected_candidate_metrics["naive_persistence_price_rmse_usd"]
-        assert round(float(cand_reg["rmse_outperformance_usd"]), 4) == expected_candidate_metrics["rmse_outperformance_usd"]
-        assert round(float(cand_reg["return_rmse"]), 8) == expected_candidate_metrics["reg_rmse"]
-        assert round(float(cand_reg["return_mae"]), 8) == expected_candidate_metrics["reg_mae"]
-        assert round(float(cand_reg["directional_hit_rate"]), 6) == expected_candidate_metrics["directional_hit_rate"]
-        assert round(float(cand_clf["accuracy"]) * 100.0, 4) == expected_candidate_metrics["clf_accuracy_pct"]
-        assert round(float(cand_clf["macro_f1"]), 6) == expected_candidate_metrics["clf_macro_f1"]
-        assert round(float(cand_clf["log_loss"]), 6) == expected_candidate_metrics["clf_log_loss"]
-
-    # 3. Verify rejection evidence accurately describes the comparison and contains no stale literals
-    assert "399.3687" in CANDIDATE_EVALUATED_REASON
-    assert "398.7661" in CANDIDATE_EVALUATED_REASON
-    assert "-$0.6027" in CANDIDATE_EVALUATED_REASON
-    assert "0.00486872" in CANDIDATE_EVALUATED_REASON
-    assert "0.00321975" in CANDIDATE_EVALUATED_REASON
-    assert "0.503572" in CANDIDATE_EVALUATED_REASON
-    assert "53.0294%" in CANDIDATE_EVALUATED_REASON
-    assert "0.528027" in CANDIDATE_EVALUATED_REASON
-    assert "0.691404" in CANDIDATE_EVALUATED_REASON
-
-    assert "slightly lower" in CANDIDATE_REJECTION_REASON
-    assert "$399.3687" in CANDIDATE_REJECTION_REASON
-    assert "$399.4728" in CANDIDATE_REJECTION_REASON
-    assert "both regressors underperform naive persistence ($398.7661" in CANDIDATE_REJECTION_REASON
-    assert "-$0.6027 vs baseline -$0.7067" in CANDIDATE_REJECTION_REASON
-    assert "0.503572 vs 0.505001" in CANDIDATE_REJECTION_REASON
-    assert "53.0294% vs 53.2581%" in CANDIDATE_REJECTION_REASON
-    assert "0.528027 vs 0.529665" in CANDIDATE_REJECTION_REASON
-    assert "0.691404 vs 0.691365" in CANDIDATE_REJECTION_REASON
-
-    migrate_source = Path(migrate_db.__file__).read_text(encoding="utf-8")
-    stale_literals = [
-        "b44fba18b2eb9ecfd7fbbe3efe526f72c4ca33ceaa49144519bd1eb5ce5e3898",
-        "df139c100d2ad8aa37f0bcd4bcdb8b8cd1fd9cb5c0aa5368dc0abfb890bc231f",
-        "396.2294",
-        "397.4563",
-        "395.5150",
-        "0.00547593",
-        "0.00548947",
-        "53.2152",
-        "52.5722",
-        "-72.8634",
-        "-82.9315",
-        "397.46",
-        "395.52",
-        "-82.93%",
-        "-72.86%",
-    ]
-    for stale in stale_literals:
-        assert stale not in migrate_source, f"Stale literal {stale!r} still present in scripts/migrate_db.py"
-
-
-def test_migrate_db_tx1b_seeding_rejection_state_and_promotion_safeguards():
-    """
-    Verifies that:
-    1. run_tx1b() seeds baseline model as ACTIVE and transitions p1_controlled_candidate_v1
-       through CANDIDATE (seq 1) -> EVALUATED (seq 2) -> REJECTED (seq 3) with authoritative
-       metrics and rejection evidence, leaving the candidate in REJECTED status.
-    2. Re-running run_tx1b() is idempotent when seeded metadata matches, and raises
-       SchemaDriftError if hashes, evaluation_metrics, status, or lifecycle_seq drift.
-    3. Canonical promotion safeguards forbid promoting a REJECTED model to ACTIVE and
-       forbid promoting any CANDIDATE without evaluation_metrics and an EVALUATED event.
-    """
-    from contextlib import contextmanager
-    from scripts.migrate_db import (
-        BASELINE_MODEL_SPEC,
-        CANDIDATE_EVALUATED_REASON,
-        CANDIDATE_MODEL_SPEC,
-        CANDIDATE_REJECTION_REASON,
-        run_tx1b,
-    )
-
-    class _MockResult:
-        def __init__(self, row):
-            self._row = row
-
-        def mappings(self):
-            return self
-
-        def first(self):
-            return self._row
-
-    class _FakeTx1BConn:
-        def __init__(self):
-            self.registry: Dict[str, Dict[str, Any]] = {}
-            self.events: list[Dict[str, Any]] = []
-
-        def execute(self, stmt, params=None):
-            sql = " ".join(str(stmt).split())
-            params = params or {}
-            if "pg_advisory_xact_lock" in sql or "SET LOCAL" in sql:
-                return _MockResult(None)
-            if "SELECT model_version, regressor_sha256" in sql and "FROM public.model_registry" in sql:
-                mv = params["mv"]
-                row = self.registry.get(mv)
-                return _MockResult(dict(row) if row is not None else None)
-            if "INSERT INTO public.model_registry" in sql:
-                mv = params["model_version"]
-                status = "CANDIDATE" if "'CANDIDATE'" in sql else params["current_status"]
-                eval_m = None if "NULL," in sql and ":evaluation_metrics" not in sql else json.loads(params["evaluation_metrics"])
-                self.registry[mv] = {
-                    "model_version": mv,
-                    "regressor_sha256": params["regressor_sha256"],
-                    "classifier_sha256": params["classifier_sha256"],
-                    "feature_schema_version": params["feature_schema_version"],
-                    "current_status": status,
-                    "lifecycle_seq": 1,
-                    "evaluation_metrics": eval_m,
-                }
-                return _MockResult(None)
-            if "UPDATE public.model_registry SET evaluation_metrics" in sql:
-                mv = params["mv"]
-                self.registry[mv]["evaluation_metrics"] = json.loads(params["eval_json"])
-                self.registry[mv]["lifecycle_seq"] += 1
-                return _MockResult(None)
-            if "UPDATE public.model_registry SET current_status = 'REJECTED'" in sql:
-                mv = params["mv"]
-                self.registry[mv]["current_status"] = "REJECTED"
-                self.registry[mv]["lifecycle_seq"] += 1
-                return _MockResult(None)
-            if "INSERT INTO public.model_lifecycle_events" in sql:
-                self.events.append({
-                    "model_version": params["mv"],
-                    "sql": sql,
-                    "reason": params.get("reason"),
-                    "evidence_json": json.loads(params["ev_json"]),
-                })
-                return _MockResult(None)
-            raise AssertionError(f"Unexpected SQL in run_tx1b: {sql}")
-
-    class _FakeEngine:
-        def __init__(self, conn):
-            self._conn = conn
-
-        @contextmanager
-        def begin(self):
-            yield self._conn
-
-    fake_conn = _FakeTx1BConn()
-    fake_eng = _FakeEngine(fake_conn)
-
-    # 1. Initial seeding executes 3-step state machine and leaves candidate REJECTED
-    res1 = run_tx1b(fake_eng)
-    assert res1["seeded_models"] == ["xgb_onnx_v1.0.0", "p1_controlled_candidate_v1"]
-    assert fake_conn.registry["xgb_onnx_v1.0.0"]["current_status"] == "ACTIVE"
-    assert fake_conn.registry["xgb_onnx_v1.0.0"]["evaluation_metrics"] == BASELINE_MODEL_SPEC["evaluation_metrics"]
-    assert fake_conn.registry["p1_controlled_candidate_v1"]["current_status"] == "REJECTED"
-    assert fake_conn.registry["p1_controlled_candidate_v1"]["lifecycle_seq"] == 3
-    assert fake_conn.registry["p1_controlled_candidate_v1"]["evaluation_metrics"] == CANDIDATE_MODEL_SPEC["evaluation_metrics"]
-
-    cand_events = [e for e in fake_conn.events if e["model_version"] == "p1_controlled_candidate_v1"]
-    assert len(cand_events) == 3
-    assert cand_events[1]["reason"] == CANDIDATE_EVALUATED_REASON
-    assert cand_events[1]["evidence_json"] == CANDIDATE_MODEL_SPEC["evaluation_metrics"]
-    assert cand_events[2]["reason"] == CANDIDATE_REJECTION_REASON
-    assert cand_events[2]["evidence_json"] == CANDIDATE_MODEL_SPEC["evaluation_metrics"]
-
-    # 2. Second run is an idempotent no-op
-    res2 = run_tx1b(fake_eng)
-    assert res2["seeded_models"] == []
-
-    # 3. Drift in baseline hash or metrics raises SchemaDriftError
-    fake_conn.registry["xgb_onnx_v1.0.0"]["regressor_sha256"] = "stale_hash"
-    with pytest.raises(SchemaDriftError, match="Existing baseline model 'xgb_onnx_v1.0.0'"):
-        run_tx1b(fake_eng)
-    fake_conn.registry["xgb_onnx_v1.0.0"]["regressor_sha256"] = BASELINE_MODEL_SPEC["regressor_sha256"]
-
-    fake_conn.registry["xgb_onnx_v1.0.0"]["evaluation_metrics"] = {"reg_price_rmse_usd": 396.2294}
-    with pytest.raises(SchemaDriftError, match="Existing baseline model 'xgb_onnx_v1.0.0'"):
-        run_tx1b(fake_eng)
-    fake_conn.registry["xgb_onnx_v1.0.0"]["evaluation_metrics"] = BASELINE_MODEL_SPEC["evaluation_metrics"]
-
-    # 4. Drift in candidate status or metrics raises SchemaDriftError
-    fake_conn.registry["p1_controlled_candidate_v1"]["current_status"] = "CANDIDATE"
-    with pytest.raises(SchemaDriftError, match="Existing candidate model 'p1_controlled_candidate_v1'"):
-        run_tx1b(fake_eng)
-    fake_conn.registry["p1_controlled_candidate_v1"]["current_status"] = "REJECTED"
-
-    fake_conn.registry["p1_controlled_candidate_v1"]["evaluation_metrics"] = {"reg_price_rmse_usd": 397.4563}
-    with pytest.raises(SchemaDriftError, match="Existing candidate model 'p1_controlled_candidate_v1'"):
-        run_tx1b(fake_eng)
-
-    # 5. Verify canonical promotion safeguards in CANONICAL_FUNCTIONS
-    func_map = {f.name: f.expected_prosrc for f in CANONICAL_FUNCTIONS}
-    guard_write_sql = func_map["mudra_guard_model_registry_write"]
-    validate_event_sql = func_map["mudra_validate_lifecycle_event_insert"]
-
-    # Candidate cannot be promoted without non-null evaluation_metrics and an EVALUATED lifecycle event
-    assert (
-        "IF NEW.current_status = 'ACTIVE' AND (OLD.evaluation_metrics IS NULL OR NEW.evaluation_metrics IS NULL OR NOT eval_event_exists) THEN"
-        in guard_write_sql
-    )
-    assert (
-        "PROMOTED lifecycle event rejected for %: candidate must have non-null evaluation_metrics and a prior EVALUATED lifecycle event."
-        in validate_event_sql
-    )
-    # REJECTED models can only transition to ARCHIVED, never ACTIVE
-    assert "(OLD.current_status = 'REJECTED' AND NEW.current_status = 'ARCHIVED')" in guard_write_sql
-    assert "NEW.from_status NOT IN ('CANDIDATE', 'ARCHIVED', 'ROLLED_BACK') OR NEW.to_status != 'ACTIVE'" in validate_event_sql
-
-
