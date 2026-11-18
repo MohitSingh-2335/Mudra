@@ -11,25 +11,14 @@ if str(ROOT_DIR) not in sys.path:
 from sqlalchemy import Engine, inspect, text
 
 from config import (
-    ACTIVE_MODEL_VERSION,
-    CLASSIFIER_MODEL_SHA256,
-    FEATURE_SCHEMA_VERSION,
-    MIN_HURDLE_PCT,
-    PORTFOLIO_ADVISORY_LOCK_ID,
-    REGRESSOR_MODEL_SHA256,
+    ACTIVE_MODEL_VERSION, CLASSIFIER_MODEL_SHA256, FEATURE_SCHEMA_VERSION,
+    MIN_HURDLE_PCT, PORTFOLIO_ADVISORY_LOCK_ID, REGRESSOR_MODEL_SHA256,
 )
 from src.database.connection import (
-    CANONICAL_FUNCTIONS,
-    CANONICAL_TABLE_COLUMNS,
-    CANONICAL_TRIGGERS,
-    SchemaDriftError,
-    _TICK_ID_COLUMN_CACHE,
-    _classify_column_type,
-    create_db_engine,
-    engine as default_engine,
-    ensure_canonical_function,
-    ensure_canonical_trigger,
-    verify_db_schema,
+    CANONICAL_FUNCTIONS, CANONICAL_TABLE_COLUMNS, CANONICAL_TRIGGERS,
+    SchemaDriftError, _TICK_ID_COLUMN_CACHE, _classify_column_type,
+    create_db_engine, engine as default_engine, ensure_canonical_function,
+    ensure_canonical_trigger, verify_db_schema,
 )
 from src.database.models import Base
 
@@ -78,11 +67,7 @@ CANDIDATE_MODEL_SPEC: Dict[str, Any] = {
     "code_revision_sha": "99a27e297d3f54c91fdc2d170a05de536ec97fed",
 }
 
-CANDIDATE_EVALUATED_REASON = "Out-of-sample benchmark evaluation completed on 6,998 holdout rows."
-CANDIDATE_REJECTION_REASON = "Rejected candidate: underperforms naive persistence baseline."
 
-
-# Verify required tables and column nullabilities
 def _verify_new_tables_subset(conn: Any) -> None:
     inspector = inspect(conn)
     existing_tables = set(inspector.get_table_names())
@@ -98,7 +83,6 @@ def _verify_new_tables_subset(conn: Any) -> None:
                 raise SchemaDriftError(f"Column drift on '{tbl_name}.{col_name}'.")
 
 
-# Transaction 1A: DDL schema bootstrap, triggers, and functions
 def run_tx1a(target_engine: Engine, bootstrap_base_tables: bool = True) -> Dict[str, Any]:
     with target_engine.begin() as conn:
         if conn.dialect.name == "postgresql":
@@ -111,7 +95,6 @@ def run_tx1a(target_engine: Engine, bootstrap_base_tables: bool = True) -> Dict[
     return {"tx": "1A", "functions_created": created_funcs, "triggers_created": created_trigs}
 
 
-# Transaction 1B: Seed baseline and candidate model lineage
 def run_tx1b(target_engine: Engine) -> Dict[str, Any]:
     with target_engine.begin() as conn:
         if conn.dialect.name == "postgresql":
@@ -176,12 +159,10 @@ def run_tx1b(target_engine: Engine) -> Dict[str, Any]:
     return {"tx": "1B", "seeded_models": seeded}
 
 
-# Transaction 1C: Backfill historical market ticks into model predictions table
 def run_tx1c(target_engine: Engine) -> Dict[str, Any]:
     with target_engine.begin() as conn:
         if conn.dialect.name == "postgresql":
             conn.execute(text(f"SELECT pg_advisory_xact_lock({MIGRATION_ADVISORY_LOCK_ID});"))
-
         ins_res = conn.execute(
             text("""
                 INSERT INTO public.model_predictions (
@@ -205,11 +186,9 @@ def run_tx1c(target_engine: Engine) -> Dict[str, Any]:
             {"hurdle_pct": float(MIN_HURDLE_PCT)},
         )
         inserted = ins_res.rowcount if ins_res.rowcount is not None and ins_res.rowcount >= 0 else 0
-
     return {"tx": "1C", "inserted_predictions": inserted}
 
 
-# Transaction 2: Add foreign keys and unique constraints to paper portfolio
 def run_tx2(target_engine: Engine) -> Dict[str, Any]:
     with target_engine.begin() as conn:
         if conn.dialect.name == "postgresql":
@@ -218,38 +197,26 @@ def run_tx2(target_engine: Engine) -> Dict[str, Any]:
             conn.execute(text("ALTER TABLE public.paper_portfolio ADD COLUMN IF NOT EXISTS tick_id INTEGER;"))
             conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_paper_portfolio_tick_id ON public.paper_portfolio (tick_id) WHERE (tick_id IS NOT NULL);"))
             conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_market_ticks_timestamp ON public.market_ticks (timestamp);"))
-
     _TICK_ID_COLUMN_CACHE.clear()
     return {"tx": "2", "status": "completed"}
 
 
-# Dry run inspection plan without writes
 def inspect_dry_run_plan(target_engine: Engine) -> Dict[str, Any]:
     with target_engine.connect() as conn:
         inspector = inspect(conn)
-        existing_tables = set(inspector.get_table_names())
-        missing_tables = [t for t in CANONICAL_TABLE_COLUMNS if t not in existing_tables]
-        has_pp_tick_id = False
-        if "paper_portfolio" in existing_tables:
-            pp_cols = {c["name"] for c in inspector.get_columns("paper_portfolio")}
-            has_pp_tick_id = "tick_id" in pp_cols
-
-        tick_count = int(conn.execute(text("SELECT COUNT(*) FROM market_ticks WHERE predicted_price_1h IS NOT NULL")).scalar() or 0) if "market_ticks" in existing_tables else 0
-        rec_count = int(conn.execute(text("SELECT COUNT(*) FROM reconciliations")).scalar() or 0) if "reconciliations" in existing_tables else 0
-
+        existing = set(inspector.get_table_names())
+        missing = [t for t in CANONICAL_TABLE_COLUMNS if t not in existing]
+        has_pp_tick_id = "paper_portfolio" in existing and "tick_id" in {c["name"] for c in inspector.get_columns("paper_portfolio")}
+        tick_count = int(conn.execute(text("SELECT COUNT(*) FROM market_ticks WHERE predicted_price_1h IS NOT NULL")).scalar() or 0) if "market_ticks" in existing else 0
+        rec_count = int(conn.execute(text("SELECT COUNT(*) FROM reconciliations")).scalar() or 0) if "reconciliations" in existing else 0
         return {
-            "mode": "DRY_RUN",
-            "writes_executed": False,
-            "existing_tables": sorted(existing_tables),
-            "missing_tables": missing_tables,
-            "paper_portfolio_has_tick_id": has_pp_tick_id,
-            "eligible_market_ticks_for_backfill": tick_count,
-            "eligible_reconciliations_for_backfill": rec_count,
+            "mode": "DRY_RUN", "writes_executed": False, "existing_tables": sorted(existing),
+            "missing_tables": missing, "paper_portfolio_has_tick_id": has_pp_tick_id,
+            "eligible_market_ticks_for_backfill": tick_count, "eligible_reconciliations_for_backfill": rec_count,
             "duplicate_market_tick_timestamps": 0,
         }
 
 
-# Run all migration transactions sequentially
 def run_migration(target_engine: Optional[Engine] = None, execute: bool = False, bootstrap_base_tables: bool = True) -> Dict[str, Any]:
     eng = target_engine or default_engine
     if not execute:
