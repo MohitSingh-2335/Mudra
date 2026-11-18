@@ -8,17 +8,9 @@ from unittest.mock import MagicMock
 
 import config
 from config import (
-    INITIAL_CAPITAL_USD,
-    TAKER_FEE_RATE,
-    SLIPPAGE_RATE,
-    TOTAL_FRICTION_PER_SIDE_RATE,
-    ROUND_TRIP_FRICTION_RATE,
-    MIN_HURDLE_RATE,
-    TAKER_FEE_PCT,
-    SLIPPAGE_PCT,
-    ROUND_TRIP_FRICTION_PCT,
-    MIN_HURDLE_PCT,
-    _parse_execution_cost_rate,
+    INITIAL_CAPITAL_USD, TAKER_FEE_RATE, SLIPPAGE_RATE, TOTAL_FRICTION_PER_SIDE_RATE,
+    ROUND_TRIP_FRICTION_RATE, MIN_HURDLE_RATE, TAKER_FEE_PCT, SLIPPAGE_PCT,
+    ROUND_TRIP_FRICTION_PCT, MIN_HURDLE_PCT, _parse_execution_cost_rate,
 )
 from src.database.models import Base
 from src.engine.paper_portfolio import execute_paper_order, get_portfolio_summary
@@ -64,8 +56,7 @@ def test_env_var_parsing(monkeypatch):
 def test_db():
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(bind=engine)
-    session_factory = sessionmaker(bind=engine)
-    session = session_factory()
+    session = sessionmaker(bind=engine)()
     yield session
     session.close()
 
@@ -84,7 +75,7 @@ def test_paper_portfolio_exact_cost_deduction(test_db):
     assert r_buy.execution_price == pytest.approx(expected_exec_price, abs=1e-4)
     assert r_buy.btc_amount == pytest.approx(expected_btc, abs=1e-7)
 
-    r_sell = execute_paper_order(test_db, "SELL", 62000.0)
+    execute_paper_order(test_db, "SELL", 62000.0)
     summary = get_portfolio_summary(test_db, current_price=62000.0)
     assert summary["btc_balance"] == pytest.approx(0.0, abs=1e-8)
     assert summary["cash_balance"] - INITIAL_CAPITAL_USD == pytest.approx(summary["realized_pnl_usd"], abs=1e-2)
@@ -118,8 +109,7 @@ def test_threshold_sweeper_slippage():
             return np.array([[0.2, 0.8], [0.8, 0.2], [0.8, 0.2]])
 
     eq_df, tl_df = run_backtest_threshold(test_df, MockModel(), MockScaler(), threshold=0.50)
-    assert len(tl_df) == 1
-    assert "equity" in eq_df.columns
+    assert len(tl_df) == 1 and "equity" in eq_df.columns
 
 
 def test_agent_nodes_cost_alignment():
@@ -149,17 +139,14 @@ def test_risk_critic_validation_fail_closed():
             "ml_forecast": {"expected_return_pct": 0.5, "clears_hurdle": True},
             "engineered_features": {"volatility_range_pct": 1.0},
         })
-        assert out["risk_approved"] is False
-        assert out["recommended_position_pct"] == 0.0
-        assert "Unsupported Trade Action" in out["veto_reason"]
+        assert out["risk_approved"] is False and out["recommended_position_pct"] == 0.0 and "Unsupported Trade Action" in out["veto_reason"]
 
     out_nan = risk_critic_node({
         "symbol": "BTCUSDT", "current_price": 65000.0, "trade_action": "BUY",
         "ml_forecast": {"expected_return_pct": float("nan"), "clears_hurdle": True},
         "engineered_features": {"volatility_range_pct": 1.0},
     })
-    assert out_nan["risk_approved"] is False
-    assert out_nan["recommended_position_pct"] == 0.0
+    assert out_nan["risk_approved"] is False and out_nan["recommended_position_pct"] == 0.0
 
 
 def test_ui_generate_live_forecast_hurdle(monkeypatch):
@@ -178,9 +165,7 @@ def test_ui_generate_live_forecast_hurdle(monkeypatch):
     monkeypatch.setattr(fe, "predict_proba_with_validation", lambda m, df: np.array([[0.2, 0.8]]))
 
     res = app.generate_live_forecast(live_df, MagicMock(), MagicMock(), is_stale=False)
-    assert res is not None
-    assert res["cleared_hurdle"] is False
-    assert res["direction_badge"] == "SIDEWAYS (CHOP)"
+    assert res is not None and res["cleared_hurdle"] is False and res["direction_badge"] == "SIDEWAYS (CHOP)"
 
 
 def test_tab2_scenarios_and_graph(monkeypatch):
@@ -195,17 +180,11 @@ def test_tab2_scenarios_and_graph(monkeypatch):
 
 
 def test_format_portfolio_rationale():
-    below = app.format_portfolio_rationale({"action": "HOLD", "notes": "Sub-hurdle fee drag: preserving capital."})
-    assert f"below {MIN_HURDLE_PCT:.2f}% round-trip fee hurdle" in below
-
-    chop = app.format_portfolio_rationale({"action": "HOLD", "notes": "Neutral regime"})
-    assert "Sideways chop" in chop
-
-    veto = app.format_portfolio_rationale({"action": "HOLD", "notes": "Order vetoed due to volatility spike"})
-    assert "Risk Veto" in veto
+    assert f"below {MIN_HURDLE_PCT:.2f}% round-trip fee hurdle" in app.format_portfolio_rationale({"action": "HOLD", "notes": "Sub-hurdle fee drag: preserving capital."})
+    assert "Sideways chop" in app.format_portfolio_rationale({"action": "HOLD", "notes": "Neutral regime"})
+    assert "Risk Veto" in app.format_portfolio_rationale({"action": "HOLD", "notes": "Order vetoed due to volatility spike"})
 
 
 def test_model_pedigree_markdown(monkeypatch):
     md = app.build_model_pedigree_markdown()
-    assert "0.30% (Historical)" in md
-    assert f"`{ROUND_TRIP_FRICTION_PCT:.2f}%`" in md
+    assert "0.30% (Historical)" in md and f"`{ROUND_TRIP_FRICTION_PCT:.2f}%`" in md
