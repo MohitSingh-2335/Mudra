@@ -1,279 +1,144 @@
 # src/api/main.py
-
-# Pre-load onnxruntime before numerical engines to prevent Windows OpenMP runtime collision (0xC0000005)
-try:
-    import onnxruntime  # noqa: F401
-except ImportError:
-    pass
-
 import os
 import sys
-from pathlib import Path
-
-# Ensure repository root is on sys.path
-ROOT_DIR = Path(__file__).resolve().parent.parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-# Guard stdout reconfiguration against Windows CRT pipe corruption
-if hasattr(sys.stdout, "reconfigure") and sys.stdout.isatty():
-    sys.stdout.reconfigure(encoding="utf-8")
-
 import logging
-import re
-
-logger = logging.getLogger("src.api.main")
-
-
-def _sanitize_log_message(msg: str) -> str:
-    """Masks database passwords, URLs with credentials, and secret tokens in logs."""
-    sanitized = re.sub(r"(://[^:]+:)[^@]+(@)", r"\1***\2", str(msg))
-    sanitized = re.sub(
-        r"(password|pwd|secret|token|api_key)=['\"]?[^'\"\s&]+['\"]?",
-        r"\1=***",
-        sanitized,
-        flags=re.IGNORECASE,
-    )
-    return sanitized
-
-from src.agents.market_analyst_agent import generate_market_commentary
-import joblib
-import pandas as pd
-import numpy as np
+from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from config import (
-    REGRESSOR_MODEL_PATH,
-    REGRESSOR_MODEL_SHA256,
-    CLASSIFIER_MODEL_PATH,
-    CLASSIFIER_MODEL_SHA256,
-    REGRESSOR_FEATURES,
-    CLASSIFIER_FEATURES
+    REGRESSOR_MODEL_PATH, REGRESSOR_MODEL_SHA256,
+    CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256,
+    REGRESSOR_FEATURES, CLASSIFIER_FEATURES
 )
 from src.model_loader import load_verified_model
 from src.feature_engineering import validate_inference_features, predict_with_validation
 from src.explainability import get_tree_explainer, explain_single_prediction
+from src.agents.market_analyst_agent import generate_market_commentary
 from src.api.schemas import (
-    ACTIVE_MODEL_VERSION,
-    HealthResponse,
-    PredictRequest,
-    PredictResponse,
-    ExplainResponse,
-    FeatureAttribution,
-    FullAnalysisResponse,
-    AgentTradeRequest,
-    AgentTradeResponse,
-    ReconciliationSummaryResponse,
+    ACTIVE_MODEL_VERSION, HealthResponse, PredictRequest, PredictResponse,
+    ExplainResponse, FeatureAttribution, FullAnalysisResponse,
+    AgentTradeRequest, AgentTradeResponse, ReconciliationSummaryResponse,
     PortfolioSummaryResponse,
 )
 
+logger = logging.getLogger("src.api.main")
 __all__ = ["app", "lifespan", "models", "ACTIVE_MODEL_VERSION"]
-
-# Global model store for high-throughput serving
 models = {}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Loads models and explainers into memory at startup."""
-    print("[INIT] Initializing Mudra Production Inference Engine...")
-    try:
-        reg_model = load_verified_model(REGRESSOR_MODEL_PATH, REGRESSOR_MODEL_SHA256)
-        clf_model = load_verified_model(CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256)
-
-        # Force CPU device for sub-millisecond single-row inference
-        reg_model.set_params(device="cpu")
-        clf_model.set_params(device="cpu")
-
-        models["regressor"] = reg_model
-        models["classifier"] = clf_model
-        models["explainer"] = get_tree_explainer(clf_model)
-        print("[INIT] Models and TreeSHAP explainer loaded successfully.")
-    except Exception as e:
-        print(f"[ERROR] Failed to load model artifacts: {e}")
-        raise RuntimeError(f"Model initialization failure: {e}")
-
+    reg = load_verified_model(REGRESSOR_MODEL_PATH, REGRESSOR_MODEL_SHA256)
+    clf = load_verified_model(CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256)
+    reg.set_params(device="cpu")
+    clf.set_params(device="cpu")
+    models["regressor"] = reg
+    models["classifier"] = clf
+    models["explainer"] = get_tree_explainer(clf)
     yield
-    print("[SHUTDOWN] Shutting down Mudra Inference Engine...")
     models.clear()
 
 
-app = FastAPI(
-    title="Mudra Quantitative BTC Trading Engine API",
-    description="High-performance async REST API serving tuned XGBoost models, TreeSHAP attributions, and Gemini Agentic RAG.",
-    version="1.0.0",
-    lifespan=lifespan
-)
-
-# Allow Cross-Origin Requests
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="Mudra Quantitative Trading API", version="1.0.0", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Monitoring"])
 async def health_check():
-    """Endpoint for load balancers and container health probes."""
-    return HealthResponse(
-        status="ok",
-        model_version=ACTIVE_MODEL_VERSION
-    )
+    return HealthResponse(status="ok", model_version=ACTIVE_MODEL_VERSION)
 
 
 @app.post("/predict", response_model=PredictResponse, tags=["Inference"])
 async def predict(req: PredictRequest):
-    """Generates numeric return and directional movement predictions."""
-    # 1. Validate required features
-    missing_reg = [f for f in REGRESSOR_FEATURES if f not in req.features]
-    missing_clf = [f for f in CLASSIFIER_FEATURES if f not in req.features]
-    if missing_reg or missing_clf:
-        missing_all = sorted(list(set(missing_reg + missing_clf)))
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Missing required feature fields: {missing_all}"
-        )
+    missing = sorted(list(set([f for f in REGRESSOR_FEATURES if f not in req.features] + [f for f in CLASSIFIER_FEATURES if f not in req.features])))
+    if missing:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Missing required feature fields: {missing}")
 
-    # 2. Build aligned DataFrames via centralized inference validation
     try:
         input_reg = validate_inference_features(req.features, model_type="regressor")
         input_clf = validate_inference_features(req.features, model_type="classifier")
     except ValueError as val_err:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Feature validation error: {val_err}"
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Feature validation error: {val_err}")
 
-    # 3. Model Inference via validated inference wrappers
     pred_return = float(predict_with_validation(models["regressor"], input_reg, model_type="regressor")[0])
     pred_price = float(req.current_price * (1.0 + pred_return))
     move_code = int(predict_with_validation(models["classifier"], input_clf, model_type="classifier")[0])
-    move_text = "Upward 📈" if move_code == 1 else "Downward 📉"
 
     return PredictResponse(
-        current_price=req.current_price,
-        predicted_price=round(pred_price, 2),
-        predicted_return=round(pred_return, 6),
-        directional_movement=move_text,
-        movement_code=move_code,
-        model_version=ACTIVE_MODEL_VERSION,
+        current_price=req.current_price, predicted_price=round(pred_price, 2),
+        predicted_return=round(pred_return, 6), directional_movement="Upward 📈" if move_code == 1 else "Downward 📉",
+        movement_code=move_code, model_version=ACTIVE_MODEL_VERSION,
     )
 
 
 @app.post("/explain", response_model=ExplainResponse, tags=["Explainability"])
 async def explain(req: PredictRequest):
-    """Computes local TreeSHAP feature attributions for a single market tick."""
     missing_clf = [f for f in CLASSIFIER_FEATURES if f not in req.features]
     if missing_clf:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Missing required classifier features for SHAP: {missing_clf}"
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Missing required classifier features for SHAP: {missing_clf}")
 
     try:
         input_clf = validate_inference_features(req.features, model_type="classifier")
     except ValueError as val_err:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Feature validation error: {val_err}"
-        )
-    base_val, top_pos, top_neg, fig = explain_single_prediction(models["explainer"], input_clf, top_n=4)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Feature validation error: {val_err}")
 
-    # Convert to schema
+    base_val, top_pos, top_neg, _ = explain_single_prediction(models["explainer"], input_clf, top_n=4)
     bullish = [FeatureAttribution(feature=d["feature"], shap_value=round(d["shap"], 4), actual_value=round(d["value"], 4)) for d in top_pos]
     bearish = [FeatureAttribution(feature=d["feature"], shap_value=round(d["shap"], 4), actual_value=round(d["value"], 4)) for d in top_neg]
 
-    return ExplainResponse(
-        base_value=round(float(base_val), 4),
-        top_bullish_drivers=bullish,
-        top_bearish_drivers=bearish
-    )
+    return ExplainResponse(base_value=round(float(base_val), 4), top_bullish_drivers=bullish, top_bearish_drivers=bearish)
 
 
 @app.post("/analyze", response_model=FullAnalysisResponse, tags=["Agentic AI"])
 async def analyze(req: PredictRequest):
-    """Fuses numeric predictions, TreeSHAP attributions, and Gemini Agentic commentary."""
     pred_res = await predict(req)
     exp_res = await explain(req)
-
-    # Convert drivers back to dict format expected by agent
     pos_drivers = [{"feature": d.feature, "shap": d.shap_value, "value": d.actual_value} for d in exp_res.top_bullish_drivers]
     neg_drivers = [{"feature": d.feature, "shap": d.shap_value, "value": d.actual_value} for d in exp_res.top_bearish_drivers]
 
     report = generate_market_commentary(
-        current_price=pred_res.current_price,
-        pred_price=pred_res.predicted_price,
-        pred_return=pred_res.predicted_return,
-        pred_move_text=pred_res.directional_movement,
-        top_pos_drivers=pos_drivers,
-        top_neg_drivers=neg_drivers
+        current_price=pred_res.current_price, pred_price=pred_res.predicted_price,
+        pred_return=pred_res.predicted_return, pred_move_text=pred_res.directional_movement,
+        top_pos_drivers=pos_drivers, top_neg_drivers=neg_drivers
     )
-
-    return FullAnalysisResponse(
-        prediction=pred_res,
-        explanation=exp_res,
-        analyst_commentary=report
-    )
+    return FullAnalysisResponse(prediction=pred_res, explanation=exp_res, analyst_commentary=report)
 
 
 @app.post("/agents/trade", response_model=AgentTradeResponse, tags=["Multi-Agent LangGraph"])
 async def run_agent_trade(req: AgentTradeRequest):
-    """
-    Executes the 2-Node LangGraph Multi-Agent Trading System:
-    Node 1 (Strategist) synthesizes technicals, XGBoost return forecasts, and ChromaDB macro context.
-    Node 2 (Reflexion Risk Critic) audits the order against volatility limits, fee hurdles, and sizes the trade.
-    """
     from src.agents.trading_graph import run_trading_graph
     try:
         state = run_trading_graph(
-            symbol=req.symbol,
-            current_price=req.current_price,
-            market_data=req.market_data,
-            engineered_features=req.engineered_features,
-            ml_forecast=req.ml_forecast
+            symbol=req.symbol, current_price=req.current_price, market_data=req.market_data,
+            engineered_features=req.engineered_features, ml_forecast=req.ml_forecast
         )
         return AgentTradeResponse(**state)
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Multi-agent deliberation pipeline failed: {str(e)}"
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Multi-agent pipeline failed: {str(e)}")
 
 
 @app.get("/reconciliation/summary", response_model=ReconciliationSummaryResponse, tags=["Observability & Database"])
 async def get_reconciliation_metrics(lookback_hours: int = 168, model_version: Optional[str] = None):
-    """Returns rolling delayed reconciliation accuracy metrics from Neon PostgreSQL."""
     from src.database.queries import get_reconciliation_kpis
     try:
         return get_reconciliation_kpis(lookback_hours=lookback_hours, model_version=model_version)
     except Exception as e:
-        logger.error("Failed to fetch reconciliation metrics: error_type=%s", type(e).__name__)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Database query failed"
-        )
+        logger.error("Failed to fetch reconciliation metrics: %s", type(e).__name__)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database query failed")
 
 
 @app.get("/portfolio/summary", response_model=PortfolioSummaryResponse, tags=["Observability & Database"])
 async def get_portfolio_metrics(current_price: float = 83000.0):
-    """Returns current forward paper portfolio snapshot and excess Alpha from Neon."""
     from src.database.queries import get_portfolio_kpis
     try:
         return get_portfolio_kpis(current_price=current_price)
     except Exception as e:
-        logger.error("Failed to fetch portfolio metrics: error_type=%s", type(e).__name__)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Database query failed"
-        )
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("src.api.main:app", host="0.0.0.0", port=8000, reload=True)
+        logger.error("Failed to fetch portfolio metrics: %s", type(e).__name__)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database query failed")
