@@ -7,12 +7,10 @@ from sqlalchemy.orm import sessionmaker
 
 import config
 from config import ACTIVE_MODEL_VERSION, FEATURE_SCHEMA_VERSION
-from src.database.models import Base, MarketTick, ModelRegistry, PredictionInvestigation
-from src.database.connection import init_db, CANONICAL_TABLE_COLUMNS
-from src.database.queries import (
-    record_prediction_investigation,
-    get_prediction_investigations,
-    update_prediction_investigation_status,
+from src.database import (
+    CANONICAL_TABLE_COLUMNS, Base, MarketTick, ModelRegistry,
+    PredictionInvestigation, get_prediction_investigations, init_db,
+    record_prediction_investigation, update_prediction_investigation_status,
 )
 from src.engine import execute_paper_order, get_portfolio_summary, reconcile_pending_ticks
 from scripts.migrate_db import BASELINE_MODEL_SPEC, run_migration
