@@ -231,7 +231,7 @@ async def run_agent_trade(req: AgentTradeRequest):
 @app.get("/reconciliation/summary", response_model=ReconciliationSummaryResponse, tags=["Observability & Database"])
 async def get_reconciliation_metrics(lookback_hours: int = 168, model_version: Optional[str] = None):
     # fetches database reconciliation KPIs for model governance
-    from src.database.queries import get_reconciliation_kpis
+    from src.database import get_reconciliation_kpis
     try:
         return get_reconciliation_kpis(lookback_hours=lookback_hours, model_version=model_version)
     except Exception as e:
@@ -242,7 +242,7 @@ async def get_reconciliation_metrics(lookback_hours: int = 168, model_version: O
 @app.get("/portfolio/summary", response_model=PortfolioSummaryResponse, tags=["Observability & Database"])
 async def get_portfolio_metrics(current_price: float = 83000.0):
     # fetches live paper portfolio balance and performance statistics
-    from src.database.queries import get_portfolio_kpis
+    from src.database import get_portfolio_kpis
     try:
         return get_portfolio_kpis(current_price=current_price)
     except Exception as e:
