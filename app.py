@@ -42,9 +42,6 @@ from config import (
     MIN_HURDLE_PCT, REGRESSOR_MODEL_PATH, REGRESSOR_MODEL_SHA256,
     ROUND_TRIP_FRICTION_PCT, TOTAL_FRICTION_PER_SIDE_PCT,
 )
-import importlib
-import src.database
-importlib.reload(src.database)
 from src.agents import fetch_historical_candles, run_trading_graph
 from src.database import (
     get_db, get_latest_council_audit, get_latest_market_ticks,
