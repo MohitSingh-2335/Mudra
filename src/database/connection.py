@@ -22,30 +22,13 @@ logger = logging.getLogger(__name__)
 SECRETS_FILE = Path(".streamlit/secrets.toml")
 
 __all__ = [
-    "SchemaDriftError",
-    "FunctionSpec",
-    "TriggerSpec",
-    "CANONICAL_TABLE_COLUMNS",
-    "CANONICAL_FOREIGN_KEYS",
-    "CANONICAL_CONSTRAINTS",
-    "CANONICAL_INDEXES",
-    "CANONICAL_FUNCTIONS",
-    "CANONICAL_TRIGGERS",
-    "normalize_sql",
-    "normalize_pg_predicate",
-    "ensure_canonical_function",
-    "ensure_canonical_trigger",
-    "verify_db_schema",
-    "get_database_url",
-    "create_db_engine",
-    "engine",
-    "SessionLocal",
-    "get_db",
-    "has_tick_id_column",
-    "init_db",
-    "test_connection",
-    "_classify_column_type",
-    "_TICK_ID_COLUMN_CACHE",
+    "SchemaDriftError", "FunctionSpec", "TriggerSpec", "CANONICAL_TABLE_COLUMNS",
+    "CANONICAL_FOREIGN_KEYS", "CANONICAL_CONSTRAINTS", "CANONICAL_INDEXES",
+    "CANONICAL_FUNCTIONS", "CANONICAL_TRIGGERS", "normalize_sql",
+    "normalize_pg_predicate", "ensure_canonical_function", "ensure_canonical_trigger",
+    "verify_db_schema", "get_database_url", "create_db_engine", "engine",
+    "SessionLocal", "get_db", "has_tick_id_column", "init_db",
+    "test_connection", "_classify_column_type", "_TICK_ID_COLUMN_CACHE",
 ]
 
 
@@ -74,6 +57,7 @@ class TriggerSpec:
 
 
 def normalize_sql(sql_str: Optional[str]) -> str:
+    # strips comments and normalizes whitespace in SQL string
     if not sql_str:
         return ""
     no_comments = re.sub(r"--[^\r\n]*", " ", re.sub(r"/\*.*?\*/", " ", sql_str, flags=re.DOTALL))
@@ -85,21 +69,19 @@ def normalize_pg_predicate(pred_str: Optional[str]) -> str:
 
 
 def _classify_column_type(raw_type: str) -> str:
+    # simplifies SQL column types into canonical types
     t = str(raw_type).lower()
-    if "int" in t or "serial" in t:
-        return "integer"
-    if "double" in t or "float" in t or "real" in t or "numeric" in t:
-        return "float"
-    if "char" in t:
-        return "varchar"
-    if "text" in t:
-        return "text"
-    if "bool" in t:
-        return "boolean"
-    if "json" in t:
-        return "json"
-    if "timestamp" in t or "datetime" in t:
-        return "timestamp"
+    for pattern, canonical in [
+        (("int", "serial"), "integer"),
+        (("double", "float", "real", "numeric"), "float"),
+        (("char",), "varchar"),
+        (("text",), "text"),
+        (("bool",), "boolean"),
+        (("json",), "json"),
+        (("timestamp", "datetime"), "timestamp"),
+    ]:
+        if any(p in t for p in pattern):
+            return canonical
     return t
 
 
@@ -160,6 +142,7 @@ def ensure_canonical_trigger(conn: Any, spec: TriggerSpec) -> bool:
 
 
 def verify_db_schema(target_engine_or_conn: Optional[Any] = None, require_seed_models: bool = False) -> Dict[str, Any]:
+    # verifies all canonical tables exist in the target database
     target = target_engine_or_conn or engine
 
     @contextmanager
@@ -173,8 +156,7 @@ def verify_db_schema(target_engine_or_conn: Optional[Any] = None, require_seed_m
             yield target
 
     with _acquire_conn() as conn:
-        inspector = inspect(conn)
-        existing_tables = set(inspector.get_table_names())
+        existing_tables = set(inspect(conn).get_table_names())
         for tbl_name in CANONICAL_TABLE_COLUMNS:
             if tbl_name not in existing_tables:
                 raise SchemaDriftError(f"Required table '{tbl_name}' is missing from database schema.")
@@ -191,6 +173,7 @@ def _normalize_db_url(url: str) -> str:
 
 
 def get_database_url() -> str:
+    # discovers database URL from env, secrets.toml, or local sqlite fallback
     db_url = os.getenv("DATABASE_URL")
     if db_url:
         return _normalize_db_url(db_url)
@@ -213,6 +196,7 @@ def get_database_url() -> str:
 
 
 def create_db_engine(db_url: Optional[str] = None) -> Engine:
+    # creates SQLAlchemy database engine with connection pooling
     url = db_url or get_database_url()
     if "sqlite" in url:
         return create_engine(url, connect_args={"check_same_thread": False}, echo=False)
@@ -225,6 +209,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 @contextmanager
 def get_db() -> Generator[Session, None, None]:
+    # transaction-scoped database session context manager
     session: Session = SessionLocal()
     try:
         yield session
@@ -240,6 +225,7 @@ _TICK_ID_COLUMN_CACHE: Dict[int, bool] = {}
 
 
 def has_tick_id_column(session: Session) -> bool:
+    # checks if paper_portfolio has tick_id column with id caching
     try:
         bind = session.get_bind()
         bind_id = id(bind)
@@ -247,8 +233,7 @@ def has_tick_id_column(session: Session) -> bool:
             return _TICK_ID_COLUMN_CACHE[bind_id]
         inspector = inspect(session.connection() if hasattr(session, "connection") else bind)
         if inspector.has_table("paper_portfolio"):
-            cols = {c["name"] for c in inspector.get_columns("paper_portfolio")}
-            present = "tick_id" in cols
+            present = "tick_id" in {c["name"] for c in inspector.get_columns("paper_portfolio")}
             _TICK_ID_COLUMN_CACHE[bind_id] = present
             return present
     except Exception:
@@ -277,12 +262,14 @@ if __name__ == "src.database.connection":
 
 
 def init_db(target_engine: Optional[Engine] = None) -> None:
+    # creates all canonical tables
     target = target_engine or engine
     Base.metadata.create_all(bind=target)
     _TICK_ID_COLUMN_CACHE[id(target)] = True
 
 
 def test_connection() -> Tuple[bool, str, float]:
+    # verifies live connection and measures ping latency
     start = time.perf_counter()
     try:
         with engine.connect() as conn:
