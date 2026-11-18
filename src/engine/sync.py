@@ -28,7 +28,7 @@ from config import (
     EXCHANGE_RETRY_MAX_ATTEMPTS, EXCHANGE_RETRY_MAX_BACKOFF, EXCHANGE_RETRY_TOTAL_DEADLINE,
     FEATURE_SCHEMA_VERSION, MIN_HURDLE_PCT,
 )
-from src.agents.council import calculate_technical_signals, get_model_return_forecast, run_trading_graph
+from src.agents import calculate_technical_signals, get_model_return_forecast, run_trading_graph
 from src.database.connection import get_db, has_tick_id_column, test_connection
 from src.database.models import CouncilAudit, MarketTick, PaperPortfolio, Reconciliation
 from src.engine.paper_portfolio import execute_paper_order, get_portfolio_summary
