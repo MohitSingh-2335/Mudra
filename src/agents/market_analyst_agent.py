@@ -1,17 +1,10 @@
-# src/agents/market_analyst_agent.py
 import json
 import logging
 import os
 import re
-import sys
-from pathlib import Path
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
-
-ROOT_DIR = Path(__file__).resolve().parents[2]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
 
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 logging.getLogger("chromadb.telemetry").setLevel(logging.ERROR)
@@ -32,17 +25,18 @@ GEMINI_MODEL_CANDIDATES = ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-f
 
 
 def _read_raw_gemini_api_key() -> Optional[str]:
-    key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if key and key.strip() and key.strip() != "your_gemini_api_key_here":
-        return key.strip()
+    for key_name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        val = os.getenv(key_name)
+        if val and val.strip() and val.strip() != "your_gemini_api_key_here":
+            return val.strip()
     try:
         import streamlit as st
         if hasattr(st, "secrets"):
-            for sec in ["Google", "google", "gemini", "Gemini"]:
+            for sec in ("Google", "google", "gemini", "Gemini"):
                 if sec in st.secrets and "api_key" in st.secrets[sec]:
-                    val = str(st.secrets[sec]["api_key"]).strip()
-                    if val and val != "your_gemini_api_key_here":
-                        return val
+                    v = str(st.secrets[sec]["api_key"]).strip()
+                    if v and v != "your_gemini_api_key_here":
+                        return v
             for var in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
                 if var in st.secrets and str(st.secrets[var]).strip() != "your_gemini_api_key_here":
                     return str(st.secrets[var]).strip()
@@ -52,21 +46,22 @@ def _read_raw_gemini_api_key() -> Optional[str]:
 
 
 def _get_gemini_api_key() -> Optional[str]:
-    if os.getenv("PYTEST_CURRENT_TEST"):
-        return None
-    return _read_raw_gemini_api_key()
+    return None if os.getenv("PYTEST_CURRENT_TEST") else _read_raw_gemini_api_key()
 
 
 def get_gemini_status() -> Dict[str, Any]:
     raw_key = _read_raw_gemini_api_key()
     preferred = os.getenv("GEMINI_MODEL_NAME", GEMINI_MODEL_CANDIDATES[0])
-    if raw_key:
-        masked = f"{raw_key[:4]}...{raw_key[-4:]}" if len(raw_key) > 8 else "Configured"
-        return {"configured": True, "masked_key": masked, "preferred_model": preferred, "fallback_models": list(GEMINI_MODEL_CANDIDATES), "label": f"Gemini AI: Active ({preferred})"}
-    return {"configured": False, "masked_key": None, "preferred_model": preferred, "fallback_models": list(GEMINI_MODEL_CANDIDATES), "label": "Gemini AI: Rule Engine Fallback (No API Key)"}
+    masked = f"{raw_key[:4]}...{raw_key[-4:]}" if raw_key and len(raw_key) > 8 else ("Configured" if raw_key else None)
+    return {
+        "configured": bool(raw_key), "masked_key": masked, "preferred_model": preferred,
+        "fallback_models": list(GEMINI_MODEL_CANDIDATES),
+        "label": f"Gemini AI: Active ({preferred})" if raw_key else "Gemini AI: Rule Engine Fallback (No API Key)",
+    }
 
 
 def generate_with_gemini_fallback(api_key: str, prompt: str, system_instruction: Optional[str] = None) -> str:
+    # Generates LLM content with automatic tiered model fallback (2.5 -> 2.0 -> 1.5)
     import google.generativeai as genai
     genai.configure(api_key=api_key)
     custom_model = os.getenv("GEMINI_MODEL_NAME")
@@ -123,15 +118,10 @@ def generate_market_commentary(
     top_pos_drivers: List[Dict[str, Any]], top_neg_drivers: List[Dict[str, Any]],
     market_snapshot: Optional[Dict[str, Any]] = None
 ) -> MarketAnalystReport:
+    # Synthesizes quantitative model forecast, SHAP drivers, and RAG into executive report
     from src.agents.rag_agent import get_rag_agent
     rag = get_rag_agent()
-    market_snapshot = market_snapshot or {}
-
-    query_terms = [pred_move_text]
-    if top_pos_drivers:
-        query_terms.append(top_pos_drivers[0].get("feature", ""))
-    if top_neg_drivers:
-        query_terms.append(top_neg_drivers[0].get("feature", ""))
+    query_terms = [pred_move_text] + ([top_pos_drivers[0].get("feature", "")] if top_pos_drivers else []) + ([top_neg_drivers[0].get("feature", "")] if top_neg_drivers else [])
     rag_docs = rag.retrieve_market_context(" ".join(query_terms).strip(), n_results=2)
 
     api_key = _get_gemini_api_key()
@@ -142,14 +132,17 @@ def generate_market_commentary(
         pos_str = ", ".join([f"{d['feature']}: SHAP={d['shap']:+.4f}" for d in top_pos_drivers]) or "None"
         neg_str = ", ".join([f"{d['feature']}: SHAP={d['shap']:+.4f}" for d in top_neg_drivers]) or "None"
         rag_context_str = "\n".join([f"- {d}" for d in rag_docs])
-        prompt = f"""You are Mudra AI's Lead Quantitative Strategist.
-Current BTC: ${current_price:,.2f}, Predicted: ${pred_price:,.2f} ({pred_return:+.4%}, {pred_move_text})
-Bullish drivers: {pos_str}
-Bearish drivers: {neg_str}
-RAG context: {rag_context_str}
-Return strictly JSON with keys: trade_thesis, conviction_score, executive_summary, quantitative_driver_analysis, macro_market_context, key_risks."""
+        prompt = (
+            f"You are Mudra AI's Lead Quantitative Strategist.\n"
+            f"Current BTC: ${current_price:,.2f}, Predicted: ${pred_price:,.2f} ({pred_return:+.4%}, {pred_move_text})\n"
+            f"Bullish drivers: {pos_str}\nBearish drivers: {neg_str}\nRAG context: {rag_context_str}\n"
+            f"Return strictly JSON with keys: trade_thesis, conviction_score, executive_summary, quantitative_driver_analysis, macro_market_context, key_risks."
+        )
         raw_text = generate_with_gemini_fallback(api_key, prompt)
-        report_data = json.loads(_clean_json_response(raw_text))
+        clean_text = raw_text.strip()
+        match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", clean_text)
+        report_data = json.loads(match.group(1).strip() if match else clean_text)
+
         valid_theses = {"STRONG BULLISH", "MODERATE BULLISH", "NEUTRAL", "MODERATE BEARISH", "STRONG BEARISH"}
         raw_thesis = str(report_data.get("trade_thesis", "NEUTRAL")).upper().strip()
         report_data["trade_thesis"] = raw_thesis if raw_thesis in valid_theses else "NEUTRAL"
