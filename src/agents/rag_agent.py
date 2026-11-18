@@ -1,228 +1,96 @@
 # src/agents/rag_agent.py
-"""
-Mudra Market Domain Vector Store & Semantic Retrieval Engine (RAG).
-
-Provides persistent vector search using ChromaDB and Google AI Studio's
-768-dimensional text-embedding-004 API. Enables zero-local-PyTorch / zero-bloat
-semantic context retrieval for the Quantitative Strategist node.
-"""
-
 import logging
 import os
 import sys
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
-if hasattr(sys.stdout, "reconfigure") and sys.stdout.isatty():
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
-
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-# Silence ChromaDB internal telemetry warnings
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 logging.getLogger("chromadb.telemetry").setLevel(logging.ERROR)
 logging.getLogger("chromadb.telemetry.posthog").setLevel(logging.ERROR)
 
-try:
-    import google.generativeai as genai
-except ImportError:
-    genai = None  # type: ignore
 import chromadb
 from chromadb.config import Settings
 from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 from config import CHROMADB_DIR, CHROMA_COLLECTION_NAME
 
 __all__ = [
-    "MarketKnowledgeRAG",
-    "get_rag_agent",
-    "get_rag_collection",
-    "initialize_knowledge_base",
-    "retrieve_rag_context",
-    "index_reconciled_outcome_memory",
-    "query_similar_error_memories",
+    "MarketKnowledgeRAG", "get_rag_agent", "get_rag_collection",
+    "initialize_knowledge_base", "retrieve_rag_context",
+    "index_reconciled_outcome_memory", "query_similar_error_memories",
 ]
 
 
 def _get_gemini_api_key() -> Optional[str]:
-    """Retrieves the Gemini API key across .env, st.secrets, and secrets.toml."""
     if os.getenv("PYTEST_CURRENT_TEST"):
         return None
-    # 1. Environment variables
     key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if key and key != "your_gemini_api_key_here":
-        return key.strip()
-
-    # 2. Active Streamlit session
-    try:
-        import streamlit as st
-        if hasattr(st, "secrets"):
-            for section in ["Google", "google", "gemini", "Gemini"]:
-                if section in st.secrets and "api_key" in st.secrets[section]:
-                    return str(st.secrets[section]["api_key"]).strip()
-            if "GEMINI_API_KEY" in st.secrets:
-                return str(st.secrets["GEMINI_API_KEY"]).strip()
-            if "GOOGLE_API_KEY" in st.secrets:
-                return str(st.secrets["GOOGLE_API_KEY"]).strip()
-    except Exception:
-        pass
-
-    # 3. Standalone secrets.toml fallback
-    try:
-        secrets_path = os.path.join(".streamlit", "secrets.toml")
-        if os.path.exists(secrets_path):
-            import tomllib
-            with open(secrets_path, "rb") as f:
-                data = tomllib.load(f)
-            for section in ["Google", "google", "gemini", "Gemini"]:
-                if section in data and "api_key" in data[section]:
-                    return str(data[section]["api_key"]).strip()
-            if "GEMINI_API_KEY" in data:
-                return str(data["GEMINI_API_KEY"]).strip()
-            if "GOOGLE_API_KEY" in data:
-                return str(data["GOOGLE_API_KEY"]).strip()
-    except Exception:
-        pass
-
-    return None
+    return key.strip() if key and key.strip() != "your_gemini_api_key_here" else None
 
 
 class GeminiEmbeddingFunction(EmbeddingFunction):
-    """
-    Lightweight, pure Python embedding function using Google AI Studio's
-    text-embedding-004 API (768-dimensional). Zero local PyTorch/ONNX dependencies.
-    """
-    def __init__(self, api_key: Optional[str] = None, model_name: str = "models/text-embedding-004"):
+    def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or _get_gemini_api_key()
-        self.model_name = model_name
         if self.api_key:
-            genai.configure(api_key=self.api_key)
+            try:
+                import google.generativeai as genai
+                genai.configure(api_key=self.api_key)
+            except Exception:
+                pass
 
     def __call__(self, input: Documents) -> Embeddings:
         if not self.api_key:
-            # Fallback if no API key is configured
+            return [[0.0] * 768 for _ in input]
+        try:
+            import google.generativeai as genai
+            res = genai.embed_content(model="models/text-embedding-004", content=input, output_dimensionality=768)
+            return res["embedding"]
+        except Exception:
             return [[0.0] * 768 for _ in input]
 
-        if genai is None:
-            return [[0.0] * 768 for _ in input]
-        embed_candidates = (self.model_name, "models/gemini-embedding-001", "models/text-embedding-004")
-        seen = []
-        for m_cand in embed_candidates:
-            if m_cand not in seen:
-                seen.append(m_cand)
-        last_err = None
-        for m_cand in seen:
-            try:
-                res = genai.embed_content(
-                    model=m_cand,
-                    content=input,
-                    output_dimensionality=768,
-                    task_type="retrieval_document",
-                )
-                return res["embedding"]
-            except Exception as e:
-                last_err = e
-                continue
-        print(f"[WARNING] Gemini Embedding API error ({last_err}), utilizing defensive fallback.")
-        return [[0.0] * 768 for _ in input]
 
-
-# Foundational domain knowledge to pre-seed the vector store
 FOUNDATIONAL_KNOWLEDGE = [
-    {
-        "id": "order_flow_taker_ratio",
-        "doc": "High Taker Buy Ratio indicates aggressive market buyers paying the spread to take liquidity, signaling institutional buying pressure and bullish short-term momentum. Conversely, low taker buy ratios indicate seller-dominated order flow.",
-        "category": "microstructure"
-    },
-    {
-        "id": "momentum_mean_return_6h",
-        "doc": "A positive 6-hour mean return combined with expanding volatility typically confirms an intraday trend continuation regime in Bitcoin markets, while negative mean returns indicate distribution.",
-        "category": "trend_momentum"
-    },
-    {
-        "id": "macro_fed_liquidity",
-        "doc": "Federal Reserve interest rate cuts and quantitative easing expand global M2 liquidity, historically acting as strong macro tailwinds for Bitcoin. Hawkish rate hike cycles suppress valuations and increase correlation to US equities.",
-        "category": "macro"
-    },
-    {
-        "id": "spot_etf_flows",
-        "doc": "Sustained net inflows into Spot Bitcoin ETFs absorb daily miner issuance and reduce liquid exchange reserves, creating structural upward price pressure and establishing strong support floors.",
-        "category": "institutional"
-    },
-    {
-        "id": "fear_greed_contrarian",
-        "doc": "Extreme Fear (index below 25) historically correlates with local market bottoms and capitulation events, offering favorable risk-to-reward long entries. Extreme Greed (above 75) indicates retail euphoria and heightened risk of leverage liquidation flushes.",
-        "category": "sentiment"
-    },
-    {
-        "id": "onchain_miner_security",
-        "doc": "Significant increases in on-chain transaction volume coupled with rising miner hash rate indicate strong network security and active capital transfer, often preceding major volatility expansions.",
-        "category": "onchain"
-    },
-    {
-        "id": "rsi_overbought_pullback",
-        "doc": "An hourly RSI exceeding 70 indicates short-term overbought conditions with elevated probability of a temporary mean-reversion pullback, especially if volume is declining on the push higher.",
-        "category": "technical"
-    },
-    {
-        "id": "halving_supply_shock",
-        "doc": "Bitcoin halving events reduce daily block subsidy rewards by 50%, restricting structural supply. Over 6-18 month horizons, halvings have historically catalyzed cyclical bull markets.",
-        "category": "macro_supply"
-    }
+    {"id": "taker_ratio", "doc": "High Taker Buy Ratio signals aggressive buying and bullish momentum; low ratios indicate seller dominance.", "category": "microstructure"},
+    {"id": "momentum_return", "doc": "Positive 6-hour mean return with expanding volatility confirms trend continuation.", "category": "trend"},
+    {"id": "macro_liquidity", "doc": "Fed rate cuts and QE expand liquidity, serving as historical macro tailwinds for Bitcoin.", "category": "macro"},
+    {"id": "etf_flows", "doc": "Sustained net Spot Bitcoin ETF inflows absorb miner issuance, establishing support floors.", "category": "institutional"},
+    {"id": "fear_greed", "doc": "Extreme Fear (<25) often marks local bottoms; Extreme Greed (>75) indicates euphoric liquidation risk.", "category": "sentiment"},
+    {"id": "onchain_activity", "doc": "Surges in on-chain transaction volume and miner hashrate precede major volatility expansions.", "category": "onchain"},
+    {"id": "rsi_reversion", "doc": "Hourly RSI >70 indicates overbought conditions with mean-reversion pullback risk.", "category": "technical"},
+    {"id": "halving_shock", "doc": "Halvings cut block subsidies by 50%, historically catalyzing bull markets over 6-18 months.", "category": "supply"},
 ]
 
 
 class MarketKnowledgeRAG:
-    """Manages persistent ChromaDB vector storage and semantic retrieval for Mudra."""
-
     def __init__(self, db_path: str = CHROMADB_DIR, collection_name: str = CHROMA_COLLECTION_NAME):
         Path(db_path).mkdir(parents=True, exist_ok=True)
-        self.client = chromadb.PersistentClient(
-            path=db_path,
-            settings=Settings(anonymized_telemetry=False, is_persistent=True)
-        )
+        self.client = chromadb.PersistentClient(path=db_path, settings=Settings(anonymized_telemetry=False, is_persistent=True))
         self.embedding_fn = GeminiEmbeddingFunction()
-        self.collection = self.client.get_or_create_collection(
-            name=collection_name,
-            embedding_function=self.embedding_fn
-        )
-        self._seed_if_empty()
-
-    def _seed_if_empty(self):
-        """Pre-seeds the knowledge base if currently empty."""
+        self.collection = self.client.get_or_create_collection(name=collection_name, embedding_function=self.embedding_fn)
         if self.collection.count() == 0:
-            print("[INFO] Seeding ChromaDB with foundational market domain knowledge via Gemini text-embedding-004...")
-            ids = [item["id"] for item in FOUNDATIONAL_KNOWLEDGE]
-            documents = [item["doc"] for item in FOUNDATIONAL_KNOWLEDGE]
-            metadatas = [{"category": item["category"]} for item in FOUNDATIONAL_KNOWLEDGE]
-            self.collection.add(ids=ids, documents=documents, metadatas=metadatas)
-            print(f"[SUCCESS] Pre-seeded {len(ids)} knowledge documents into ChromaDB.")
+            self.collection.add(
+                ids=[item["id"] for item in FOUNDATIONAL_KNOWLEDGE],
+                documents=[item["doc"] for item in FOUNDATIONAL_KNOWLEDGE],
+                metadatas=[{"category": item["category"]} for item in FOUNDATIONAL_KNOWLEDGE],
+            )
 
     def add_document(self, doc_id: str, text: str, metadata: Optional[dict] = None) -> None:
-        """Adds or updates a document in the vector store."""
-        metadata = metadata or {}
-        self.collection.upsert(ids=[doc_id], documents=[text], metadatas=[metadata])
+        self.collection.upsert(ids=[doc_id], documents=[text], metadatas=[metadata or {}])
 
     def retrieve_market_context(self, query: str, n_results: int = 3) -> List[str]:
-        """
-        Performs semantic similarity search over ChromaDB using Gemini embeddings.
-        Returns a list of relevant text excerpts.
-        """
         results = self.collection.query(query_texts=[query], n_results=n_results)
-        raw_docs = results.get("documents")
-        if raw_docs and len(raw_docs) > 0:
-            return raw_docs[0]
-        return []
+        docs = results.get("documents")
+        return docs[0] if docs and len(docs) > 0 else []
 
 
 _rag_instance: Optional[MarketKnowledgeRAG] = None
 
+
 def get_rag_agent() -> MarketKnowledgeRAG:
-    """Singleton getter for MarketKnowledgeRAG."""
     global _rag_instance
     if _rag_instance is None:
         _rag_instance = MarketKnowledgeRAG()
@@ -230,103 +98,52 @@ def get_rag_agent() -> MarketKnowledgeRAG:
 
 
 def get_rag_collection():
-    """Returns the underlying ChromaDB collection instance safely."""
     try:
-        agent = get_rag_agent()
-        return agent.collection
-    except Exception as exc:
-        print(f"[WARN] Failed to get RAG collection: {exc}")
+        return get_rag_agent().collection
+    except Exception:
         return None
 
 
 def initialize_knowledge_base() -> MarketKnowledgeRAG:
-    """Initializes or retrieves the persistent ChromaDB RAG vector store."""
     return get_rag_agent()
 
 
 def retrieve_rag_context(query: str, n_results: int = 3) -> List[str]:
-    """Retrieves relevant semantic domain excerpts from ChromaDB."""
     return get_rag_agent().retrieve_market_context(query=query, n_results=n_results)
 
 
 def index_reconciled_outcome_memory(
-    tick_id: int,
-    timestamp_iso: str,
-    market_regime: str,
-    direction_predicted: str,
-    direction_realized: str,
-    direction_correct: bool,
-    predicted_dollar_move: float,
-    actual_dollar_move: float,
-    absolute_error_usd: float,
-    error_attribution_tag: str,
+    tick_id: int, timestamp_iso: str, market_regime: str, direction_predicted: str,
+    direction_realized: str, direction_correct: bool, predicted_dollar_move: float,
+    actual_dollar_move: float, absolute_error_usd: float, error_attribution_tag: str,
     plain_english_notes: str,
 ) -> bool:
-    """
-    Stores a reconciled hourly prediction outcome into ChromaDB as an episodic memory document
-    so the LangGraph Strategist & Risk Critic can retrieve similar past mistakes before trading.
-    """
-    collection = get_rag_collection()
-    if collection is None:
+    col = get_rag_collection()
+    if col is None:
         return False
-
     doc_id = f"reconciled_tick_{int(tick_id)}"
-    doc_text = (
-        f"[{timestamp_iso}] Regime: {market_regime} | Predicted: {direction_predicted} "
-        f"(${predicted_dollar_move:+,.2f}) | Actual: {direction_realized} (${actual_dollar_move:+,.2f}) | "
-        f"Correct: {direction_correct} | Tag: {error_attribution_tag} | Summary: {plain_english_notes}"
-    )
-    metadata = {
-        "type": "episodic_outcome",
-        "tick_id": int(tick_id),
-        "regime": str(market_regime or "UNKNOWN"),
-        "direction_predicted": str(direction_predicted or "UP"),
-        "direction_realized": str(direction_realized or "UP"),
-        "direction_correct": bool(direction_correct),
-        "error_attribution_tag": str(error_attribution_tag or "ACCURATE"),
+    doc_text = f"[{timestamp_iso}] Regime: {market_regime} | Pred: {direction_predicted} (${predicted_dollar_move:+,.2f}) | Realized: {direction_realized} (${actual_dollar_move:+,.2f}) | Correct: {direction_correct} | Tag: {error_attribution_tag} | Notes: {plain_english_notes}"
+    meta = {
+        "type": "episodic_outcome", "tick_id": int(tick_id), "regime": str(market_regime or "UNKNOWN"),
+        "direction_predicted": str(direction_predicted or "UP"), "direction_realized": str(direction_realized or "UP"),
+        "direction_correct": bool(direction_correct), "error_attribution_tag": str(error_attribution_tag or "ACCURATE"),
         "absolute_error_usd": float(absolute_error_usd or 0.0),
     }
     try:
-        collection.upsert(
-            ids=[doc_id],
-            documents=[doc_text],
-            metadatas=[metadata],
-        )
+        col.upsert(ids=[doc_id], documents=[doc_text], metadatas=[meta])
         return True
-    except Exception as exc:
-        print(f"[WARN] Failed to upsert episodic outcome into ChromaDB: {exc}")
+    except Exception:
         return False
 
 
 def query_similar_error_memories(query_text: str, n_results: int = 3) -> List[Dict[str, Any]]:
-    """
-    Queries past episodic prediction outcomes from ChromaDB that match the current market situation.
-    """
-    collection = get_rag_collection()
-    if collection is None:
+    col = get_rag_collection()
+    if col is None:
         return []
     try:
-        results = collection.query(
-            query_texts=[query_text],
-            n_results=n_results,
-            where={"type": "episodic_outcome"},
-        )
+        results = col.query(query_texts=[query_text], n_results=n_results, where={"type": "episodic_outcome"})
         docs = results.get("documents", [[]])[0]
         metas = results.get("metadatas", [[]])[0]
-        memories = []
-        for d, m in zip(docs, metas):
-            memories.append({"document": d, "metadata": m})
-        return memories
-    except Exception as exc:
-        print(f"[WARN] Failed to query episodic memories: {exc}")
+        return [{"document": d, "metadata": m} for d, m in zip(docs, metas)]
+    except Exception:
         return []
-
-
-if __name__ == '__main__':
-    rag = get_rag_agent()
-    test_query = "bullish breakout with high taker volume and positive momentum"
-    print(f"\n[TEST] Testing Semantic RAG Retrieval for: '{test_query}'")
-    context = rag.retrieve_market_context(test_query, n_results=2)
-    for i, doc in enumerate(context, 1):
-        print(f"   [{i}] {doc}")
-
