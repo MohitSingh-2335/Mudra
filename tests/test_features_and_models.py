@@ -77,9 +77,9 @@ def test_insufficient_history_safely_suppresses_forecast(sample_historical_candl
 
 
 def test_candle_closure_timestamp_excludes_forming_candle(monkeypatch):
-    from src.engine.sync import fetch_latest_confirmed_candle
+    from src.engine import fetch_latest_confirmed_candle
     mock_raw = [[1706781600000 + i * 3600000, "60000", "60100", "59900", "60050", "10", 1706781600000 + (i + 1) * 3600000 - 1, "0", 100, "5", "0", "0"] for i in range(40)]
-    monkeypatch.setattr("src.engine.sync._fetch_feed_with_retry", lambda *a, **k: mock_raw)
+    monkeypatch.setattr("src.engine._fetch_feed_with_retry", lambda *a, **k: mock_raw)
     c = fetch_latest_confirmed_candle()
     assert c["close"] == 60050.0 and len(c["candles"]) == 40
 
