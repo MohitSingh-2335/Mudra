@@ -1,16 +1,8 @@
-# src/api/main.py
-import os
-import sys
 import logging
-from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-
-ROOT_DIR = Path(__file__).resolve().parent.parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
 
 from config import (
     REGRESSOR_MODEL_PATH, REGRESSOR_MODEL_SHA256,
@@ -35,6 +27,7 @@ models = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # loads verified models and SHAP tree explainer on startup
     reg = load_verified_model(REGRESSOR_MODEL_PATH, REGRESSOR_MODEL_SHA256)
     clf = load_verified_model(CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256)
     reg.set_params(device="cpu")
@@ -57,6 +50,7 @@ async def health_check():
 
 @app.post("/predict", response_model=PredictResponse, tags=["Inference"])
 async def predict(req: PredictRequest):
+    # validates features and runs regression and direction classification
     missing = sorted(list(set([f for f in REGRESSOR_FEATURES if f not in req.features] + [f for f in CLASSIFIER_FEATURES if f not in req.features])))
     if missing:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Missing required feature fields: {missing}")
@@ -80,6 +74,7 @@ async def predict(req: PredictRequest):
 
 @app.post("/explain", response_model=ExplainResponse, tags=["Explainability"])
 async def explain(req: PredictRequest):
+    # computes SHAP feature attributions for classifier prediction
     missing_clf = [f for f in CLASSIFIER_FEATURES if f not in req.features]
     if missing_clf:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Missing required classifier features for SHAP: {missing_clf}")
@@ -98,6 +93,7 @@ async def explain(req: PredictRequest):
 
 @app.post("/analyze", response_model=FullAnalysisResponse, tags=["Agentic AI"])
 async def analyze(req: PredictRequest):
+    # runs prediction, explanation, and Gemini market commentary
     pred_res = await predict(req)
     exp_res = await explain(req)
     pos_drivers = [{"feature": d.feature, "shap": d.shap_value, "value": d.actual_value} for d in exp_res.top_bullish_drivers]
@@ -113,6 +109,7 @@ async def analyze(req: PredictRequest):
 
 @app.post("/agents/trade", response_model=AgentTradeResponse, tags=["Multi-Agent LangGraph"])
 async def run_agent_trade(req: AgentTradeRequest):
+    # runs LangGraph multi-agent trade decision pipeline
     from src.agents.trading_graph import run_trading_graph
     try:
         state = run_trading_graph(
@@ -126,6 +123,7 @@ async def run_agent_trade(req: AgentTradeRequest):
 
 @app.get("/reconciliation/summary", response_model=ReconciliationSummaryResponse, tags=["Observability & Database"])
 async def get_reconciliation_metrics(lookback_hours: int = 168, model_version: Optional[str] = None):
+    # fetches database reconciliation KPIs for model governance
     from src.database.queries import get_reconciliation_kpis
     try:
         return get_reconciliation_kpis(lookback_hours=lookback_hours, model_version=model_version)
@@ -136,6 +134,7 @@ async def get_reconciliation_metrics(lookback_hours: int = 168, model_version: O
 
 @app.get("/portfolio/summary", response_model=PortfolioSummaryResponse, tags=["Observability & Database"])
 async def get_portfolio_metrics(current_price: float = 83000.0):
+    # fetches live paper portfolio balance and performance statistics
     from src.database.queries import get_portfolio_kpis
     try:
         return get_portfolio_kpis(current_price=current_price)
