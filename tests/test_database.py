@@ -1,34 +1,21 @@
-# tests/test_database.py
-"""Unit tests for Mudra database models, migrations, and reconciliation ledger."""
-
-import json
 import hashlib
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import pytest
-from sqlalchemy import create_engine, inspect, select, func
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import create_engine, inspect
 
-from src.database.models import (
-    Base,
-    MarketTick,
-    Reconciliation,
-    CouncilAudit,
-    PaperPortfolio,
-    ModelRegistry,
-    ModelLifecycleEvent,
-)
+from src.database.models import Base, MarketTick
 from src.database.connection import init_db, CANONICAL_TABLE_COLUMNS
 from src.engine.reconciliation import reconcile_pending_ticks
 from src.engine.paper_portfolio import execute_paper_order, get_portfolio_summary
-from scripts.migrate_db import BASELINE_MODEL_SPEC, CANDIDATE_MODEL_SPEC, run_migration
+from scripts.migrate_db import BASELINE_MODEL_SPEC, run_migration
 
 
 @pytest.fixture
 def in_memory_db():
-    """Provides an in-memory SQLite database session with all tables created."""
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
     init_db(engine)
+    from sqlalchemy.orm import sessionmaker
     Session = sessionmaker(bind=engine)
     session = Session()
     yield session, engine
@@ -38,7 +25,6 @@ def in_memory_db():
 
 
 def test_table_creation_and_inspection(in_memory_db):
-    """Verify all canonical database tables exist."""
     session, engine = in_memory_db
     tables = inspect(engine).get_table_names()
     for expected_table in CANONICAL_TABLE_COLUMNS.keys():
@@ -46,7 +32,6 @@ def test_table_creation_and_inspection(in_memory_db):
 
 
 def test_market_tick_lifecycle_and_dict(in_memory_db):
-    """Verify MarketTick creation, serialization, and column constraints."""
     session, _ = in_memory_db
     now = datetime.now(timezone.utc)
     tick = MarketTick(
@@ -65,7 +50,6 @@ def test_market_tick_lifecycle_and_dict(in_memory_db):
 
 
 def test_reconciliation_math_and_accurate_tagging(in_memory_db):
-    """Verify reconciliation calculates correct direction and ACCURATE tag."""
     session, _ = in_memory_db
     t0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
     tick0 = MarketTick(
@@ -90,7 +74,6 @@ def test_reconciliation_math_and_accurate_tagging(in_memory_db):
 
 
 def test_reconciliation_sideways_drift_tagging(in_memory_db):
-    """Verify SIDEWAYS_DRIFT error attribution on small contrary price moves."""
     session, _ = in_memory_db
     t0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
     tick0 = MarketTick(
@@ -112,7 +95,6 @@ def test_reconciliation_sideways_drift_tagging(in_memory_db):
 
 
 def test_reconciliation_black_swan_outlier(in_memory_db):
-    """Verify BLACK_SWAN_OUTLIER tag on extreme unanticipated market shocks (> 3.8%)."""
     session, _ = in_memory_db
     t0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
     tick0 = MarketTick(
@@ -134,7 +116,6 @@ def test_reconciliation_black_swan_outlier(in_memory_db):
 
 
 def test_reconciliation_one_hour_horizon_alignment(in_memory_db):
-    """Reconciliation strictly aligns predictions with T+1 hour outcome candle."""
     session, _ = in_memory_db
     t0 = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
     t1 = t0 + timedelta(hours=1)
@@ -145,11 +126,9 @@ def test_reconciliation_one_hour_horizon_alignment(in_memory_db):
     session.add_all([tick0, tick3])
     session.commit()
 
-    # t0 needs t1 for reconciliation; t3 is +3 hours and cannot resolve t0
     reconciled = reconcile_pending_ticks(session, tick3)
     assert len(reconciled) == 0
 
-    # Add missing t1 candle
     tick1 = MarketTick(timestamp=t1, open=60100.0, high=60250.0, low=60000.0, close=60200.0, volume=10.0)
     session.add(tick1)
     session.commit()
@@ -160,7 +139,6 @@ def test_reconciliation_one_hour_horizon_alignment(in_memory_db):
 
 
 def test_paper_portfolio_full_lifecycle(in_memory_db):
-    """Verify paper trading order execution, fee deduction, and portfolio balance updates."""
     session, _ = in_memory_db
     b_order = execute_paper_order(session, "BUY", 60000.0, kelly_fraction=0.10)
     assert b_order.action == "BUY"
@@ -177,7 +155,6 @@ def test_paper_portfolio_full_lifecycle(in_memory_db):
 
 
 def test_migrate_db_defaults_to_dry_run(in_memory_db):
-    """Migration runner defaults to read-only inspection without writes."""
     _, engine = in_memory_db
     plan = run_migration(target_engine=engine, execute=False)
     assert plan["mode"] == "DRY_RUN"
@@ -186,7 +163,6 @@ def test_migrate_db_defaults_to_dry_run(in_memory_db):
 
 
 def test_migrate_db_seed_hashes():
-    """Verify SHA-256 hashes of production model artifacts."""
     expected_reg_sha = "b44fba18cf2c7b51e3297e83a946d869392803a267e951a5e85ea052c63eb854"
     expected_clf_sha = "df139c1018ed5025b1444d6597c3d98b4d7c377a898487268d18e58d253ae684"
 
