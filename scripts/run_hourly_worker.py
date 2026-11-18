@@ -1,5 +1,13 @@
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+try:
+    import onnxruntime
+except Exception:
+    pass
+
 import sys
 import json
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -79,18 +87,59 @@ def flush_outbox(session: Optional[Any] = None) -> int:
 
 
 def run_worker(force: bool = False) -> bool:
-    # performs connection check, outbox flush, and quantitative sync cycle
-    ok, _, _ = db_conn.test_connection()
+    print(f"[WORKER] Starting Mudra hourly worker at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} (force={force})", flush=True)
+    
+    print("[WORKER] Step 1/4: Testing database connection...", flush=True)
+    ok, ver, lat = db_conn.test_connection()
     if not ok:
+        print(f"[WORKER ERROR] Database unreachable: {ver}", flush=True)
         return False
+    print(f"[WORKER] Database connected ({ver.splitlines()[0] if ver else 'Unknown'}) in {lat:.1f}ms", flush=True)
+
+    print("[WORKER] Step 2/4: Verifying database schema...", flush=True)
     try:
-        db_conn.verify_db_schema()
-        flush_outbox()
+        schema_info = db_conn.verify_db_schema()
+        print(f"[WORKER] Database schema verified: {schema_info.get('tables', 0)} tables on {schema_info.get('dialect', 'unknown')}", flush=True)
+    except Exception as schema_err:
+        print(f"[WORKER WARNING] Schema verification issue: {schema_err}", flush=True)
+        print("[WORKER] Attempting automatic table creation via init_db()...", flush=True)
+        try:
+            db_conn.init_db()
+            schema_info = db_conn.verify_db_schema()
+            print(f"[WORKER] Schema recovered and verified: {schema_info.get('tables', 0)} tables ready.", flush=True)
+        except Exception as init_err:
+            print(f"[WORKER ERROR] Database schema initialization failed: {init_err}", flush=True)
+            traceback.print_exc()
+            return False
+
+    print("[WORKER] Step 3/4: Checking and flushing local outbox...", flush=True)
+    try:
+        flushed = flush_outbox()
+        if flushed > 0:
+            print(f"[WORKER] Flushed {flushed} queued records from outbox to database.", flush=True)
+        else:
+            print("[WORKER] Outbox empty or no pending records.", flush=True)
+    except Exception as outbox_err:
+        print(f"[WORKER WARNING] Outbox flush failed: {outbox_err}", flush=True)
+
+    print("[WORKER] Step 4/4: Executing quantitative hourly cycle...", flush=True)
+    try:
         synced, msg, summary = sync_hourly_quant_cycle(force=force)
-        return bool(synced or "already recorded" in msg or (isinstance(summary, dict) and "tick_id" in summary))
-    except Exception:
+        print(f"[WORKER] Quant cycle result: synced={synced}, status='{msg}'", flush=True)
+        if summary:
+            print(f"[WORKER] Summary telemetry: {summary}", flush=True)
+        success = bool(synced or "already recorded" in msg or (isinstance(summary, dict) and "tick_id" in summary))
+        if not success:
+            print(f"[WORKER ERROR] Quant cycle did not complete successfully: {msg}", flush=True)
+        return success
+    except Exception as sync_err:
+        print(f"[WORKER ERROR] Unhandled exception during quantitative cycle: {sync_err}", flush=True)
+        traceback.print_exc()
         return False
 
 
 if __name__ == "__main__":
-    sys.exit(0 if run_worker(force="--force" in sys.argv) else 1)
+    force_flag = "--force" in sys.argv
+    success = run_worker(force=force_flag)
+    print(f"[WORKER] Execution finished with status: {'SUCCESS' if success else 'FAILURE'}", flush=True)
+    sys.exit(0 if success else 1)
