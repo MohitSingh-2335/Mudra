@@ -55,7 +55,7 @@ from src.engine.sync import (
     parse_retry_after,
     sync_hourly_quant_cycle,
 )
-from src.mcp.mudra_mcp_server import get_live_btc_derivatives_pulse, get_spot_and_futures_trade_plan
+from src.mcp_server import get_live_btc_derivatives_pulse, get_spot_and_futures_trade_plan
 
 
 # helper mocks for market feed responses
