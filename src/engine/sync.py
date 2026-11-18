@@ -20,15 +20,9 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from config import (
-    ACTIVE_MODEL_VERSION,
-    EXCHANGE_CONNECT_TIMEOUT,
-    EXCHANGE_MAX_RETRY_AFTER_CAP,
-    EXCHANGE_READ_TIMEOUT,
-    EXCHANGE_RETRY_BACKOFF_FACTOR,
-    EXCHANGE_RETRY_BASE_BACKOFF,
-    EXCHANGE_RETRY_MAX_ATTEMPTS,
-    EXCHANGE_RETRY_MAX_BACKOFF,
-    EXCHANGE_RETRY_TOTAL_DEADLINE,
+    ACTIVE_MODEL_VERSION, EXCHANGE_CONNECT_TIMEOUT, EXCHANGE_MAX_RETRY_AFTER_CAP,
+    EXCHANGE_READ_TIMEOUT, EXCHANGE_RETRY_BACKOFF_FACTOR, EXCHANGE_RETRY_BASE_BACKOFF,
+    EXCHANGE_RETRY_MAX_ATTEMPTS, EXCHANGE_RETRY_MAX_BACKOFF, EXCHANGE_RETRY_TOTAL_DEADLINE,
     FEATURE_SCHEMA_VERSION,
 )
 from src.agents.tools import calculate_technical_signals, get_model_return_forecast
@@ -48,8 +42,8 @@ class MarketFeedExhaustedError(RuntimeError):
     pass
 
 
-# Normalize UTC timestamps across pandas, ISO string, and datetime objects
 def _normalize_utc_timestamp(ts: Any) -> datetime:
+    # normalizes timestamp input to UTC datetime
     if ts is None or isinstance(ts, bool) or (isinstance(ts, float) and math.isnan(ts)):
         raise ValueError("Invalid timestamp.")
     if hasattr(ts, "to_pydatetime"):
@@ -68,8 +62,8 @@ def _normalize_utc_timestamp(ts: Any) -> datetime:
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
 
 
-# Validate OHLCV numerical integrity of single candle dict
 def _validate_historical_candle_dict(raw_c: Any) -> Optional[Dict[str, Any]]:
+    # validates OHLCV values and boundary invariants
     if not isinstance(raw_c, dict) or any(k not in raw_c for k in ("timestamp", "open", "high", "low", "close", "volume")):
         return None
     try:
@@ -84,8 +78,8 @@ def _validate_historical_candle_dict(raw_c: Any) -> Optional[Dict[str, Any]]:
         return None
 
 
-# Backfill missing historical candles between runs
 def backfill_missing_candles(session, candle: Dict[str, Any]) -> int:
+    # inserts missing confirmed candles preceding the current sync tick
     if not isinstance(candle, dict) or "timestamp" not in candle:
         return 0
     raw_history = candle.get("candles")
@@ -108,10 +102,7 @@ def backfill_missing_candles(session, candle: Dict[str, Any]) -> int:
     prior_ts = _normalize_utc_timestamp(prior.timestamp)
     gap_hours = (latest_ts - prior_ts).total_seconds() / 3600.0
     if gap_hours > BACKFILL_LARGE_GAP_WARNING_HOURS:
-        logger.warning(
-            "[BACKFILL] Detected large candle gap of %.1f hours (> %.1fh threshold) between %s and %s.",
-            gap_hours, BACKFILL_LARGE_GAP_WARNING_HOURS, prior_ts.isoformat(), latest_ts.isoformat(),
-        )
+        logger.warning("[BACKFILL] Detected large candle gap of %.1f hours between %s and %s.", gap_hours, prior_ts.isoformat(), latest_ts.isoformat())
     existing_rows = session.execute(select(MarketTick.timestamp).where(MarketTick.timestamp < latest_ts)).scalars().all()
     existing_ts = {_normalize_utc_timestamp(r) for r in existing_rows if r is not None}
     anchor_ts = min(existing_ts | {prior_ts})
@@ -137,16 +128,16 @@ def backfill_missing_candles(session, candle: Dict[str, Any]) -> int:
     return inserted
 
 
-# Check if paper trade was already logged for tick
 def is_paper_trade_executed_for_tick(session, tick_id: int) -> bool:
+    # prevents duplicate paper trading execution on the same market tick
     if has_tick_id_column(session) and session.execute(select(PaperPortfolio.id).where(PaperPortfolio.tick_id == tick_id)).scalar_one_or_none():
         return True
     audit = session.execute(select(CouncilAudit).where(CouncilAudit.tick_id == tick_id).order_by(CouncilAudit.id.asc())).scalars().first()
     return audit is not None and (not audit.execution_notes or "[FORCED_REANALYSIS]" not in audit.execution_notes)
 
 
-# Parse Retry-After HTTP header
 def parse_retry_after(retry_after_header: Optional[str], now_dt_fn: Optional[Callable[[], datetime]] = None) -> Optional[float]:
+    # parses HTTP Retry-After header into delay seconds
     if not retry_after_header or not isinstance(retry_after_header, str) or not retry_after_header.strip():
         return None
     val = retry_after_header.strip()
@@ -166,8 +157,8 @@ def parse_retry_after(retry_after_header: Optional[str], now_dt_fn: Optional[Cal
     return None
 
 
-# Validate strict positive trade count
 def _parse_trade_count(raw_trades: Any) -> Optional[int]:
+    # validates non-negative integer trade counts
     if raw_trades is None:
         return None
     if isinstance(raw_trades, bool):
@@ -194,8 +185,8 @@ def _parse_trade_count(raw_trades: Any) -> Optional[int]:
     raise ValueError(f"Unsupported trade count type: {type(raw_trades).__name__}")
 
 
-# Validate OHLCV matrix payload from exchange
 def _validate_candle_payload(payload: Any, min_row_len: int = BINANCE_MIN_ROW_LEN, feed_name: str = "Market Feed") -> bool:
+    # validates structure and numeric bounds of raw exchange klines
     if not isinstance(payload, list) or len(payload) == 0:
         return False
     for row in payload:
@@ -216,7 +207,6 @@ def _validate_candle_payload(payload: Any, min_row_len: int = BINANCE_MIN_ROW_LE
     return True
 
 
-# Resilient HTTP request with backoff jitter and rate-limit parsing
 def _fetch_feed_with_retry(
     url: str, headers: Optional[Dict[str, str]] = None, feed_name: str = "Binance Vision",
     deadline_ts: Optional[float] = None, max_attempts: int = EXCHANGE_RETRY_MAX_ATTEMPTS,
@@ -227,6 +217,7 @@ def _fetch_feed_with_retry(
     sleep_fn: Callable[[float], None] = time.sleep, jitter_fn: Callable[[float, float], float] = random.uniform,
     clock_fn: Callable[[], float] = time.perf_counter, now_dt_fn: Optional[Callable[[], datetime]] = None,
 ) -> Optional[List[Any]]:
+    # resilient HTTP request execution with exponential backoff and rate limit handling
     if deadline_ts is None:
         deadline_ts = clock_fn() + total_deadline
     req_row_len = min_row_len or (BINANCE_MIN_ROW_LEN if "binance" in feed_name.lower() else COINBASE_MIN_ROW_LEN)
@@ -283,16 +274,15 @@ def _fetch_feed_with_retry(
     return None
 
 
-# Fetch latest confirmed 1-hour candle with failover from Binance to Coinbase
 def fetch_latest_confirmed_candle(
     symbol: str = "BTCUSDT", sleep_fn: Optional[Callable[[float], None]] = None,
     jitter_fn: Optional[Callable[[float, float], float]] = None, clock_fn: Optional[Callable[[], float]] = None,
     now_dt_fn: Optional[Callable[[], datetime]] = None, total_deadline: Optional[float] = None,
 ) -> Dict[str, Any]:
+    # fetches confirmed 1-hour candle from Binance Vision with Coinbase fallback
     _sleep_fn, _jitter_fn = sleep_fn or time.sleep, jitter_fn or random.uniform
     _clock_fn, _budget = clock_fn or time.perf_counter, total_deadline or EXCHANGE_RETRY_TOTAL_DEADLINE
 
-    # 1. Primary: Binance Vision
     b_url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&limit=102"
     binance_klines = _fetch_feed_with_retry(url=b_url, feed_name="Binance Vision", min_row_len=BINANCE_MIN_ROW_LEN, sleep_fn=_sleep_fn, jitter_fn=_jitter_fn, clock_fn=_clock_fn, now_dt_fn=now_dt_fn, total_deadline=_budget)
     if binance_klines and _validate_candle_payload(binance_klines, min_row_len=BINANCE_MIN_ROW_LEN):
@@ -306,7 +296,6 @@ def fetch_latest_confirmed_candle(
                 "timestamp": datetime.fromtimestamp(float(c[0]) / 1000.0, tz=timezone.utc), "open": float(c[1]), "high": float(c[2]), "low": float(c[3]), "close": float(c[4]), "volume": float(c[5]), "taker_buy_ratio": records[-1]["taker_buy_ratio"], "number_of_trades": _parse_trade_count(c[8]), "candles": records,
             }
 
-    # 2. Fallback: Coinbase
     c_url = "https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=3600"
     cb_candles = _fetch_feed_with_retry(url=c_url, headers={"User-Agent": "Mudra-Sync/1.0"}, feed_name="Coinbase Institutional", min_row_len=COINBASE_MIN_ROW_LEN, sleep_fn=_sleep_fn, jitter_fn=_jitter_fn, clock_fn=_clock_fn, now_dt_fn=now_dt_fn, total_deadline=_budget)
     if cb_candles and _validate_candle_payload(cb_candles, min_row_len=COINBASE_MIN_ROW_LEN):
@@ -323,8 +312,8 @@ def fetch_latest_confirmed_candle(
     raise MarketFeedExhaustedError("Failed to fetch confirmed 1-hour candle from all market feeds.")
 
 
-# Master synchronization cycle: candle fetch, ML inference, council deliberation, and ledger
 def sync_hourly_quant_cycle(force: bool = False) -> Tuple[bool, str, Dict[str, Any]]:
+    # executes end-to-end quantitative cycle: candle ingestion, ML inference, multi-agent council, and ledger
     db_ok, ver, _ = test_connection()
     if not db_ok:
         return False, f"Database unreachable: {ver}", {}
