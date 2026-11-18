@@ -1,17 +1,10 @@
-# src/database/queries.py
 import logging
-import sys
-from pathlib import Path
 from typing import Dict, Any, Optional
 import pandas as pd
 from sqlalchemy import select, desc
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
 from src.database.connection import get_db
-from src.database.models import MarketTick, Reconciliation, PaperPortfolio, CouncilAudit
+from src.database.models import MarketTick, Reconciliation, PaperPortfolio, CouncilAudit, ModelPrediction
 
 logger = logging.getLogger(__name__)
 __all__ = [
@@ -21,6 +14,7 @@ __all__ = [
 
 
 def get_latest_market_ticks(limit: int = 100) -> pd.DataFrame:
+    # returns recent market ticks ordered chronologically
     try:
         with get_db() as session:
             ticks = session.execute(select(MarketTick).order_by(desc(MarketTick.timestamp)).limit(limit)).scalars().all()
@@ -35,8 +29,8 @@ def get_latest_market_ticks(limit: int = 100) -> pd.DataFrame:
 
 
 def get_reconciliation_history(limit: int = 500, model_version: Optional[str] = None) -> pd.DataFrame:
+    # returns reconciled prediction outcomes across primary and candidate models
     try:
-        from src.database.models import ModelPrediction
         with get_db() as session:
             stmt = select(Reconciliation, MarketTick.model_version).outerjoin(MarketTick, Reconciliation.tick_id == MarketTick.id)
             if model_version and model_version != "All Models":
@@ -45,9 +39,9 @@ def get_reconciliation_history(limit: int = 500, model_version: Optional[str] = 
 
             data = []
             for r, m_ver in rows:
-                r_dict = r.to_dict()
-                r_dict["model_version"] = m_ver
-                data.append(r_dict)
+                item = r.to_dict()
+                item["model_version"] = m_ver
+                data.append(item)
 
             cand_stmt = select(ModelPrediction, MarketTick.timestamp.label("tick_ts")).join(MarketTick, ModelPrediction.tick_id == MarketTick.id).where(ModelPrediction.outcome_tick_id.isnot(None), ModelPrediction.is_primary.is_(False))
             if model_version and model_version != "All Models":
@@ -69,14 +63,14 @@ def get_reconciliation_history(limit: int = 500, model_version: Optional[str] = 
                 return pd.DataFrame()
             df = pd.DataFrame(data)
             df["timestamp"] = pd.to_datetime(df["timestamp"])
-            df = df.sort_values("timestamp", ascending=False).reset_index(drop=True)
-            return df.head(limit) if limit and limit > 0 else df
+            return df.sort_values("timestamp", ascending=False).reset_index(drop=True).head(limit)
     except Exception as exc:
         logger.warning("Failed to fetch reconciliation history: %s", type(exc).__name__)
         return pd.DataFrame()
 
 
 def get_reconciliation_kpis(lookback_hours: Optional[int] = 168, model_version: Optional[str] = None) -> Dict[str, Any]:
+    # returns aggregate win rate, directional accuracy, and MAE
     try:
         from src.engine.reconciliation import get_reconciliation_summary
         with get_db() as session:
@@ -96,6 +90,7 @@ def get_reconciliation_kpis(lookback_hours: Optional[int] = 168, model_version: 
 
 
 def get_portfolio_history(limit: int = 500) -> pd.DataFrame:
+    # returns chronological paper portfolio state snapshots
     try:
         with get_db() as session:
             records = session.execute(select(PaperPortfolio).order_by(PaperPortfolio.id.asc()).limit(limit)).scalars().all()
@@ -110,6 +105,7 @@ def get_portfolio_history(limit: int = 500) -> pd.DataFrame:
 
 
 def get_portfolio_kpis(current_price: float) -> Dict[str, Any]:
+    # returns portfolio equity, alpha, and trade statistics
     try:
         from src.engine.paper_portfolio import get_portfolio_summary
         with get_db() as session:
@@ -125,6 +121,7 @@ def get_portfolio_kpis(current_price: float) -> Dict[str, Any]:
 
 
 def get_latest_council_audit() -> Optional[Dict[str, Any]]:
+    # returns most recent multi-agent council audit decision
     try:
         with get_db() as session:
             audit = session.execute(select(CouncilAudit).order_by(desc(CouncilAudit.id)).limit(1)).scalar_one_or_none()
