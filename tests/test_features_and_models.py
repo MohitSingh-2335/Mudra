@@ -26,8 +26,13 @@ from src.data_preprocessing import (
     merge_fear_greed,
     merge_onchain,
 )
-from src.database.models import Base, MarketTick, Reconciliation
-from src.database.queries import get_reconciliation_history, get_reconciliation_kpis
+from src.database import (
+    Base,
+    MarketTick,
+    Reconciliation,
+    get_reconciliation_history,
+    get_reconciliation_kpis,
+)
 from src.feature_engineering import (
     create_features,
     extract_features_for_inference,
@@ -210,7 +215,7 @@ def test_reconciliation_filtering_and_kpis(rec_db, monkeypatch):
     def mock_get_db():
         yield rec_db
 
-    monkeypatch.setattr("src.database.queries.get_db", mock_get_db)
+    monkeypatch.setattr("src.database.get_db", mock_get_db)
     assert len(get_reconciliation_history(limit=50, model_version=None)) == 1
     assert len(get_reconciliation_history(limit=50, model_version=ACTIVE_MODEL_VERSION)) == 1
     assert len(get_reconciliation_history(limit=50, model_version="candidate_v2")) == 0
@@ -225,7 +230,7 @@ def test_dashboard_tab3_helpers(rec_db, monkeypatch):
     def mock_get_db():
         yield rec_db
 
-    monkeypatch.setattr("src.database.queries.get_db", mock_get_db)
+    monkeypatch.setattr("src.database.get_db", mock_get_db)
     records = get_reconciliation_history(limit=50, model_version=None)
     filtered = app.filter_reconciliation_records(records, selected_model=ACTIVE_MODEL_VERSION)
     assert len(filtered) == 1
