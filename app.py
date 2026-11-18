@@ -25,6 +25,9 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
+st.set_page_config(page_title="Mudra — Bitcoin AI/ML Forecasting Engine", layout="wide", initial_sidebar_state="expanded")
+st.markdown("<style>.main { background-color: #0E1117; color: #E0E0E0; }</style>", unsafe_allow_html=True)
+
 from config import (
     ACTIVE_MODEL_VERSION, APP_SUBTITLE, APP_TITLE,
     CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256,
@@ -166,8 +169,7 @@ def load_models():
         reg.set_params(device="cpu")
         clf.set_params(device="cpu")
         return reg, clf
-    except Exception as exc:
-        st.error(f"Failed to load ML artifacts: {exc}")
+    except Exception:
         return None, None
 
 
@@ -365,9 +367,6 @@ def fetch_cloud_database_state(current_price: Optional[float]):
 # ---------------------------------------------------------------------------
 # 4. SINGLE-PAGE STREAMLIT USER INTERFACE
 # ---------------------------------------------------------------------------
-
-st.set_page_config(page_title="Mudra — Bitcoin AI/ML Forecasting Engine", layout="wide", initial_sidebar_state="expanded")
-st.markdown("<style>.main { background-color: #0E1117; color: #E0E0E0; }</style>", unsafe_allow_html=True)
 
 # Fetch Market & Database Telemetry
 live_market_df = fetch_live_market_candles()
