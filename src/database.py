@@ -727,15 +727,19 @@ def get_reconciliation_kpis(lookback_hours: Optional[int] = 168, model_version: 
         }
 
 
-def get_portfolio_history(limit: int = 500) -> pd.DataFrame:
+def get_portfolio_history(limit: Optional[int] = 500) -> pd.DataFrame:
     try:
         with get_db() as session:
-            records = session.execute(select(PaperPortfolio).order_by(PaperPortfolio.id.asc()).limit(limit)).scalars().all()
+            if limit:
+                stmt = select(PaperPortfolio).order_by(desc(PaperPortfolio.id)).limit(limit)
+            else:
+                stmt = select(PaperPortfolio).order_by(PaperPortfolio.id.asc())
+            records = session.execute(stmt).scalars().all()
             if not records:
                 return pd.DataFrame()
             df = pd.DataFrame([p.to_dict() for p in records])
             df["timestamp"] = pd.to_datetime(df["timestamp"])
-            return df
+            return df.sort_values("timestamp").reset_index(drop=True)
     except Exception as exc:
         logger.warning("Failed to fetch portfolio history: %s", type(exc).__name__)
         return pd.DataFrame()
