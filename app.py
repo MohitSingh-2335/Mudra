@@ -32,7 +32,7 @@ from src.database.queries import (
     get_prediction_investigations,
     get_reconciliation_history, get_reconciliation_kpis,
 )
-from src.engine.sync import sync_hourly_quant_cycle
+from src.engine import sync_hourly_quant_cycle
 from src.explainability import get_tree_explainer
 from src.model_loader import load_verified_model
 
