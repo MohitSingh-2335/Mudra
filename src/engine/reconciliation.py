@@ -38,13 +38,13 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
     pending_ticks = session.execute(stmt).scalars().all()
     reconciled_records: List[Reconciliation] = []
 
-    for prior_tick in pending_ticks:
-        expected_ts = prior_tick.timestamp + timedelta(hours=1)
+    for prior in pending_ticks:
+        expected_ts = prior.timestamp + timedelta(hours=1)
         outcome = current_tick if current_tick.timestamp == expected_ts else session.execute(select(MarketTick).where(MarketTick.timestamp == expected_ts)).scalars().first()
         if not outcome or outcome.close <= 0:
             continue
 
-        act_p, pred_p, base_p = max(1.0, float(outcome.close)), float(prior_tick.predicted_price_1h), max(1.0, float(prior_tick.close))
+        act_p, pred_p, base_p = max(1.0, float(outcome.close)), float(prior.predicted_price_1h), max(1.0, float(prior.close))
         pred_ret, act_ret = ((pred_p - base_p) / base_p) * 100.0, ((act_p - base_p) / base_p) * 100.0
         abs_err, pct_err = abs(act_p - pred_p), (abs(act_p - pred_p) / act_p) * 100.0
         dir_pred, dir_real = ("UP" if pred_ret >= 0 else "DOWN"), ("UP" if act_ret >= 0 else "DOWN")
@@ -58,7 +58,7 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
             tag = "SIDEWAYS_DRIFT" if (pct_err <= 0.20 or abs_err < 150.0) else "DIRECTION_MISALIGNED"
 
         rec = Reconciliation(
-            timestamp=datetime.now(timezone.utc), tick_id=prior_tick.id, predicted_price=pred_p,
+            timestamp=datetime.now(timezone.utc), tick_id=prior.id, predicted_price=pred_p,
             actual_price_at_t_plus_1=act_p, predicted_return_pct=pred_ret, actual_return_pct=act_ret,
             residual_error=act_ret - pred_ret, absolute_error_usd=abs_err, percentage_error=pct_err,
             direction_predicted=dir_pred, direction_realized=dir_real, direction_correct=(dir_pred == dir_real),
@@ -69,7 +69,7 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
 
         try:
             from src.database.models import ModelPrediction
-            for u in session.execute(select(ModelPrediction).where(ModelPrediction.tick_id == prior_tick.id, ModelPrediction.outcome_tick_id.is_(None))).scalars().all():
+            for u in session.execute(select(ModelPrediction).where(ModelPrediction.tick_id == prior.id, ModelPrediction.outcome_tick_id.is_(None))).scalars().all():
                 u.outcome_tick_id, u.evaluation_policy_version = outcome.id, "binary_exact_t1_v2"
                 u.actual_price_at_t_plus_1, u.actual_return_pct = act_p, act_ret
                 u.direction_realized, u.direction_correct = dir_real, (u.direction_predicted == dir_real)
@@ -79,7 +79,7 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
         except Exception:
             pass
 
-        audit = session.execute(select(CouncilAudit).where(CouncilAudit.tick_id == prior_tick.id).order_by(CouncilAudit.id.desc())).scalars().first()
+        audit = session.execute(select(CouncilAudit).where(CouncilAudit.tick_id == prior.id).order_by(CouncilAudit.id.desc())).scalars().first()
         if audit:
             if audit.risk_verdict == "VETOED":
                 if (audit.strategist_action == "BUY" and act_ret < 0) or (audit.strategist_action == "SELL" and act_ret > 0):
@@ -114,14 +114,12 @@ def build_plain_english_reconciliation_story(
         why = f"Small Chop Flip: drifted by ${abs_err_usd:,.2f} inside normal noise."
     else:
         why = f"Trend Reversal Miss: reversed to {dir_real}, missing by ${abs_err_usd:,.2f}."
-    notes = f"Pred: ${pred_price:,.2f} ({dir_pred}) | Actual: ${actual_price:,.2f} ({dir_real}) | Err: ${abs_err_usd:,.2f} | Diagnosis: {why}"
-    return {"headline": headline[:500], "hypothesis_notes": notes, "suspected_cause_category": tag}
+    return {"headline": headline[:500], "hypothesis_notes": f"Pred: ${pred_price:,.2f} ({dir_pred}) | Actual: ${actual_price:,.2f} ({dir_real}) | Err: ${abs_err_usd:,.2f} | Diagnosis: {why}", "suspected_cause_category": tag}
 
 
 # Summary KPI calculations across reconciled predictions
 def get_reconciliation_summary(session: Session, limit: int = 168, model_version: Optional[str] = None) -> Dict[str, Any]:
-    records: List[Any] = []
-    total_lifetime = 0
+    records, total_lifetime = [], 0
 
     if model_version and model_version != "All Models":
         try:
