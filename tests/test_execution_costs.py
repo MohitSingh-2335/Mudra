@@ -16,9 +16,7 @@ from src.database.models import Base
 from src.engine.paper_portfolio import execute_paper_order, get_portfolio_summary
 from src.backtesting import _simulate_from_signals
 from scripts.experiments.sweep_threshold import run_backtest_threshold
-from src.agents.risk_critic_node import risk_critic_node
-from src.agents.strategist_node import strategist_node
-from src.agents.trading_graph import run_trading_graph
+from src.agents.council import risk_critic_node, strategist_node, run_trading_graph
 import app
 
 
