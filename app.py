@@ -272,6 +272,22 @@ def format_risk_levels(action: str, verdict: str, current_price: float, council_
     return no_trade, no_trade
 
 
+# Filter reconciliation records by model version
+def filter_reconciliation_records(df: pd.DataFrame, selected_model: str) -> pd.DataFrame:
+    if df.empty or "model_version" not in df.columns or selected_model in ("All Models", ""):
+        return df.copy()
+    return df[df["model_version"] == selected_model].copy()
+
+
+# Prepare display dataframe for reconciliation table
+def prepare_reconciliation_table_display(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    disp = df.copy()
+    disp["Model Version"] = disp["model_version"].fillna("UNKNOWN") if "model_version" in disp.columns else "UNKNOWN"
+    return disp
+
+
 # Fallback reconciliation KPI calculations
 def compute_fallback_reconciliation_kpis(df: pd.DataFrame, model_version: Optional[str] = None) -> Dict[str, Any]:
     if df.empty:
@@ -466,13 +482,12 @@ with tab2:
         lookback_label = st.radio("Evaluation Time Window", options=["All Time (Total History)", "Last 7 Days (168 Hours)", "Last 24 Hours (24 Hours)"], horizontal=True, key="tab3_lookback_selector")
 
     selected_lookback = None if "All Time" in lookback_label else (24 if "24 Hours" in lookback_label else 168)
-    filtered_rec_df = rec_df[rec_df["model_version"] == selected_model].copy() if (selected_model != "All Models" and not rec_df.empty and "model_version" in rec_df.columns) else rec_df.copy()
+    filtered_rec_df = filter_reconciliation_records(rec_df, selected_model)
     rec_kpis, _ = resolve_tab3_reconciliation_kpis(selected_model, base_kpis, filtered_rec_df, get_reconciliation_kpis if db_state.get("db_ok") else None, selected_lookback)
 
     if not filtered_rec_df.empty:
         st.plotly_chart(create_reconciliation_scatter(filtered_rec_df), use_container_width=True)
-        disp_df = filtered_rec_df.copy()
-        disp_df["Model Version"] = disp_df.get("model_version", "UNKNOWN")
+        disp_df = prepare_reconciliation_table_display(filtered_rec_df)
         disp_df["Predicted Direction"] = disp_df["predicted_return_pct"].apply(lambda r: "UP" if float(r or 0) >= 0 else "DOWN")
         disp_df["Actual Direction"] = disp_df["actual_return_pct"].apply(lambda r: "UP" if float(r or 0) >= 0 else "DOWN")
         disp_df["Direction Result"] = (disp_df["Predicted Direction"] == disp_df["Actual Direction"]).apply(lambda x: "[MATCH]" if x else "[MISMATCH]")
