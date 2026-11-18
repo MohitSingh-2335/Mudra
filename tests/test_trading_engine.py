@@ -28,7 +28,7 @@ from config import (
 )
 import scripts.run_hourly_worker as worker
 from src.backtesting import run_backtest_threshold
-from src.agents.council import (
+from src.agents import (
     generate_with_gemini_fallback,
     get_gemini_status,
     risk_critic_node,
@@ -242,7 +242,7 @@ def test_ui_generate_live_forecast_hurdle(monkeypatch):
 
 
 def test_council_scenarios_and_monkeypatch(monkeypatch):
-    monkeypatch.setattr("src.agents.council._get_gemini_api_key", lambda: None)
+    monkeypatch.setattr("src.agents._get_gemini_api_key", lambda: None)
     for scenario, expected_action in [("chop", "HOLD"), ("bullish", "BUY"), ("vol_spike", "SELL")]:
         m, t, f = app.build_council_scenario_payload(scenario, 65000.0)
         state = run_trading_graph("BTCUSDT", 65000.0, m, t, f)
