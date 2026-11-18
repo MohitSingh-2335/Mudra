@@ -37,24 +37,19 @@ def sample_features_payload():
 
 def test_health_check(client):
     res = client.get("/health")
-    assert res.status_code == 200
-    assert res.json()["status"] == "ok"
-    assert res.json()["model_version"] == ACTIVE_MODEL_VERSION
+    assert res.status_code == 200 and res.json()["status"] == "ok" and res.json()["model_version"] == ACTIVE_MODEL_VERSION
 
 
 def test_predict_valid_features(client, sample_features_payload):
     res = client.post("/predict", json=sample_features_payload)
     assert res.status_code == 200
     d = res.json()
-    assert d["current_price"] == pytest.approx(sample_features_payload["current_price"])
-    assert d["predicted_price"] > 0
-    assert d["directional_movement"] in ["Upward 📈", "Downward 📉"]
-    assert d["model_version"] == ACTIVE_MODEL_VERSION
+    assert d["current_price"] == pytest.approx(sample_features_payload["current_price"]) and d["predicted_price"] > 0
+    assert d["directional_movement"] in ["Upward 📈", "Downward 📉"] and d["model_version"] == ACTIVE_MODEL_VERSION
 
 
 def test_health_and_predict_model_version_provenance_parity(client, sample_features_payload):
-    assert ACTIVE_MODEL_VERSION == "xgb_onnx_v1.0.0"
-    assert SCHEMA_ACTIVE_MODEL_VERSION == "xgb_onnx_v1.0.0"
+    assert ACTIVE_MODEL_VERSION == SCHEMA_ACTIVE_MODEL_VERSION == "xgb_onnx_v1.0.0"
     assert client.get("/health").json()["model_version"] == "xgb_onnx_v1.0.0"
     assert client.post("/predict", json=sample_features_payload).json()["model_version"] == "xgb_onnx_v1.0.0"
     assert HealthResponse().model_version == "xgb_onnx_v1.0.0"
@@ -62,13 +57,10 @@ def test_health_and_predict_model_version_provenance_parity(client, sample_featu
 
 
 def test_predict_missing_and_invalid_features(client, sample_features_payload):
-    bad = {"current_price": 65000.0, "features": {"rsi": 55.0}}
-    assert client.post("/predict", json=bad).status_code == 400
-
+    assert client.post("/predict", json={"current_price": 65000.0, "features": {"rsi": 55.0}}).status_code == 400
     bad_p = sample_features_payload.copy()
     bad_p["current_price"] = -100.0
     assert client.post("/predict", json=bad_p).status_code == 422
-
     bad_nan = {"current_price": 65000.0, "features": dict(sample_features_payload["features"])}
     bad_nan["features"]["rsi"] = float("nan")
     assert client.post("/predict", json=bad_nan).status_code == 400
@@ -78,24 +70,18 @@ def test_explain_endpoint(client, sample_features_payload):
     res = client.post("/explain", json=sample_features_payload)
     assert res.status_code == 200
     d = res.json()
-    assert isinstance(d["base_value"], float)
-    assert isinstance(d["top_bullish_drivers"], list)
-    assert isinstance(d["top_bearish_drivers"], list)
+    assert isinstance(d["base_value"], float) and isinstance(d["top_bullish_drivers"], list) and isinstance(d["top_bearish_drivers"], list)
 
 
 def test_agents_trade_endpoint(client):
     payload = {
-        "symbol": "BTCUSDT",
-        "current_price": 65000.0,
+        "symbol": "BTCUSDT", "current_price": 65000.0,
         "market_data": {"close": 65000.0, "high": 65400.0, "low": 64800.0, "volume": 1500.0, "taker_buy_ratio": 0.55},
         "engineered_features": {"volatility_range_pct": 0.92, "taker_buy_ratio": 0.55},
         "ml_forecast": {"expected_return_pct": 0.25, "predicted_dollar_move": 162.5, "clears_hurdle": True},
     }
     res = client.post("/agents/trade", json=payload)
-    assert res.status_code == 200
-    d = res.json()
-    assert d["trade_action"] in ["BUY", "SELL", "HOLD"]
-    assert isinstance(d["risk_approved"], bool)
+    assert res.status_code == 200 and res.json()["trade_action"] in ["BUY", "SELL", "HOLD"] and isinstance(res.json()["risk_approved"], bool)
 
 
 def test_reconciliation_summary_endpoint(client):
@@ -112,10 +98,7 @@ def test_reconciliation_summary_endpoint(client):
             s.close()
 
     with patch("src.database.connection.get_db", _test_db), patch("src.database.queries.get_db", _test_db):
-        res_empty = client.get("/reconciliation/summary?lookback_hours=24")
-        assert res_empty.status_code == 200
-        assert res_empty.json()["total_reconciled"] == 0
-
+        assert client.get("/reconciliation/summary?lookback_hours=24").json()["total_reconciled"] == 0
         now = datetime.now(timezone.utc)
         with _test_db() as s:
             t1 = MarketTick(timestamp=now - timedelta(hours=2), open=60000.0, high=60200.0, low=59900.0, close=60100.0, volume=100.0)
@@ -128,9 +111,7 @@ def test_reconciliation_summary_endpoint(client):
             s.commit()
 
         res = client.get("/reconciliation/summary?lookback_hours=24")
-        assert res.status_code == 200
-        assert res.json()["total_reconciled"] == 2
-        assert res.json()["black_swan_count"] == 1
+        assert res.status_code == 200 and res.json()["total_reconciled"] == 2 and res.json()["black_swan_count"] == 1
 
 
 def test_portfolio_summary_endpoint(client):
@@ -147,19 +128,14 @@ def test_portfolio_summary_endpoint(client):
             s.close()
 
     with patch("src.database.connection.get_db", _test_db), patch("src.database.queries.get_db", _test_db):
-        res_empty = client.get("/portfolio/summary?current_price=65000.0")
-        assert res_empty.status_code == 200
-        assert res_empty.json()["cash_balance"] == 10000.0
-
+        assert client.get("/portfolio/summary?current_price=65000.0").json()["cash_balance"] == 10000.0
         with _test_db() as s:
             execute_paper_order(s, "BUY", 60000.0, kelly_fraction=0.10)
             execute_paper_order(s, "SELL", 63000.0)
             s.commit()
 
         res = client.get("/portfolio/summary?current_price=64000.0")
-        assert res.status_code == 200
-        assert res.json()["total_trades"] == 2
-        assert res.json()["realized_pnl_usd"] > 40.0
+        assert res.status_code == 200 and res.json()["total_trades"] == 2 and res.json()["realized_pnl_usd"] > 40.0
 
 
 def test_endpoints_defensive_fallbacks(client):
