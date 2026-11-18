@@ -1,11 +1,9 @@
-# src/api/schemas.py
-
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
-from pydantic import BaseModel, Field, ConfigDict
-from src.agents.market_analyst_agent import MarketAnalystReport
+from typing import Any, Dict, List, Optional
+from pydantic import BaseModel, ConfigDict, Field
 
 from config import ACTIVE_MODEL_VERSION
+from src.agents.market_analyst_agent import MarketAnalystReport
 
 __all__ = [
     "ACTIVE_MODEL_VERSION",
@@ -23,43 +21,35 @@ __all__ = [
 
 
 class HealthResponse(BaseModel):
-    """Health check status response."""
     model_config = ConfigDict(protected_namespaces=())
-    status: str = Field(default="ok", examples=["ok"])
-    model_version: str = Field(default=ACTIVE_MODEL_VERSION)
+    status: str = "ok"
+    model_version: str = ACTIVE_MODEL_VERSION
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class PredictRequest(BaseModel):
-    """
-    Inbound prediction request.
-    Requires current price and a dictionary mapping feature names to numerical values.
-    """
-    current_price: float = Field(..., gt=0, description="Latest BTC/USDT price in USD", examples=[62904.50])
-    features: Dict[str, float] = Field(..., description="Mapping of feature names to float values")
+    current_price: float = Field(..., gt=0)
+    features: Dict[str, float]
 
 
 class FeatureAttribution(BaseModel):
-    """Local TreeSHAP feature contribution."""
     feature: str
     shap_value: float
     actual_value: float
 
 
 class PredictResponse(BaseModel):
-    """Response containing numeric forecast, directional classification, and model provenance."""
     model_config = ConfigDict(protected_namespaces=())
     current_price: float
     predicted_price: float
     predicted_return: float
     directional_movement: str
     movement_code: int
-    model_version: str = Field(default=ACTIVE_MODEL_VERSION)
+    model_version: str = ACTIVE_MODEL_VERSION
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class ExplainResponse(BaseModel):
-    """Local TreeSHAP attributions for a given prediction."""
     base_value: float
     top_bullish_drivers: List[FeatureAttribution]
     top_bearish_drivers: List[FeatureAttribution]
@@ -67,23 +57,20 @@ class ExplainResponse(BaseModel):
 
 
 class FullAnalysisResponse(BaseModel):
-    """Complete quantitative analysis fusing ML predictions, SHAP, and Gemini AI agent."""
     prediction: PredictResponse
     explanation: ExplainResponse
     analyst_commentary: MarketAnalystReport
 
 
 class AgentTradeRequest(BaseModel):
-    """Inbound request payload for multi-agent trading graph deliberation."""
-    symbol: str = Field(default="BTCUSDT", description="Target trading asset")
-    current_price: Optional[float] = Field(default=None, description="Current spot price (auto-fetched if None)")
-    market_data: Optional[Dict[str, Any]] = Field(default=None, description="Optional raw bar data")
-    engineered_features: Optional[Dict[str, float]] = Field(default=None, description="Optional feature dict")
-    ml_forecast: Optional[Dict[str, Any]] = Field(default=None, description="Optional precomputed forecast")
+    symbol: str = "BTCUSDT"
+    current_price: Optional[float] = None
+    market_data: Optional[Dict[str, Any]] = None
+    engineered_features: Optional[Dict[str, float]] = None
+    ml_forecast: Optional[Dict[str, Any]] = None
 
 
 class AgentTradeResponse(BaseModel):
-    """Response payload from LangGraph 2-node Strategist -> Reflexion Risk Critic pipeline."""
     model_config = ConfigDict(extra="ignore", protected_namespaces=())
     symbol: str
     current_price: float
@@ -106,33 +93,31 @@ class AgentTradeResponse(BaseModel):
 
 
 class ReconciliationSummaryResponse(BaseModel):
-    """Rolling ground truth reconciliation metrics."""
     model_config = ConfigDict(extra="ignore")
-    total_reconciled: int = Field(default=0)
-    directional_accuracy_pct: float = Field(default=0.0)
-    mae_usd: float = Field(default=0.0)
-    mape_pct: float = Field(default=0.0)
-    information_coefficient_ic: float = Field(default=0.0)
-    black_swan_count: int = Field(default=0)
+    total_reconciled: int = 0
+    directional_accuracy_pct: float = 0.0
+    mae_usd: float = 0.0
+    mape_pct: float = 0.0
+    information_coefficient_ic: float = 0.0
+    black_swan_count: int = 0
     tag_breakdown: Dict[str, int] = Field(default_factory=dict)
-    model_version: Optional[str] = Field(default=None, description="Optional model version filter applied")
-    query_failed: bool = Field(default=False, description="Flag indicating whether underlying database query failed")
-    error: Optional[str] = Field(default=None, description="Explicit failure description if query failed")
+    model_version: Optional[str] = None
+    query_failed: bool = False
+    error: Optional[str] = None
 
 
 class PortfolioSummaryResponse(BaseModel):
-    """Paper portfolio execution metrics and excess Alpha."""
     model_config = ConfigDict(extra="ignore")
-    cash_balance: float = Field(default=10000.0)
-    btc_balance: float = Field(default=0.0)
-    current_btc_price: float = Field(default=0.0)
-    btc_position_value_usd: float = Field(default=0.0)
-    total_equity_usd: float = Field(default=10000.0)
-    cumulative_return_pct: float = Field(default=0.0)
-    benchmark_btc_equity: float = Field(default=10000.0)
-    alpha_usd: float = Field(default=0.0)
-    alpha_pct: float = Field(default=0.0)
-    realized_pnl_usd: float = Field(default=0.0)
-    total_fees_usd: float = Field(default=0.0)
-    drawdown_pct: float = Field(default=0.0)
-    total_trades: int = Field(default=0)
+    cash_balance: float = 10000.0
+    btc_balance: float = 0.0
+    current_btc_price: float = 0.0
+    btc_position_value_usd: float = 0.0
+    total_equity_usd: float = 10000.0
+    cumulative_return_pct: float = 0.0
+    benchmark_btc_equity: float = 10000.0
+    alpha_usd: float = 0.0
+    alpha_pct: float = 0.0
+    realized_pnl_usd: float = 0.0
+    total_fees_usd: float = 0.0
+    drawdown_pct: float = 0.0
+    total_trades: int = 0
