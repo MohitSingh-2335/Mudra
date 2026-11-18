@@ -1,5 +1,5 @@
 import pytest
-from src.agents.council import (
+from src.agents import (
     AgentState,
     build_trading_graph,
     calculate_technical_signals,
