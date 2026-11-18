@@ -15,7 +15,7 @@ from config import (
 from src.model_loader import load_verified_model
 from src.feature_engineering import validate_inference_features, predict_with_validation
 from src.explainability import get_tree_explainer, explain_single_prediction
-from src.agents.council import MarketAnalystReport, generate_market_commentary
+from src.agents import MarketAnalystReport, generate_market_commentary
 
 logger = logging.getLogger("src.api.main")
 __all__ = [
@@ -217,7 +217,7 @@ async def analyze(req: PredictRequest):
 @app.post("/agents/trade", response_model=AgentTradeResponse, tags=["Multi-Agent LangGraph"])
 async def run_agent_trade(req: AgentTradeRequest):
     # runs LangGraph multi-agent trade decision pipeline
-    from src.agents.council import run_trading_graph
+    from src.agents import run_trading_graph
     try:
         state = run_trading_graph(
             symbol=req.symbol, current_price=req.current_price, market_data=req.market_data,
