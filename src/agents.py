@@ -3,10 +3,16 @@
 Mudra Multi-Agent Intelligence Layer & Episodic RAG Memory.
 Combines LangGraph Council (Analyst -> Strategist -> Risk Critic) with ChromaDB episodic memory.
 """
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+try:
+    import onnxruntime
+except Exception:
+    pass
+
 import json
 import logging
 import math
-import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
