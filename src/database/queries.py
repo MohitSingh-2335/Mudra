@@ -85,7 +85,7 @@ def get_reconciliation_history(limit: int = 500, model_version: Optional[str] = 
 def get_reconciliation_kpis(lookback_hours: Optional[int] = 168, model_version: Optional[str] = None) -> Dict[str, Any]:
     # returns aggregate win rate, directional accuracy, and MAE
     try:
-        from src.engine.sync import get_reconciliation_summary
+        from src.engine import get_reconciliation_summary
         with get_db() as session:
             res = get_reconciliation_summary(session, limit=lookback_hours, model_version=model_version)
             res["query_failed"] = False
@@ -120,7 +120,7 @@ def get_portfolio_history(limit: int = 500) -> pd.DataFrame:
 def get_portfolio_kpis(current_price: float) -> Dict[str, Any]:
     # returns portfolio equity, alpha, and trade statistics
     try:
-        from src.engine.paper_portfolio import get_portfolio_summary
+        from src.engine import get_portfolio_summary
         with get_db() as session:
             return get_portfolio_summary(session, current_price=current_price)
     except Exception as exc:
