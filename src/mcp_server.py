@@ -51,7 +51,7 @@ def get_live_btc_derivatives_pulse() -> Dict[str, Any]:
 def get_live_btc_spot_and_range() -> Dict[str, Any]:
     """Returns the latest confirmed 1h BTC/USDT spot candle and predicted price range."""
     from src.database.queries import get_latest_market_ticks
-    from src.engine.sync import estimate_next_hour_price_range_usd
+    from src.engine import estimate_next_hour_price_range_usd
     df = get_latest_market_ticks(limit=48)
     if df.empty:
         return {"status": "OFFLINE_FALLBACK", "current_price": 65000.0, "predicted_range_usd": 650.0}
@@ -90,7 +90,7 @@ def get_spot_and_futures_trade_plan(
 ) -> Dict[str, Any]:
     """Returns Spot Hold-Until-Net-Profit decision and 3x Isolated Margin Futures execution plan."""
     from config import MIN_HURDLE_PCT
-    from src.engine.paper_portfolio import evaluate_spot_hold_until_profit_decision, evaluate_futures_long_short_plan
+    from src.engine import evaluate_spot_hold_until_profit_decision, evaluate_futures_long_short_plan
     from src.database.connection import get_db
 
     clears = bool(clears_hurdle) if clears_hurdle is not None else (abs(float(expected_return_pct)) >= float(MIN_HURDLE_PCT))
