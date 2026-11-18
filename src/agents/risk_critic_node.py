@@ -1,6 +1,5 @@
-# src/agents/risk_critic_node.py
 import math
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 from config import MIN_HURDLE_PCT, TOTAL_FRICTION_PER_SIDE_PCT, ROUND_TRIP_FRICTION_PCT
 from src.agents.graph_state import AgentState
 from src.agents.market_analyst_agent import _get_gemini_api_key, generate_with_gemini_fallback
@@ -8,66 +7,25 @@ from src.agents.market_analyst_agent import _get_gemini_api_key, generate_with_g
 ALLOWED_TRADE_ACTIONS = ("HOLD", "BUY", "SELL")
 
 
-def _parse_finite_expected_return_pct(ml_forecast: Any) -> Tuple[bool, float, Any]:
-    if not isinstance(ml_forecast, dict) or "expected_return_pct" not in ml_forecast:
-        return False, 0.0, None
-    raw = ml_forecast.get("expected_return_pct")
-    if raw is None or isinstance(raw, bool):
-        return False, 0.0, raw
+def _parse_float(val: Any, min_val: Optional[float] = None, max_val: Optional[float] = None) -> Tuple[bool, float]:
+    # Parse a finite float with optional min/max bounds
+    if val is None or isinstance(val, bool):
+        return False, 0.0
     try:
-        val = float(raw)
-        return (math.isfinite(val), val if math.isfinite(val) else 0.0, raw)
+        f = float(val)
+        if not math.isfinite(f):
+            return False, 0.0
+        if min_val is not None and f < min_val:
+            return False, 0.0
+        if max_val is not None and f > max_val:
+            return False, 0.0
+        return True, f
     except (TypeError, ValueError, OverflowError):
-        return False, 0.0, raw
-
-
-def _parse_strict_clears_hurdle_flag(ml_forecast: Any) -> Tuple[bool, bool, Any]:
-    if not isinstance(ml_forecast, dict) or "clears_hurdle" not in ml_forecast:
-        return False, False, None
-    raw = ml_forecast.get("clears_hurdle")
-    return (isinstance(raw, bool), raw is True, raw)
-
-
-def _parse_finite_volatility_pct(features: Any) -> Tuple[bool, float, Any]:
-    if not isinstance(features, dict) or "volatility_range_pct" not in features:
-        return False, 0.0, None
-    raw = features.get("volatility_range_pct")
-    if raw is None or isinstance(raw, bool):
-        return False, 0.0, raw
-    try:
-        val = float(raw)
-        return (math.isfinite(val) and val >= 0.0, val if math.isfinite(val) and val >= 0.0 else 0.0, raw)
-    except (TypeError, ValueError, OverflowError):
-        return False, 0.0, raw
-
-
-def _parse_valid_conviction_score(state: Any) -> Tuple[bool, int, Any]:
-    if not isinstance(state, dict) or "conviction_score" not in state:
-        return False, 0, None
-    raw = state.get("conviction_score")
-    if raw is None or isinstance(raw, bool):
-        return False, 0, raw
-    if isinstance(raw, int):
-        return True, raw, raw
-    if isinstance(raw, float) and math.isfinite(raw) and raw.is_integer():
-        return True, int(raw), raw
-    return False, 0, raw
-
-
-def _parse_positive_finite_price(state: Any) -> Tuple[bool, float, Any]:
-    if not isinstance(state, dict) or "current_price" not in state:
-        return False, 0.0, None
-    raw = state.get("current_price")
-    if raw is None or isinstance(raw, bool):
-        return False, 0.0, raw
-    try:
-        val = float(raw)
-        return (math.isfinite(val) and val > 0.0, val if math.isfinite(val) and val > 0.0 else 0.0, raw)
-    except (TypeError, ValueError, OverflowError):
-        return False, 0.0, raw
+        return False, 0.0
 
 
 def risk_critic_node(state: AgentState) -> AgentState:
+    # Reflexion Risk Critic: audits trade invariants, validates empirical fee hurdle, and bounds position size
     raw_action = state.get("trade_action") if isinstance(state, dict) else None
     action = raw_action.strip().upper() if isinstance(raw_action, str) else ""
 
@@ -83,7 +41,7 @@ def risk_critic_node(state: AgentState) -> AgentState:
 
     state["trade_action"] = action
 
-    # Gate 1: HOLD Preservation
+    # Gate 1: HOLD Capital Preservation
     if action == "HOLD":
         state["risk_approved"] = True
         state["veto_reason"] = None
@@ -98,9 +56,11 @@ def risk_critic_node(state: AgentState) -> AgentState:
         return state
 
     # Gate 2: Directional Friction Hurdle
-    ml_forecast = state.get("ml_forecast")
-    has_valid_return, expected_return, raw_return = _parse_finite_expected_return_pct(ml_forecast)
-    has_valid_flag, caller_clears, raw_clears_flag = _parse_strict_clears_hurdle_flag(ml_forecast)
+    ml_forecast = state.get("ml_forecast") if isinstance(state.get("ml_forecast"), dict) else {}
+    has_valid_return, expected_return = _parse_float(ml_forecast.get("expected_return_pct"))
+    raw_clears = ml_forecast.get("clears_hurdle")
+    has_valid_flag = isinstance(raw_clears, bool)
+    caller_clears = raw_clears is True
     dir_match = has_valid_return and ((action == "BUY" and expected_return > 0.0) or (action == "SELL" and expected_return < 0.0))
     numeric_clears = has_valid_return and (abs(expected_return) >= MIN_HURDLE_PCT)
 
@@ -110,63 +70,65 @@ def risk_critic_node(state: AgentState) -> AgentState:
         state["stop_loss_price"] = None
         state["take_profit_price"] = None
         if not has_valid_return:
-            state["veto_reason"] = f"Sub-Hurdle Fee Drag: Missing or non-finite forecasted return ({raw_return!r}) fails {MIN_HURDLE_PCT:.2f}% break-even threshold"
+            state["veto_reason"] = f"Sub-Hurdle Fee Drag: Missing or non-finite forecasted return fails {MIN_HURDLE_PCT:.2f}% break-even threshold"
         elif not dir_match:
             state["veto_reason"] = f"Sub-Hurdle Fee Drag: Directional Hurdle Mismatch ({action} with return {expected_return:+.4f}%)"
         elif not numeric_clears:
             state["veto_reason"] = f"Sub-Hurdle Fee Drag: Forecasted return < {MIN_HURDLE_PCT:.2f}% break-even threshold"
         else:
-            state["veto_reason"] = f"Sub-Hurdle Fee Drag: Upstream clears_hurdle contract ({raw_clears_flag!r}) did not authorize active trade"
+            state["veto_reason"] = f"Sub-Hurdle Fee Drag: Upstream clears_hurdle contract did not authorize active trade"
         state["risk_critic_critique"] = f"VETOED BY RISK CRITIC: {action} order fails empirical friction hurdle ({TOTAL_FRICTION_PER_SIDE_PCT:.2f}% per side)."
         return state
 
     # Gate 3: Volatility Spike Anomaly
-    has_valid_vol, vol_spread_pct, raw_vol = _parse_finite_volatility_pct(state.get("engineered_features"))
+    features = state.get("engineered_features") if isinstance(state.get("engineered_features"), dict) else {}
+    has_valid_vol, vol_spread_pct = _parse_float(features.get("volatility_range_pct"), min_val=0.0)
     if not has_valid_vol or vol_spread_pct > 3.8:
         state["risk_approved"] = False
         state["recommended_position_pct"] = 0.0
         state["stop_loss_price"] = None
         state["take_profit_price"] = None
-        state["veto_reason"] = f"Volatility Spike Anomaly: Single-hour spread ({vol_spread_pct:.2f}%) > 3.8% limit" if has_valid_vol else f"Volatility Spike Anomaly: Invalid spread ({raw_vol!r})"
+        state["veto_reason"] = f"Volatility Spike Anomaly: Single-hour spread ({vol_spread_pct:.2f}%) > 3.8% limit" if has_valid_vol else "Volatility Spike Anomaly: Invalid spread"
         state["risk_critic_critique"] = f"VETOED BY RISK CRITIC: Excessive volatility risk ({vol_spread_pct:.2f}%)."
         return state
 
     # Gate 4: Conviction Floor
-    has_valid_conviction, conviction, raw_conviction = _parse_valid_conviction_score(state)
-    if not has_valid_conviction or conviction < 4:
+    has_valid_conv, conviction_raw = _parse_float(state.get("conviction_score"), min_val=1.0, max_val=10.0)
+    conviction = int(conviction_raw) if has_valid_conv else 0
+    if not has_valid_conv or conviction < 4:
         state["risk_approved"] = False
         state["recommended_position_pct"] = 0.0
         state["stop_loss_price"] = None
         state["take_profit_price"] = None
-        state["veto_reason"] = f"Low Conviction Rating: Conviction ({conviction}/10) < 4 minimum threshold" if has_valid_conviction else f"Low Conviction Rating: Invalid conviction ({raw_conviction!r})"
-        state["risk_critic_critique"] = f"VETOED BY RISK CRITIC: Conviction below threshold."
+        state["veto_reason"] = f"Low Conviction Rating: Conviction ({conviction}/10) < 4 minimum threshold"
+        state["risk_critic_critique"] = "VETOED BY RISK CRITIC: Conviction below threshold."
         return state
 
     # Gate 5: Market Price Guard
-    has_valid_price, current_price, raw_price = _parse_positive_finite_price(state)
+    has_valid_price, current_price = _parse_float(state.get("current_price"), min_val=1e-6)
     if not has_valid_price:
         state["risk_approved"] = False
         state["recommended_position_pct"] = 0.0
         state["stop_loss_price"] = None
         state["take_profit_price"] = None
-        state["veto_reason"] = f"Invalid Market Price: Invalid current_price ({raw_price!r})"
-        state["risk_critic_critique"] = f"VETOED BY RISK CRITIC: Invalid market price."
+        state["veto_reason"] = "Invalid Market Price: Invalid current_price"
+        state["risk_critic_critique"] = "VETOED BY RISK CRITIC: Invalid market price."
         return state
 
-    # All gates cleared: Sizing and SL/TP computation
+    # Sizing and stop-loss / take-profit calculations
     state["risk_approved"] = True
     state["veto_reason"] = None
     position_pct = max(0.05, min(0.20, 0.10 + ((conviction - 5) * 0.02)))
     state["recommended_position_pct"] = round(position_pct, 4)
 
-    stop_distance = current_price * 0.015
-    take_distance = current_price * 0.025
+    stop_dist = current_price * 0.015
+    take_dist = current_price * 0.025
     if action == "BUY":
-        state["stop_loss_price"] = round(current_price - stop_distance, 2)
-        state["take_profit_price"] = round(current_price + take_distance, 2)
+        state["stop_loss_price"] = round(current_price - stop_dist, 2)
+        state["take_profit_price"] = round(current_price + take_dist, 2)
     elif action == "SELL":
-        state["stop_loss_price"] = round(current_price + stop_distance, 2)
-        state["take_profit_price"] = round(current_price - take_distance, 2)
+        state["stop_loss_price"] = round(current_price + stop_dist, 2)
+        state["take_profit_price"] = round(current_price - take_dist, 2)
 
     api_key = _get_gemini_api_key()
     if api_key and not state.get("circuit_breaker_active", False):
