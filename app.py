@@ -25,12 +25,12 @@ from config import (
     ROUND_TRIP_FRICTION_PCT, TOTAL_FRICTION_PER_SIDE_PCT,
 )
 from src.agents import fetch_historical_candles, run_trading_graph
-from src.database.connection import get_db, test_connection
-from src.database.queries import (
-    get_latest_council_audit, get_latest_market_ticks,
+from src.database import (
+    get_db, get_latest_council_audit, get_latest_market_ticks,
     get_portfolio_history, get_portfolio_kpis,
     get_prediction_investigations,
     get_reconciliation_history, get_reconciliation_kpis,
+    test_connection,
 )
 from src.engine import sync_hourly_quant_cycle
 from src.explainability import get_tree_explainer
