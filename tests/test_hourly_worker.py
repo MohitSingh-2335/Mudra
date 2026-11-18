@@ -63,58 +63,49 @@ def test_worker_failure_on_exception(isolated_db, temp_outbox, monkeypatch):
 
 
 def test_outbox_missing_noop(isolated_db, temp_outbox):
-    session, _ = isolated_db
-    assert worker.flush_outbox(session) == 0
+    assert worker.flush_outbox(isolated_db[0]) == 0
 
 
 def test_outbox_empty_unlinked(isolated_db, temp_outbox):
-    session, _ = isolated_db
     temp_outbox.write_text("   \n ", encoding="utf-8")
-    assert worker.flush_outbox(session) == 0
+    assert worker.flush_outbox(isolated_db[0]) == 0
     assert not temp_outbox.exists()
 
 
 def test_outbox_malformed_preserved(isolated_db, temp_outbox):
-    session, _ = isolated_db
     temp_outbox.write_text("{corrupt json", encoding="utf-8")
-    assert worker.flush_outbox(session) == 0
+    assert worker.flush_outbox(isolated_db[0]) == 0
     assert temp_outbox.exists()
 
 
 def test_outbox_flush_persists_and_unlinks(isolated_db, temp_outbox):
-    session, _ = isolated_db
+    session = isolated_db[0]
     t0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
     temp_outbox.write_text(json.dumps([{
         "type": "tick",
         "payload": {
-            "timestamp": t0.isoformat(),
-            "open": 60000.0, "high": 60500.0, "low": 59500.0, "close": 60200.0, "volume": 120.0,
-            "model_version": "xgb_v1", "feature_schema_version": "v1_39features",
-            "features": {"rsi": 55.4},
+            "timestamp": t0.isoformat(), "open": 60000.0, "high": 60500.0, "low": 59500.0, "close": 60200.0, "volume": 120.0,
+            "model_version": "xgb_v1", "feature_schema_version": "v1_39features", "features": {"rsi": 55.4},
         }
     }]), encoding="utf-8")
     assert worker.flush_outbox(session) == 1
     assert not temp_outbox.exists()
     tick = session.execute(select(MarketTick).where(MarketTick.timestamp == t0)).scalar_one_or_none()
-    assert tick is not None
-    assert tick.close == 60200.0
+    assert tick is not None and tick.close == 60200.0
 
 
 def test_outbox_replay_idempotent(isolated_db, temp_outbox):
-    session, _ = isolated_db
+    session = isolated_db[0]
     t0 = datetime(2026, 1, 1, 14, 0, tzinfo=timezone.utc)
     session.add(MarketTick(timestamp=t0, open=60000.0, high=60100.0, low=59900.0, close=60050.0, volume=10.0))
     session.commit()
-    temp_outbox.write_text(json.dumps([{
-        "type": "tick",
-        "payload": {"timestamp": t0.isoformat(), "open": 60000.0, "high": 60100.0, "low": 59900.0, "close": 60050.0, "volume": 10.0}
-    }]), encoding="utf-8")
+    temp_outbox.write_text(json.dumps([{"type": "tick", "payload": {"timestamp": t0.isoformat(), "open": 60000.0, "high": 60100.0, "low": 59900.0, "close": 60050.0, "volume": 10.0}}]), encoding="utf-8")
     assert worker.flush_outbox(session) == 0
     assert not temp_outbox.exists()
 
 
 def test_force_sync_deduplicates_paper_trade(isolated_db, monkeypatch):
-    session, _ = isolated_db
+    session = isolated_db[0]
     t0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
     candle = {"timestamp": t0, "open": 60000.0, "high": 60200.0, "low": 59800.0, "close": 60100.0, "volume": 75.0}
 
@@ -127,51 +118,44 @@ def test_force_sync_deduplicates_paper_trade(isolated_db, monkeypatch):
         "strategist_conviction": 8, "kelly_fraction": 0.10, "thesis": "Bullish",
     })
 
-    ok1, msg1, _ = sync.sync_hourly_quant_cycle(force=False)
+    ok1, _, _ = sync.sync_hourly_quant_cycle(force=False)
     assert ok1 is True
-    trades1 = session.execute(select(PaperPortfolio).where(PaperPortfolio.action == "BUY")).scalars().all()
-    assert len(trades1) == 1
+    assert len(session.execute(select(PaperPortfolio).where(PaperPortfolio.action == "BUY")).scalars().all()) == 1
 
     mock_ml.invoke = lambda *a: {"expected_return_pct": 0.95, "predicted_target_price": 60670.0, "confidence": 0.9, "clears_hurdle": True}
     ok2, msg2, _ = sync.sync_hourly_quant_cycle(force=True)
     assert ok2 is True
     assert "Trade deduplicated | No fees" in msg2
-
-    trades2 = session.execute(select(PaperPortfolio).where(PaperPortfolio.action == "BUY")).scalars().all()
-    assert len(trades2) == 1
+    assert len(session.execute(select(PaperPortfolio).where(PaperPortfolio.action == "BUY")).scalars().all()) == 1
     audits = session.execute(select(CouncilAudit)).scalars().all()
-    assert len(audits) == 2
-    assert "[FORCED_REANALYSIS]" in audits[1].execution_notes
+    assert len(audits) == 2 and "[FORCED_REANALYSIS]" in audits[1].execution_notes
 
 
 def test_force_false_idempotent_noop(isolated_db, monkeypatch):
-    session, _ = isolated_db
+    session = isolated_db[0]
     t0 = datetime(2026, 1, 1, 15, 0, tzinfo=timezone.utc)
     session.add(MarketTick(timestamp=t0, open=60000.0, high=60100.0, low=59900.0, close=60050.0, volume=10.0))
     session.commit()
     monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: {"timestamp": t0, "close": 60050.0, "candles": []})
     ok, msg, _ = sync.sync_hourly_quant_cycle(force=False)
-    assert ok is False
-    assert "already recorded" in msg
+    assert ok is False and "already recorded" in msg
 
 
 def test_atomic_rollback_on_failure(isolated_db, monkeypatch):
-    session, _ = isolated_db
+    session = isolated_db[0]
     t0 = datetime(2026, 1, 1, 16, 0, tzinfo=timezone.utc)
-    candle = {"timestamp": t0, "open": 60000.0, "high": 60200.0, "low": 59800.0, "close": 60100.0, "volume": 75.0}
-    monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: candle)
+    monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: {"timestamp": t0, "open": 60000.0, "high": 60200.0, "low": 59800.0, "close": 60100.0, "volume": 75.0})
     mock_signals = MagicMock()
     mock_signals.invoke.side_effect = RuntimeError("signal crash")
     monkeypatch.setattr(sync, "calculate_technical_signals", mock_signals)
 
     with pytest.raises(RuntimeError):
         sync.sync_hourly_quant_cycle(force=False)
-    ticks = session.execute(select(MarketTick)).scalars().all()
-    assert len(ticks) == 0
+    assert len(session.execute(select(MarketTick)).scalars().all()) == 0
 
 
 def test_execute_paper_order_concurrency(isolated_db):
-    session, _ = isolated_db
+    session = isolated_db[0]
     t0 = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
     tick = MarketTick(timestamp=t0, open=60000.0, high=60100.0, low=59900.0, close=60000.0, volume=10.0)
     session.add(tick)
@@ -182,7 +166,7 @@ def test_execute_paper_order_concurrency(isolated_db):
 
 
 def test_backfill_empty_db_bootstrap(isolated_db, monkeypatch):
-    session, _ = isolated_db
+    session = isolated_db[0]
     t_latest = datetime(2026, 2, 1, 12, 0, tzinfo=timezone.utc)
     history = [{"timestamp": pd.Timestamp(t_latest - timedelta(hours=i)), "open": 60000.0, "high": 60100.0, "low": 59900.0, "close": 60000.0, "volume": 10.0} for i in range(50, -1, -1)]
     monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: {
@@ -194,24 +178,18 @@ def test_backfill_empty_db_bootstrap(isolated_db, monkeypatch):
 
     ok, _, _ = sync.sync_hourly_quant_cycle(force=False)
     assert ok is True
-    ticks = session.execute(select(MarketTick)).scalars().all()
-    assert len(ticks) == 1
+    assert len(session.execute(select(MarketTick)).scalars().all()) == 1
 
 
 def test_single_missing_hour_backfill_and_reconcile(isolated_db, monkeypatch):
-    session, _ = isolated_db
-    t0 = datetime(2026, 2, 2, 10, 0, tzinfo=timezone.utc)
-    t1 = datetime(2026, 2, 2, 11, 0, tzinfo=timezone.utc)
-    t2 = datetime(2026, 2, 2, 12, 0, tzinfo=timezone.utc)
+    session = isolated_db[0]
+    t0, t1, t2 = datetime(2026, 2, 2, 10, 0, tzinfo=timezone.utc), datetime(2026, 2, 2, 11, 0, tzinfo=timezone.utc), datetime(2026, 2, 2, 12, 0, tzinfo=timezone.utc)
 
     monkeypatch.setattr(sync, "calculate_technical_signals", MagicMock(invoke=lambda *a: {}))
     monkeypatch.setattr(sync, "get_model_return_forecast", MagicMock(invoke=lambda *a: {"expected_return_pct": 0.5, "predicted_target_price": 60300.0, "confidence": 0.8, "clears_hurdle": True}))
     monkeypatch.setattr(sync, "run_trading_graph", lambda **k: {"final_decision": "BUY", "risk_verdict": "APPROVED", "strategist_action": "BUY", "strategist_conviction": 8, "kelly_fraction": 0.10, "thesis": "Bullish"})
 
-    c0 = {
-        "timestamp": t0, "open": 59900.0, "high": 60100.0, "low": 59800.0, "close": 60000.0, "volume": 80.0,
-        "candles": [{"timestamp": pd.Timestamp(t0), "open": 59900.0, "high": 60100.0, "low": 59800.0, "close": 60000.0, "volume": 80.0}],
-    }
+    c0 = {"timestamp": t0, "open": 59900.0, "high": 60100.0, "low": 59800.0, "close": 60000.0, "volume": 80.0, "candles": [{"timestamp": pd.Timestamp(t0), "open": 59900.0, "high": 60100.0, "low": 59800.0, "close": 60000.0, "volume": 80.0}]}
     monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: c0)
     ok0, _, _ = sync.sync_hourly_quant_cycle(force=False)
     assert ok0 is True
@@ -229,15 +207,13 @@ def test_single_missing_hour_backfill_and_reconcile(isolated_db, monkeypatch):
     assert ok2 is True
 
     ticks = session.execute(select(MarketTick).order_by(MarketTick.timestamp.asc())).scalars().all()
-    assert len(ticks) == 3
-    assert sync._normalize_utc_timestamp(ticks[1].timestamp) == t1
+    assert len(ticks) == 3 and sync._normalize_utc_timestamp(ticks[1].timestamp) == t1
     rec = session.execute(select(Reconciliation)).scalar_one_or_none()
-    assert rec is not None
-    assert rec.actual_price_at_t_plus_1 == pytest.approx(60240.0)
+    assert rec is not None and rec.actual_price_at_t_plus_1 == pytest.approx(60240.0)
 
 
 def test_large_gap_warning(isolated_db, caplog):
-    session, _ = isolated_db
+    session = isolated_db[0]
     t0 = datetime(2026, 2, 1, 0, 0, tzinfo=timezone.utc)
     session.add(MarketTick(timestamp=t0, open=60000.0, high=60100.0, low=59900.0, close=60000.0, volume=50.0))
     session.commit()
@@ -248,8 +224,7 @@ def test_large_gap_warning(isolated_db, caplog):
         inserted = sync.backfill_missing_candles(session, {"timestamp": t_30, "candles": candles_30})
         session.commit()
 
-    assert inserted == 29
-    assert "Detected large candle gap of 30.0 hours" in caplog.text
+    assert inserted == 29 and "Detected large candle gap of 30.0 hours" in caplog.text
 
 
 def test_normalize_utc_timestamp():
