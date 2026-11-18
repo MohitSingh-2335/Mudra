@@ -8,7 +8,7 @@ from sqlalchemy.orm import sessionmaker
 
 import config
 from config import ACTIVE_MODEL_VERSION, FEATURE_SCHEMA_VERSION
-from src.database.investigations import (
+from src.database.queries import (
     record_prediction_investigation,
     get_prediction_investigations,
     update_prediction_investigation_status,
