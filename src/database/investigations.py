@@ -16,6 +16,7 @@ __all__ = [
 ]
 
 
+# Validate investigation verification status and confidence score bounds
 def _validate_status_and_conf(status: str, confidence: Optional[float] = None) -> None:
     if not isinstance(status, str) or status.strip() not in ALLOWED_VERIFICATION_STATUSES:
         raise ValueError(f"Invalid verification_status '{status}'.")
@@ -28,6 +29,7 @@ def _validate_status_and_conf(status: str, confidence: Optional[float] = None) -
             raise ValueError(f"Diagnostic confidence must be between 0.0 and 1.0, got {confidence}.") from err
 
 
+# Convert ISO string or datetime to timezone-aware UTC datetime
 def _normalize_datetime(dt_val: Optional[Union[str, datetime]]) -> Optional[datetime]:
     if dt_val is None or isinstance(dt_val, datetime):
         return dt_val.replace(tzinfo=timezone.utc) if isinstance(dt_val, datetime) and not dt_val.tzinfo else dt_val
@@ -38,6 +40,7 @@ def _normalize_datetime(dt_val: Optional[Union[str, datetime]]) -> Optional[date
         raise ValueError(f"Invalid ISO datetime string: {dt_val}") from err
 
 
+# Records a new root-cause investigation hypothesis linked to a market tick
 def record_prediction_investigation(
     tick_id: int, model_version: str, headline: str, suspected_cause_category: str,
     hypothesis_notes: str, supporting_evidence_json: Optional[Dict[str, Any]] = None,
@@ -46,7 +49,6 @@ def record_prediction_investigation(
     headline_published_at: Optional[Union[str, datetime]] = None, prediction_id: Optional[int] = None,
     author: str = "SYSTEM", session: Optional[Session] = None,
 ) -> Dict[str, Any]:
-    # Records a new root-cause investigation hypothesis linked to a market tick
     _validate_status_and_conf(verification_status, diagnostic_confidence)
     for name, val in [("headline", headline), ("suspected_cause_category", suspected_cause_category), ("hypothesis_notes", hypothesis_notes), ("model_version", model_version)]:
         if not val or not val.strip():
@@ -85,11 +87,11 @@ def record_prediction_investigation(
         return _execute(new_session)
 
 
+# Queries investigations with optional model version, status, or keyword filters
 def get_prediction_investigations(
     limit: int = 50, model_version: Optional[str] = None, verification_status: Optional[str] = None,
     headline_query: Optional[str] = None, tick_id: Optional[int] = None, session: Optional[Session] = None,
 ) -> List[Dict[str, Any]]:
-    # Queries investigations with optional model version, status, or keyword filters
     def _execute(sess: Session) -> List[Dict[str, Any]]:
         stmt = select(PredictionInvestigation).order_by(desc(PredictionInvestigation.id))
         if model_version and model_version != "All Models":
@@ -108,8 +110,8 @@ def get_prediction_investigations(
         return _execute(s)
 
 
+# Fetches full investigation detail by primary key id
 def get_prediction_investigation_details(investigation_id: int, session: Optional[Session] = None) -> Optional[Dict[str, Any]]:
-    # Fetches full investigation detail by primary key id
     def _execute(sess: Session) -> Optional[Dict[str, Any]]:
         inv = sess.execute(select(PredictionInvestigation).where(PredictionInvestigation.id == investigation_id)).scalar_one_or_none()
         return inv.to_dict() if inv is not None else None
@@ -120,11 +122,11 @@ def get_prediction_investigation_details(investigation_id: int, session: Optiona
         return _execute(s)
 
 
+# Updates investigation status, author, and appends to immutable audit trail
 def update_prediction_investigation_status(
     investigation_id: int, new_status: str, verified_by: str, notes: Optional[str] = None,
     ground_truth_label: Optional[str] = None, new_confidence: Optional[float] = None, session: Optional[Session] = None,
 ) -> Dict[str, Any]:
-    # Updates investigation status, author, and appends to immutable audit trail
     _validate_status_and_conf(new_status, new_confidence)
     if not verified_by or not verified_by.strip():
         raise ValueError("verified_by cannot be empty.")
@@ -159,6 +161,6 @@ def update_prediction_investigation_status(
         return _execute(s)
 
 
+# Retrieves investigations explicitly approved for retraining datasets
 def get_training_approved_investigations(limit: int = 100, session: Optional[Session] = None) -> List[Dict[str, Any]]:
-    # Retrieves investigations explicitly approved for retraining datasets
     return get_prediction_investigations(limit=limit, verification_status="APPROVED_FOR_TRAINING", session=session)
