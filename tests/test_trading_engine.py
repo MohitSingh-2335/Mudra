@@ -27,7 +27,7 @@ from config import (
     _parse_execution_cost_rate,
 )
 import scripts.run_hourly_worker as worker
-from scripts.experiments.sweep_threshold import run_backtest_threshold
+from src.backtesting import run_backtest_threshold
 from src.agents.council import (
     generate_with_gemini_fallback,
     get_gemini_status,
