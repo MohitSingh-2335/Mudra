@@ -509,8 +509,11 @@ def get_database_url() -> str:
         return _normalize_db_url(db_url)
     try:
         import streamlit as st
-        if hasattr(st, "secrets") and "DATABASE_URL" in st.secrets:
-            return _normalize_db_url(st.secrets["DATABASE_URL"])
+        if hasattr(st, "secrets"):
+            if "DATABASE_URL" in st.secrets:
+                return _normalize_db_url(st.secrets["DATABASE_URL"])
+            if "neondb" in st.secrets and "DATABASE_URL" in st.secrets["neondb"]:
+                return _normalize_db_url(st.secrets["neondb"]["DATABASE_URL"])
     except Exception:
         pass
     if SECRETS_FILE.exists():
@@ -518,6 +521,8 @@ def get_database_url() -> str:
             data = tomllib.loads(SECRETS_FILE.read_text(encoding="utf-8"))
             if "DATABASE_URL" in data:
                 return _normalize_db_url(data["DATABASE_URL"])
+            if "neondb" in data and "DATABASE_URL" in data["neondb"]:
+                return _normalize_db_url(data["neondb"]["DATABASE_URL"])
         except Exception:
             pass
     fallback = Path("data/mudra_operational.db")
