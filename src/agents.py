@@ -20,14 +20,34 @@ from langchain_core.tools import tool
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field
 
+# Linux / Streamlit Cloud SQLite upgrade hook for ChromaDB
+try:
+    __import__("pysqlite3")
+    import sys
+    sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+except Exception:
+    pass
+
 # Silence ChromaDB telemetry
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 logging.getLogger("chromadb.telemetry").setLevel(logging.ERROR)
 logging.getLogger("chromadb.telemetry.posthog").setLevel(logging.ERROR)
 
-import chromadb
-from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
-from chromadb.config import Settings
+try:
+    import chromadb
+    from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
+    from chromadb.config import Settings
+    HAS_CHROMADB = True
+except Exception:
+    chromadb = None
+    HAS_CHROMADB = False
+    Documents = Any  # type: ignore
+    Embeddings = Any  # type: ignore
+    class EmbeddingFunction:  # type: ignore
+        pass
+    class Settings:  # type: ignore
+        def __init__(self, *args, **kwargs):
+            pass
 
 from config import (
     ACTIVE_MODEL_VERSION,
@@ -119,24 +139,43 @@ FOUNDATIONAL_KNOWLEDGE = [
 
 class MarketKnowledgeRAG:
     def __init__(self, db_path: str = CHROMADB_DIR, collection_name: str = CHROMA_COLLECTION_NAME):
-        Path(db_path).mkdir(parents=True, exist_ok=True)
-        self.client = chromadb.PersistentClient(path=db_path, settings=Settings(anonymized_telemetry=False, is_persistent=True))
-        self.embedding_fn = GeminiEmbeddingFunction()
-        self.collection = self.client.get_or_create_collection(name=collection_name, embedding_function=self.embedding_fn)
-        if self.collection.count() == 0:
-            self.collection.add(
-                ids=[item["id"] for item in FOUNDATIONAL_KNOWLEDGE],
-                documents=[item["doc"] for item in FOUNDATIONAL_KNOWLEDGE],
-                metadatas=[{"category": item["category"]} for item in FOUNDATIONAL_KNOWLEDGE],
-            )
+        self.has_chroma = False
+        if HAS_CHROMADB and chromadb is not None:
+            try:
+                Path(db_path).mkdir(parents=True, exist_ok=True)
+                self.client = chromadb.PersistentClient(path=db_path, settings=Settings(anonymized_telemetry=False, is_persistent=True))
+                self.embedding_fn = GeminiEmbeddingFunction()
+                self.collection = self.client.get_or_create_collection(name=collection_name, embedding_function=self.embedding_fn)
+                if self.collection.count() == 0:
+                    self.collection.add(
+                        ids=[item["id"] for item in FOUNDATIONAL_KNOWLEDGE],
+                        documents=[item["doc"] for item in FOUNDATIONAL_KNOWLEDGE],
+                        metadatas=[{"category": item["category"]} for item in FOUNDATIONAL_KNOWLEDGE],
+                    )
+                self.has_chroma = True
+            except Exception:
+                self.has_chroma = False
 
     def add_document(self, doc_id: str, text: str, metadata: Optional[dict] = None) -> None:
-        self.collection.upsert(ids=[doc_id], documents=[text], metadatas=[metadata or {}])
+        if self.has_chroma:
+            try:
+                self.collection.upsert(ids=[doc_id], documents=[text], metadatas=[metadata or {}])
+            except Exception:
+                pass
 
     def retrieve_market_context(self, query: str, n_results: int = 3) -> List[str]:
-        results = self.collection.query(query_texts=[query], n_results=n_results)
-        docs = results.get("documents")
-        return docs[0] if docs and len(docs) > 0 else []
+        if self.has_chroma:
+            try:
+                results = self.collection.query(query_texts=[query], n_results=n_results)
+                docs = results.get("documents")
+                if docs and len(docs) > 0:
+                    return docs[0]
+            except Exception:
+                pass
+        # Fallback to foundational knowledge in-memory
+        q_lower = query.lower()
+        matches = [item["doc"] for item in FOUNDATIONAL_KNOWLEDGE if any(w in item["doc"].lower() for w in q_lower.split() if len(w) > 3)]
+        return matches[:n_results] if matches else [FOUNDATIONAL_KNOWLEDGE[0]["doc"]]
 
 
 _rag_instance: Optional[MarketKnowledgeRAG] = None
