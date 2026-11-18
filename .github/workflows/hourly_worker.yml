@@ -1,7 +1,9 @@
 name: Mudra 24/7 Hourly Quant Worker
 
 on:
-  workflow_dispatch:     # On-demand manual execution & external cron-job.org webhook trigger
+  schedule:
+    - cron: '15 * * * *'  # Runs at :15 every hour (after Binance closes the 1h candle at :00)
+  workflow_dispatch:     # On-demand manual execution & external webhook trigger
 
 concurrency:
   group: hourly-quant-worker
@@ -35,3 +37,14 @@ jobs:
           PYTHONPATH: .
         run: |
           python scripts/run_hourly_worker.py
+
+      - name: Keep Streamlit Dashboard Awake
+        if: always()
+        run: |
+          STREAMLIT_URL="${{ secrets.STREAMLIT_APP_URL }}"
+          if [ -n "$STREAMLIT_URL" ]; then
+            echo "Pinging Streamlit App to prevent hibernation..."
+            curl -s -m 15 -o /dev/null -w "HTTP status: %{http_code}\n" "$STREAMLIT_URL" || true
+          else
+            echo "STREAMLIT_APP_URL secret not set. Skipping ping."
+          fi
