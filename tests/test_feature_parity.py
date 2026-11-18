@@ -4,13 +4,15 @@ import pandas as pd
 import ta
 
 import config
-from src.data_preprocessing import load_and_clean_data
+from src.data_preprocessing import (
+    load_and_clean_data,
+    merge_fear_greed,
+    merge_onchain,
+)
 from src.feature_engineering import (
     create_features, extract_features_for_inference, validate_inference_features,
     predict_with_validation, predict_proba_with_validation,
 )
-from src.agents.onchain_agent import merge_onchain
-from src.agents.fear_greed_agent import merge_fear_greed
 
 
 @pytest.fixture(scope="module")
