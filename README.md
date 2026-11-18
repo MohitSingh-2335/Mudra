@@ -34,6 +34,8 @@ Across **34,990 hours** of cleaned Binance market data (`2022-07-08` to `2026-07
 
 Rather than hiding this negative finding or reporting inflated numbers using lookahead leakage, this repository documents the complete empirical audit trail alongside an institutional-grade, 24/7 autonomous MLOps architecture.
 
+![Mudra Live Monitoring Dashboard](docs/images/dashboard_screenshot.png)
+
 ---
 
 ## 2. Real Empirical Proofs & Visual Evidence
@@ -128,7 +130,7 @@ flowchart LR
     B --> C["Dual XGBoost Inference\nModel 1: 53.26% Active\nModel 2: 52.49% Shadow"]
     C --> D["LangGraph Council\n1. Strategist Node\n2. Risk Critic Gate\n3. ChromaDB Episodic RAG"]
     D --> E["Paper Trading Ledger\n0.14% Fee Deduction\n$10,000 Virtual Bankroll"]
-    E --> F["Neon PostgreSQL\n880+ Hours Ground Truth\n6 Core Production Tables"]
+    E --> F["Neon PostgreSQL\nContinuous Ground Truth\n6 Core Production Tables"]
     F --> G["Streamlit Cloud Dashboard\nmudra-trading.streamlit.app\nTradingView Live Stream"]
     
     H["GitHub Actions Cron\nHourly Dispatch"] -. Triggers .-> B
@@ -147,20 +149,22 @@ Rather than letting raw model outputs execute directly, Mudra uses a 4-agent Lan
 3. **ChromaDB Episodic RAG Memory:** Vector memory storing embeddings of past market hours and model mispredictions. Before approving an order, it queries historical episodes where similar volatility spikes or order-flow patterns occurred, warning the council against repeated false breakouts.
 4. **Execution Agent:** Deterministically calculates position sizing, deducts 0.10% taker fee and 0.04% slippage, and updates the paper trading portfolio.
 
+![Mudra Paper Trading & LangGraph Multi-Agent Council](docs/images/dashboard_trading.png)
+
 ---
 
 ## 4. Production Database Schema (Neon PostgreSQL)
 
-The live production database on **Neon Serverless PostgreSQL** maintains continuous, immutable audit trails across 6 core production tables (verified over 880+ consecutive operating hours):
+The live production database on **Neon Serverless PostgreSQL** maintains continuous, immutable audit trails across 6 core production tables:
 
-| Table Name | Live Rows | Purpose |
+| Table Name | Primary & Foreign Keys | Purpose & Integrity Invariants |
 | :--- | :--- | :--- |
-| **`market_ticks`** | **949+** | Canonical 1-hour OHLCV candles, 39 feature vectors, and live prices from Binance. |
-| **`reconciliations`** | **882+** | Ground-truth delayed evaluations: pairs past predictions with real T+1h outcomes. |
-| **`paper_portfolio`** | **890+** | Forward $10,000 virtual paper trading ledger tracking cash, BTC balances, fees, and PnL. |
-| **`council_audits`** | **891+** | Multi-agent council deliberation records, conviction scores, and risk veto rationales. |
-| **`model_predictions`**| **737+** | Granular prediction logs comparing Model 1 (Active) and Model 2 (Shadow). |
-| **`model_registry`** | **3** | Cryptographic model registry tracking SHA-256 hashes and feature schemas. |
+| **`market_ticks`** | `tick_id` (PK), `timestamp` | Canonical 1-hour OHLCV candles, 39 feature vectors, and closed prices from Binance. |
+| **`reconciliations`** | `rec_id` (PK), `outcome_tick_id` (FK) | Ground-truth delayed evaluations: pairs past predictions with realized T+1h outcomes. |
+| **`paper_portfolio`** | `ledger_id` (PK), `tick_id` (FK) | Autonomous $10,000 virtual paper trading ledger tracking cash, BTC balances, fees, and PnL. |
+| **`council_audits`** | `audit_id` (PK), `tick_id` (FK) | Multi-agent council deliberation records, conviction scores, and risk veto rationales. |
+| **`model_predictions`**| `pred_id` (PK), `tick_id` (FK) | Granular prediction logs comparing Model 1 (Active) and Model 2 (Shadow). |
+| **`model_registry`** | `model_id` (PK, Unique) | Cryptographic model registry tracking SHA-256 hashes and feature schemas. |
 
 ---
 
@@ -179,30 +183,9 @@ A key machine learning lesson uncovered during empirical testing was the impact 
 
 ---
 
-## 6. Fresher Interview Defense & Technical Q&A
+## 6. How to Run Locally
 
-This section provides clear, honest answers for technical interviewers evaluating this project:
-
-#### Q1: "Why did you choose a chronological split instead of K-Fold Cross Validation?"
-> *"Financial time series have strong temporal autocorrelation. If you use standard random K-Fold cross validation, data from Tuesday is used to predict Monday, which leaks future market volatility and regime information into the past. Mudra uses a strict 80% train / 20% test chronological split with a 1-hour causality purge buffer to guarantee zero future data leaks across the boundary."*
-
-#### Q2: "Your directional accuracy is ~53%. Is that good or bad?"
-> *"In financial markets, a binary directional prediction of 50% represents a random walk. A 53.26% out-of-sample accuracy across 35,000 hours shows statistically detectable predictive signal. However, in trading, directional accuracy alone is not enough to make money. Because exchange transaction costs are ~0.14% round-trip, an unhedged 53% accuracy model loses money due to fee churn. Trading only when the expected return clears the fee hurdle is what protects capital."*
-
-#### Q3: "Why did your regression models fail to beat naive persistence?"
-> *"Hourly Bitcoin percentage returns have a mean near 0.00% and a standard deviation of ~0.48%. Because the signal-to-noise ratio is extremely low, any non-zero price prediction adds variance that exceeds the zero-change assumption of $\hat{P}_{t+1} = P_t$. Naive persistence achieved an RMSE of $398.77, while XGBoost achieved $399.47."*
-
-#### Q4: "Why use LangGraph and RAG instead of directly executing model predictions?"
-> *"Pure machine learning models only output numbers; they do not understand transaction friction, volatility spikes, or capital risk. We used LangGraph to separate signal generation from risk management. The Strategist Agent proposes a trade, but the Risk Critic can veto it if the expected profit doesn't clear the 0.14% fee hurdle. ChromaDB RAG acts as episodic memory, retrieving similar historical market periods where the model failed so the council avoids repeating false breakouts."*
-
-#### Q5: "How does the pipeline run 24/7 autonomously on a zero budget?"
-> *"The entire system operates on free-tier infrastructure: an automated GitHub Actions cron workflow executes hourly inference, logs verified data into a free-tier Neon Serverless PostgreSQL database, and streams live telemetry to Streamlit Community Cloud."*
-
----
-
-## 7. How to Run Locally
-
-### 7.1 Clone and Install Dependencies
+### 6.1 Clone and Install Dependencies
 ```bash
 git clone https://github.com/MohitSingh-2335/Stock_Prediction_ML.git
 cd Stock_Prediction_ML
@@ -212,13 +195,13 @@ source .venv/bin/activate       # On Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 7.2 Run Automated Test Suite (88/88 Passing)
+### 6.2 Run Automated Test Suite (88/88 Passing)
 ```bash
 pytest tests/ -q
 ```
 Verifies temporal split causality, cryptographic SHA-256 model digests, exchange fee hurdle logic, and database schemas.
 
-### 7.3 Launch the Streamlit Monitoring Dashboard
+### 6.3 Launch the Streamlit Monitoring Dashboard
 ```bash
 streamlit run app.py
 ```
@@ -228,14 +211,14 @@ Opens the interactive dashboard at `http://localhost:8501` featuring:
 - Interactive LangGraph Multi-Agent deliberation panel.
 - $10,000 virtual paper trading account ledger.
 
-### 7.4 Run the Hourly Inference Worker
+### 6.4 Run the Hourly Inference Worker
 ```bash
 python scripts/run_hourly_worker.py
 ```
 
 ---
 
-## 8. Repository Structure
+## 7. Repository Structure
 
 ```text
 Stock_Prediction_ML/
@@ -254,7 +237,9 @@ Stock_Prediction_ML/
 │   ├── raw/BTCUSDT-1H.csv              # 35,064 raw 1-hour Binance candles
 │   └── processed/featured_btc_data.csv # 34,990 clean featured rows
 ├── docs/
-│   ├── images/                         # Real empirical proof plots embedded in README
+│   ├── images/                         # Real empirical proof plots & live dashboard screenshots
+│   │   ├── dashboard_screenshot.png    # Live Streamlit headline metrics & predictions table
+│   │   ├── dashboard_trading.png       # Live LangGraph multi-agent council & paper trading ledger
 │   │   ├── chronological_split_proof.png
 │   │   ├── model_benchmark_comparison.png
 │   │   └── ground_truth_reconciliation.png
@@ -277,7 +262,7 @@ Stock_Prediction_ML/
 
 ---
 
-## 9. License & Ethical Disclaimer
+## 8. License & Ethical Disclaimer
 
 This project is licensed under the MIT License.
 
