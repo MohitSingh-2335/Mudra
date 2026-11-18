@@ -26,7 +26,7 @@ from config import (
     FEATURE_SCHEMA_VERSION,
 )
 from src.agents.tools import calculate_technical_signals, get_model_return_forecast
-from src.agents.trading_graph import run_trading_graph
+from src.agents.council import run_trading_graph
 from src.database.connection import get_db, has_tick_id_column, test_connection
 from src.database.models import CouncilAudit, MarketTick, PaperPortfolio
 from src.engine.paper_portfolio import execute_paper_order, get_portfolio_summary
