@@ -446,7 +446,47 @@ with c5:
 
 st.markdown("---")
 
-# Section 2: AI Multi-Agent & RAG Reasoning Box
+# Section 2: Previous Model Predictions vs. Real Market Outcomes (Ground Truth)
+st.subheader("📋 Previous AI Model Predictions vs. Real Market Outcomes (Ground Truth)")
+st.caption("Delayed T+1h ground-truth verification: Compares what each AI model predicted against the real Bitcoin closing price 1 hour later.")
+
+rec_df = db_state.get("rec_df", pd.DataFrame())
+rec_kpis = db_state.get("rec_kpis", {})
+
+if not rec_df.empty:
+    total_eval = rec_kpis.get("total_reconciled") or len(rec_df)
+    hit_rate = rec_kpis.get("directional_accuracy_pct") or rec_kpis.get("win_rate_pct") or 52.8
+    mae = rec_kpis.get("mae_usd") or (float(rec_df["absolute_error_usd"].mean()) if "absolute_error_usd" in rec_df.columns else 284.0)
+
+    rk1, rk2, rk3 = st.columns(3)
+    with rk1:
+        st.metric("Total Predictions Evaluated", f"{total_eval} Hours", "Continuous Logging")
+    with rk2:
+        st.metric("Directional Hit Rate", f"{float(hit_rate):.1f}%", "vs. 50% Random Flip")
+    with rk3:
+        st.metric("Mean Dollar Error (MAE)", f"${float(mae):,.2f}", "Next-Hour Price Move")
+
+    # Format Display Table
+    table_df = rec_df.copy()
+    table_df["Time (UTC)"] = pd.to_datetime(table_df["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
+    table_df["Model"] = table_df["model_version"].fillna("xgb_v1").apply(lambda m: "Model 1 (39 Feat)" if "v1" in str(m) else "Model 2 (Stationary)")
+    table_df["BTC Price at Prediction"] = table_df.get("close", table_df["predicted_price"]).apply(lambda x: f"${float(x or 0):,.2f}")
+    table_df["AI Forecast Target"] = table_df["predicted_price"].apply(lambda x: f"${float(x or 0):,.2f}")
+    table_df["Actual Next-Hour Close"] = table_df["actual_price_at_t_plus_1"].apply(lambda x: f"${float(x or 0):,.2f}")
+    table_df["Predicted Dir"] = table_df["predicted_return_pct"].apply(lambda r: "UP 🟢" if float(r or 0) >= 0 else "DOWN 🔴")
+    table_df["Actual Dir"] = table_df["actual_return_pct"].apply(lambda r: "UP 🟢" if float(r or 0) >= 0 else "DOWN 🔴")
+    table_df["Result"] = table_df["direction_correct"].apply(lambda c: "✅ MATCH" if c else "❌ MISMATCH")
+    table_df["Difference ($)"] = table_df["absolute_error_usd"].apply(lambda e: f"${float(e or 0):,.2f}")
+    table_df["Diagnosis"] = table_df.get("error_attribution_tag", "Normal Variance").apply(lambda t: str(t).replace("_", " "))
+
+    show_cols = ["Time (UTC)", "Model", "BTC Price at Prediction", "AI Forecast Target", "Actual Next-Hour Close", "Predicted Dir", "Actual Dir", "Difference ($)", "Result", "Diagnosis"]
+    st.dataframe(table_df[show_cols].head(25), use_container_width=True, hide_index=True)
+else:
+    st.info("No historical reconciliation records found in database. Hourly worker logs will populate here continuously.")
+
+st.markdown("---")
+
+# Section 3: AI Multi-Agent & RAG Reasoning Box
 st.subheader("🧠 Why Did the AI Make This Prediction? (Multi-Agent Council & RAG Memory)")
 
 if current_price is not None and forecast_result is not None:
@@ -520,49 +560,13 @@ else:
 
 st.markdown("---")
 
-# Section 4: Visual Price vs. Forecast Chart
+# Section 5: Visual Price Action & Volatility Charts
 st.subheader("📊 Bitcoin Price Action & Technical Volatility")
 st.plotly_chart(create_tradingview_candlestick(live_market_df), use_container_width=True)
 
-# Section 5: Live Neon PostgreSQL Reconciliation Table (Delayed Ground Truth)
-st.markdown("---")
-st.subheader("📜 Live Ground-Truth Evaluation Log (Queried Directly from Neon PostgreSQL)")
-st.caption("Delayed T+1h reconciliation compares each prediction against actual market closing prices 1 hour later.")
-
-rec_df = db_state.get("rec_df", pd.DataFrame())
-rec_kpis = db_state.get("rec_kpis", {})
-
 if not rec_df.empty:
-    total_eval = rec_kpis.get("total_reconciled") or len(rec_df)
-    hit_rate = rec_kpis.get("directional_accuracy_pct") or rec_kpis.get("win_rate_pct") or 52.8
-    mae = rec_kpis.get("mae_usd") or (float(rec_df["absolute_error_usd"].mean()) if "absolute_error_usd" in rec_df.columns else 284.0)
-
-    rk1, rk2, rk3 = st.columns(3)
-    with rk1:
-        st.metric("Total Hours Reconciled", f"{total_eval} Hours", "Continuous Logging")
-    with rk2:
-        st.metric("Directional Hit Rate", f"{float(hit_rate):.1f}%", "vs. 50% Random Flip")
-    with rk3:
-        st.metric("Mean Dollar Error (MAE)", f"${float(mae):,.2f}", "Next-Hour Price Move")
-
-    st.plotly_chart(create_reconciliation_scatter(rec_df), use_container_width=True)
-
-    # Format Display Table
-    table_df = rec_df.copy()
-    table_df["Time (UTC)"] = pd.to_datetime(table_df["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
-    table_df["BTC Price at Prediction"] = table_df.get("close", table_df["predicted_price"]).apply(lambda x: f"${float(x or 0):,.2f}")
-    table_df["AI Forecast Target"] = table_df["predicted_price"].apply(lambda x: f"${float(x or 0):,.2f}")
-    table_df["Actual Next-Hour Close"] = table_df["actual_price_at_t_plus_1"].apply(lambda x: f"${float(x or 0):,.2f}")
-    table_df["Predicted Dir"] = table_df["predicted_return_pct"].apply(lambda r: "UP 🟢" if float(r or 0) >= 0 else "DOWN 🔴")
-    table_df["Actual Dir"] = table_df["actual_return_pct"].apply(lambda r: "UP 🟢" if float(r or 0) >= 0 else "DOWN 🔴")
-    table_df["Result"] = table_df["direction_correct"].apply(lambda c: "✅ MATCH" if c else "❌ MISMATCH")
-    table_df["Absolute Error ($)"] = table_df["absolute_error_usd"].apply(lambda e: f"${float(e or 0):,.2f}")
-    table_df["Diagnosis"] = table_df.get("error_attribution_tag", "Normal Variance").apply(lambda t: str(t).replace("_", " "))
-
-    show_cols = ["Time (UTC)", "BTC Price at Prediction", "AI Forecast Target", "Actual Next-Hour Close", "Predicted Dir", "Actual Dir", "Absolute Error ($)", "Result", "Diagnosis"]
-    st.dataframe(table_df[show_cols].head(50), use_container_width=True, hide_index=True)
-else:
-    st.info("No historical reconciliation records found in database. Hourly worker logs will populate here continuously.")
+    with st.expander("📈 View Forecast Target vs. Realized Market Scatter Plot", expanded=False):
+        st.plotly_chart(create_reconciliation_scatter(rec_df), use_container_width=True)
 
 # Section 5: Model Pedigree & Scientific Methodology
 with st.expander("🔬 Research Findings, Anti-Leakage Split & Model Governance", expanded=False):
