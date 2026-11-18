@@ -24,6 +24,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
+import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Mudra — Bitcoin AI/ML Forecasting Engine", layout="wide", initial_sidebar_state="expanded")
 st.markdown("<style>.main { background-color: #0E1117; color: #E0E0E0; }</style>", unsafe_allow_html=True)
@@ -398,10 +399,12 @@ if st.sidebar.button("Refresh Live Telemetry", use_container_width=True):
 st.sidebar.markdown("---")
 st.sidebar.subheader("Live System Status")
 
-if db_state["db_ok"]:
+is_neon_connected = db_state["db_ok"] and "postgres" in str(db_state.get("db_ver", "")).lower()
+
+if is_neon_connected:
     st.sidebar.success(f"Neon Cloud DB: Connected ({db_state['db_lat']:.0f}ms)")
 else:
-    st.sidebar.error("Neon Cloud DB: Offline (Using Local Storage)")
+    st.sidebar.warning("Neon Cloud DB: Disconnected (Using Local SQLite). To load 880+ hours of ground truth, set DATABASE_URL in Streamlit Cloud Secrets.")
 
 if is_stale_fallback:
     st.sidebar.warning(f"Market Feed: Stale ({stale_age_hours:.0f}h lag)" if not live_market_df.empty else "Market Feed: Offline")
@@ -482,12 +485,19 @@ if not rec_df.empty:
     show_cols = ["Time (UTC)", "Model", "BTC Price at Prediction", "AI Forecast Target", "Actual Next-Hour Close", "Predicted Dir", "Actual Dir", "Difference ($)", "Result", "Diagnosis"]
     st.dataframe(table_df[show_cols].head(25), use_container_width=True, hide_index=True)
 else:
-    st.info("No historical reconciliation records found in database. Hourly worker logs will populate here continuously.")
+    if not is_neon_connected:
+        st.warning("⚠️ Streamlit Cloud is currently reading from local fallback storage (0 records). To load all 880+ hours of ground-truth predictions from Neon PostgreSQL, add DATABASE_URL to your Streamlit Cloud Secrets.")
+    else:
+        st.info("No historical reconciliation records found in database. Hourly worker logs will populate here continuously.")
 
 st.markdown("---")
 
 # Section 3: AI Multi-Agent & RAG Reasoning Box
 st.subheader("🧠 Why Did the AI Make This Prediction? (Multi-Agent Council & RAG Memory)")
+st.caption(
+    "How Mudra uses a LangGraph multi-agent council to prevent bad trades: "
+    "Machine learning models predict price moves, but independent agents evaluate market risk, fee hurdles, and past error memory before executing."
+)
 
 if current_price is not None and forecast_result is not None:
     audit_data = db_state.get("latest_audit") or {}
@@ -510,9 +520,42 @@ if current_price is not None and forecast_result is not None:
                 st.success("Council Deliberation Complete!")
                 st.rerun()
 
+    # 4-Agent Architecture Breakdown for Recruiters / Technical Interviews
+    st.markdown("##### 👥 Multi-Agent Responsibilities (LangGraph Architecture)")
+    ag1, ag2, ag3, ag4 = st.columns(4)
+    with ag1:
+        st.markdown(
+            "**1. Strategist Agent**  \n"
+            "*Role:* Evaluates dual XGBoost signals (Active 39-feature vs. Shadow stationary). Proposes a trade ONLY when expected move exceeds the 0.14% exchange fee hurdle."
+        )
+    with ag2:
+        st.markdown(
+            "**2. Risk Critic Agent**  \n"
+            "*Role:* Evaluates volatility spread, range expansion, and liquidation risk. Has absolute veto power over the Strategist during choppy or adverse market regimes."
+        )
+    with ag3:
+        st.markdown(
+            "**3. ChromaDB RAG Memory**  \n"
+            "*Role:* Episodic vector memory. Embeds past market hours and retrieves historical mispredictions to stop the council from repeating past false-breakout mistakes."
+        )
+    with ag4:
+        st.markdown(
+            "**4. Execution Agent**  \n"
+            "*Role:* Deterministic accounting. Deducts exchange taker fees (0.10%) and slippage (0.04%), managing cash and BTC balances in the paper portfolio."
+        )
+
+    with st.expander("🎓 Technical Interview Notes: Why Machine Learning Alone Is Not Enough In Quant Trading", expanded=False):
+        st.markdown(
+            """
+            - **The 0.14% Fee Hurdle Reality:** On 1-hour Bitcoin candles, standard binary prediction accuracy of ~53% is statistically significant (baseline random walk is 50%). However, Binance charges 0.05% maker / 0.10% taker fee per trade (~0.14% round-trip friction with slippage). Trading every hour on slight edges results in negative PnL due to fee drag.
+            - **Why LangGraph Multi-Agent Architecture Was Chosen:** Pure ML outputs raw numbers. The LangGraph council separates *signal generation* (XGBoost) from *capital preservation* (Risk Critic). If the market is in sideways chop, the Risk Critic forces a `HOLD`, saving capital.
+            - **Episodic RAG Retrieval:** By vectorizing past hourly features into ChromaDB, the council checks: *"Did we previously lose money under this exact volatility and order-flow profile?"* If yes, the council reduces conviction or rejects the trade.
+            """
+        )
+
 st.markdown("---")
 
-# Section 3: Paper Trading Account & Live Model PnL ($10,000 Base)
+# Section 4: Paper Trading Account & Live Model PnL ($10,000 Base)
 st.subheader("💰 Paper Trading Account & Live Model PnL ($10,000 Base)")
 st.caption(
     "Simulated execution accounting: Higher-confidence AI model (Active 53.26% vs. Shadow 52.49%) drives BUY/SELL/HOLD decisions. "
@@ -561,7 +604,26 @@ else:
 st.markdown("---")
 
 # Section 5: Visual Price Action & Volatility Charts
-st.subheader("📊 Bitcoin Price Action & Technical Volatility")
+st.subheader("📊 Bitcoin Price Action & Real-Time TradingView Stream")
+st.caption("Live streaming price chart from Binance via TradingView (updates in real time):")
+components.html(
+    """
+    <div class="tradingview-widget-container" style="height:540px;width:100%;margin:0;padding:0;">
+      <div id="tradingview_mudra" style="height:100%;width:100%;"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+      <script type="text/javascript">
+      new TradingView.widget({
+        "autosize": true, "symbol": "BINANCE:BTCUSDT", "interval": "60", "timezone": "Etc/UTC",
+        "theme": "dark", "style": "1", "locale": "en", "toolbar_bg": "#0E1117", "enable_publishing": false,
+        "container_id": "tradingview_mudra", "backgroundColor": "#0E1117", "gridColor": "rgba(43, 49, 62, 0.4)"
+      });
+      </script>
+    </div>
+    """,
+    height=550,
+)
+
+st.caption("Python Plotly Technical Analysis (Hourly Candles with EMA 20, EMA 50 & Volume):")
 st.plotly_chart(create_tradingview_candlestick(live_market_df), use_container_width=True)
 
 if not rec_df.empty:
