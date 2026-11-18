@@ -85,7 +85,7 @@ def get_reconciliation_history(limit: int = 500, model_version: Optional[str] = 
 def get_reconciliation_kpis(lookback_hours: Optional[int] = 168, model_version: Optional[str] = None) -> Dict[str, Any]:
     # returns aggregate win rate, directional accuracy, and MAE
     try:
-        from src.engine.reconciliation import get_reconciliation_summary
+        from src.engine.sync import get_reconciliation_summary
         with get_db() as session:
             res = get_reconciliation_summary(session, limit=lookback_hours, model_version=model_version)
             res["query_failed"] = False
