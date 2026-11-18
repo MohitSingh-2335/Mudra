@@ -1,4 +1,3 @@
-# scripts/experiments/sweep_threshold.py
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 import sys
@@ -25,6 +24,7 @@ TOTAL_FRICTION = TOTAL_FRICTION_PER_SIDE_RATE
 
 
 def train_classifier(df: pd.DataFrame, split_idx: int) -> Tuple[LogisticRegression, StandardScaler]:
+    # trains scaled logistic regression baseline on train split
     X_train = df[CLASSIFIER_FEATURES].iloc[:split_idx]
     y_train = df["Target_Movement"].iloc[:split_idx]
     scaler = StandardScaler()
@@ -34,6 +34,7 @@ def train_classifier(df: pd.DataFrame, split_idx: int) -> Tuple[LogisticRegressi
 
 
 def run_backtest_threshold(test_df: pd.DataFrame, model: Any, scaler: StandardScaler, threshold: float = 0.50) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    # backtests trading strategy across decision probability threshold with transaction friction
     probs = model.predict_proba(scaler.transform(test_df[CLASSIFIER_FEATURES]))[:, 1]
     signals = (probs > threshold).astype(int)
 
@@ -72,6 +73,7 @@ def run_backtest_threshold(test_df: pd.DataFrame, model: Any, scaler: StandardSc
 
 
 def compute_metrics(equity_curve_df: pd.DataFrame, trade_log_df: pd.DataFrame, test_df: pd.DataFrame) -> Dict[str, float]:
+    # calculates cumulative return, Sharpe ratio, and maximum drawdown
     final_eq = equity_curve_df["equity"].iloc[-1]
     returns = equity_curve_df["equity"].pct_change().fillna(0.0)
     running_max = equity_curve_df["equity"].cummax()
@@ -86,6 +88,7 @@ def compute_metrics(equity_curve_df: pd.DataFrame, trade_log_df: pd.DataFrame, t
 
 
 def run_threshold_sweep(data_path: Path = Path(BTCUSDT_1H_CSV), output_path: Path = Path(THRESHOLD_SWEEP), thresholds: List[float] = [0.50, 0.55, 0.60, 0.65, 0.70]) -> pd.DataFrame:
+    # sweeps classification decision thresholds and saves comparison CSV
     df = create_features(merge_onchain(merge_fear_greed(load_and_clean_data(data_path), "timestamp"), "timestamp"), drop_na=True)
     split_idx = int(len(df) * 0.8)
     test_df = df.iloc[split_idx:].reset_index(drop=True)
