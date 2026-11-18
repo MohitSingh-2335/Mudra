@@ -1,4 +1,3 @@
-# config.py
 import os
 import json
 import math
@@ -10,6 +9,7 @@ BASE_DIR = Path(__file__).resolve().parent
 
 
 def _parse_execution_cost_rate(rate_var: str, pct_var: str, default_rate: Optional[float] = None, max_rate: float = 0.01, max_pct: float = 5.0) -> float:
+    # parses execution cost rates from environment variables with bounds checking
     rate_str, pct_str = os.getenv(rate_var), os.getenv(pct_var)
     rate_val: Optional[float] = None
     if rate_str and rate_str.strip():
@@ -17,10 +17,8 @@ def _parse_execution_cost_rate(rate_var: str, pct_var: str, default_rate: Option
             rate_val = float(rate_str)
         except ValueError as err:
             raise ValueError(f"Invalid non-numeric value for {rate_var}='{rate_str}'.") from err
-        if not math.isfinite(rate_val) or rate_val < 0.0:
-            raise ValueError(f"Environment variable {rate_var} must be a non-negative finite rate.")
-        if rate_val > max_rate:
-            raise ValueError(f"{rate_var} exceeds maximum allowed rate of {max_rate}.")
+        if not math.isfinite(rate_val) or rate_val < 0.0 or rate_val > max_rate:
+            raise ValueError(f"{rate_var} must be a non-negative finite rate <= {max_rate}.")
 
     pct_val: Optional[float] = None
     if pct_str and pct_str.strip():
@@ -78,7 +76,7 @@ if (_hurdle_rate_env and _hurdle_rate_env.strip()) or (_hurdle_pct_env and _hurd
     _floor_dec = Decimal("1") - (Decimal("1") - (Decimal(str(TAKER_FEE_RATE)) + Decimal(str(SLIPPAGE_RATE)))) ** 2
     _configured_dec = Decimal(_hurdle_rate_env.strip()) if _hurdle_rate_env and _hurdle_rate_env.strip() else Decimal(_hurdle_pct_env.strip()) / Decimal("100")
     if _configured_dec < _floor_dec:
-        raise ValueError(f"Configured MIN_HURDLE_RATE cannot be less than estimated ROUND_TRIP_FRICTION_RATE.")
+        raise ValueError("Configured MIN_HURDLE_RATE cannot be less than estimated ROUND_TRIP_FRICTION_RATE.")
 else:
     MIN_HURDLE_RATE: float = ROUND_TRIP_FRICTION_RATE
 
@@ -179,57 +177,30 @@ APP_TITLE: str = "Mudra — Bitcoin Price Prediction & Model Monitoring"
 APP_SUBTITLE: str = "Live BTC/USDT Price, Next-Hour ML Forecast & Multi-Model Evaluation"
 
 FEATURE_DISPLAY_NAMES: Dict[str, str] = {
-    "taker_buy_ratio": "Buyer vs. Seller Volume",
-    "taker_buy_ratio_mean_6h": "6-Hour Average Buyer Ratio",
-    "vol_mean_6h": "6-Hour Average Price Swing ($)",
-    "vol_std_6h": "6-Hour Swing Change ($)",
-    "vol_max_6h": "Largest 1h Swing in Last 6h ($)",
-    "vol_min_6h": "Smallest 1h Swing in Last 6h ($)",
-    "vol_1h": "1-Hour High–Low Price Range ($)",
-    "Volatility": "Hourly Price Volatility ($)",
-    "high_low_spread": "1-Hour High–Low Price Range ($)",
-    "Price Change": "1-Hour Price Change ($)",
-    "close_open_diff": "1-Hour Open-to-Close Difference ($)",
-    "close_lag_1": "Previous Hour Closing Price ($)",
-    "volume_lag_1": "Previous Hour Trading Volume",
-    "Rolling_Mean_Close": "10-Hour Moving Average Price ($)",
-    "Rolling_Std_Close": "10-Hour Price Volatility ($)",
-    "return_mean_6h": "6-Hour Average Return %",
-    "return_std_6h": "6-Hour Return Volatility %",
-    "return_1h": "1-Hour Price Trend %",
-    "return_3h": "3-Hour Price Trend %",
-    "return_6h": "6-Hour Price Trend %",
-    "rolling_max_6h": "6-Hour Rolling Highest Price ($)",
-    "rolling_min_6h": "6-Hour Rolling Lowest Price ($)",
-    "price_volatility_interaction": "Price x Volatility Interaction",
-    "rsi": "Price Momentum (RSI)",
-    "macd": "Trend Direction (MACD)",
-    "macd_signal": "MACD Signal Line",
-    "macd_hist": "MACD Histogram Divergence",
-    "bb_high": "Upper Bollinger Band ($)",
-    "bb_low": "Lower Bollinger Band ($)",
-    "bb_mid": "Bollinger Middle Basis ($)",
-    "ema_10": "10-Hour Exponential Moving Average ($)",
-    "ema_20": "20-Hour Exponential Moving Average ($)",
-    "ema_30": "30-Hour Exponential Moving Average ($)",
-    "ema_50": "50-Hour Exponential Moving Average ($)",
-    "ema_10_30_diff": "Fast vs. Slow EMA Trend Spread ($)",
-    "volume": "Trading Volume",
-    "Volume_Change": "Hourly Volume Growth Rate",
-    "trades_mean_6h": "6-Hour Average Number of Trades",
-    "number_of_trades": "Number of Trades",
-    "fng_value": "Market Sentiment (Fear & Greed)",
-    "fng_mean_3d": "3-Day Average Sentiment (Fear & Greed)",
-    "onchain_num_tx_change": "On-Chain Transaction Growth Rate %",
-    "onchain_hash_rate_change": "Bitcoin Network Hashrate Change %",
-    "onchain_miners_revenue_change": "Miner Revenue Growth Rate %",
-    "hour": "Hour of Day (UTC)",
-    "dayofweek": "Day of Week",
-    "day": "Day of Month",
-    "hour_sin": "Cyclical Hour (Sine)",
-    "hour_cos": "Cyclical Hour (Cosine)",
-    "day_sin": "Cyclical Day (Sine)",
-    "day_cos": "Cyclical Day (Cosine)",
+    "taker_buy_ratio": "Buyer vs. Seller Volume", "taker_buy_ratio_mean_6h": "6-Hour Average Buyer Ratio",
+    "vol_mean_6h": "6-Hour Average Price Swing ($)", "vol_std_6h": "6-Hour Swing Change ($)",
+    "vol_max_6h": "Largest 1h Swing in Last 6h ($)", "vol_min_6h": "Smallest 1h Swing in Last 6h ($)",
+    "vol_1h": "1-Hour High–Low Price Range ($)", "Volatility": "Hourly Price Volatility ($)",
+    "high_low_spread": "1-Hour High–Low Price Range ($)", "Price Change": "1-Hour Price Change ($)",
+    "close_open_diff": "1-Hour Open-to-Close Difference ($)", "close_lag_1": "Previous Hour Closing Price ($)",
+    "volume_lag_1": "Previous Hour Trading Volume", "Rolling_Mean_Close": "10-Hour Moving Average Price ($)",
+    "Rolling_Std_Close": "10-Hour Price Volatility ($)", "return_mean_6h": "6-Hour Average Return %",
+    "return_std_6h": "6-Hour Return Volatility %", "return_1h": "1-Hour Price Trend %",
+    "return_3h": "3-Hour Price Trend %", "return_6h": "6-Hour Price Trend %",
+    "rolling_max_6h": "6-Hour Rolling Highest Price ($)", "rolling_min_6h": "6-Hour Rolling Lowest Price ($)",
+    "price_volatility_interaction": "Price x Volatility Interaction", "rsi": "Price Momentum (RSI)",
+    "macd": "Trend Direction (MACD)", "macd_signal": "MACD Signal Line", "macd_hist": "MACD Histogram Divergence",
+    "bb_high": "Upper Bollinger Band ($)", "bb_low": "Lower Bollinger Band ($)", "bb_mid": "Bollinger Middle Basis ($)",
+    "ema_10": "10-Hour Exponential Moving Average ($)", "ema_20": "20-Hour Exponential Moving Average ($)",
+    "ema_30": "30-Hour Exponential Moving Average ($)", "ema_50": "50-Hour Exponential Moving Average ($)",
+    "ema_10_30_diff": "Fast vs. Slow EMA Trend Spread ($)", "volume": "Trading Volume",
+    "Volume_Change": "Hourly Volume Growth Rate", "trades_mean_6h": "6-Hour Average Number of Trades",
+    "number_of_trades": "Number of Trades", "fng_value": "Market Sentiment (Fear & Greed)",
+    "fng_mean_3d": "3-Day Average Sentiment (Fear & Greed)", "onchain_num_tx_change": "On-Chain Transaction Growth Rate %",
+    "onchain_hash_rate_change": "Bitcoin Network Hashrate Change %", "onchain_miners_revenue_change": "Miner Revenue Growth Rate %",
+    "hour": "Hour of Day (UTC)", "dayofweek": "Day of Week", "day": "Day of Month",
+    "hour_sin": "Cyclical Hour (Sine)", "hour_cos": "Cyclical Hour (Cosine)",
+    "day_sin": "Cyclical Day (Sine)", "day_cos": "Cyclical Day (Cosine)",
     "high_low_ratio": "High-to-Low Ratio",
 }
 
