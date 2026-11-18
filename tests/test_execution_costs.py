@@ -1,6 +1,3 @@
-# tests/test_execution_costs.py
-"""Unit tests for Mudra execution costs, fees, slippage, and hurdle schema."""
-
 import pytest
 import numpy as np
 import pandas as pd
@@ -19,7 +16,6 @@ from config import (
     MIN_HURDLE_RATE,
     TAKER_FEE_PCT,
     SLIPPAGE_PCT,
-    TOTAL_FRICTION_PER_SIDE_PCT,
     ROUND_TRIP_FRICTION_PCT,
     MIN_HURDLE_PCT,
     _parse_execution_cost_rate,
@@ -35,7 +31,6 @@ import app
 
 
 def test_canonical_cost_rates_and_display_aliases():
-    """Verify default rates and percentage aliases."""
     assert TAKER_FEE_RATE == pytest.approx(0.0005, abs=1e-8)
     assert SLIPPAGE_RATE == pytest.approx(0.0002, abs=1e-8)
     assert TOTAL_FRICTION_PER_SIDE_RATE == pytest.approx(0.0007, abs=1e-8)
@@ -47,7 +42,6 @@ def test_canonical_cost_rates_and_display_aliases():
 
 
 def test_env_var_parsing(monkeypatch):
-    """Verify parsing of execution cost environment variables."""
     monkeypatch.setenv("TEST_RATE", "0.0010")
     assert _parse_execution_cost_rate("TEST_RATE", "TEST_PCT", 0.0005) == pytest.approx(0.0010)
 
@@ -55,13 +49,11 @@ def test_env_var_parsing(monkeypatch):
     monkeypatch.setenv("TEST_PCT", "0.10")
     assert _parse_execution_cost_rate("TEST_RATE", "TEST_PCT", 0.0005) == pytest.approx(0.0010)
 
-    # Conflicting rates raise ValueError
     monkeypatch.setenv("TEST_RATE", "0.0010")
     monkeypatch.setenv("TEST_PCT", "0.20")
     with pytest.raises(ValueError):
         _parse_execution_cost_rate("TEST_RATE", "TEST_PCT", 0.0005)
 
-    # Negative rate raises ValueError
     monkeypatch.delenv("TEST_PCT", raising=False)
     monkeypatch.setenv("TEST_RATE", "-0.01")
     with pytest.raises(ValueError):
@@ -70,12 +62,7 @@ def test_env_var_parsing(monkeypatch):
 
 @pytest.fixture
 def test_db():
-    """Isolated in-memory sqlite database for testing."""
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(bind=engine)
     session_factory = sessionmaker(bind=engine)
     session = session_factory()
@@ -84,7 +71,6 @@ def test_db():
 
 
 def test_paper_portfolio_exact_cost_deduction(test_db):
-    """Verify fee and slippage dollar deductions on BUY and SELL."""
     r_buy = execute_paper_order(test_db, "BUY", 60000.0, kelly_fraction=0.10)
     expected_capital = INITIAL_CAPITAL_USD * 0.10
     expected_fee = expected_capital * TAKER_FEE_RATE
@@ -98,7 +84,6 @@ def test_paper_portfolio_exact_cost_deduction(test_db):
     assert r_buy.execution_price == pytest.approx(expected_exec_price, abs=1e-4)
     assert r_buy.btc_amount == pytest.approx(expected_btc, abs=1e-7)
 
-    # Verify SELL closes position and realizes PnL
     r_sell = execute_paper_order(test_db, "SELL", 62000.0)
     summary = get_portfolio_summary(test_db, current_price=62000.0)
     assert summary["btc_balance"] == pytest.approx(0.0, abs=1e-8)
@@ -106,35 +91,21 @@ def test_paper_portfolio_exact_cost_deduction(test_db):
 
 
 def test_backtesting_simulation_caller_overrides():
-    """Verify that _simulate_from_signals accepts caller overrides for fees and slippage."""
     timestamps = pd.date_range("2026-01-01", periods=4, freq="1h")
-    test_df = pd.DataFrame({
-        "timestamp": timestamps,
-        "close": [100.0, 105.0, 102.0, 100.0],
-    })
+    test_df = pd.DataFrame({"timestamp": timestamps, "close": [100.0, 105.0, 102.0, 100.0]})
     signals = np.array([1, 0, 0, 0])
 
     eq_default, tl_default = _simulate_from_signals(test_df, signals)
     assert len(tl_default) == 1
 
-    eq_override, tl_override = _simulate_from_signals(
-        test_df,
-        signals,
-        taker_fee_rate=0.0010,
-        slippage_rate=0.0005,
-    )
+    eq_override, tl_override = _simulate_from_signals(test_df, signals, taker_fee_rate=0.0010, slippage_rate=0.0005)
     assert len(tl_override) == 1
-    # Higher fees lead to lower equity after trade
     assert tl_override["equity_after"].iloc[0] < tl_default["equity_after"].iloc[0]
 
 
 def test_threshold_sweeper_slippage():
-    """Verify that sweep_threshold models slippage alongside taker fees."""
     timestamps = pd.date_range("2026-01-01", periods=3, freq="1h")
-    test_df = pd.DataFrame({
-        "timestamp": timestamps,
-        "close": [100.0, 110.0, 105.0],
-    })
+    test_df = pd.DataFrame({"timestamp": timestamps, "close": [100.0, 110.0, 105.0]})
     for col in config.CLASSIFIER_FEATURES:
         test_df[col] = 1.0
 
@@ -152,14 +123,10 @@ def test_threshold_sweeper_slippage():
 
 
 def test_agent_nodes_cost_alignment():
-    """Verify risk critic and strategist text citations match config hurdle."""
     state = {
-        "symbol": "BTCUSDT",
-        "current_price": 65000.0,
-        "trade_action": "HOLD",
+        "symbol": "BTCUSDT", "current_price": 65000.0, "trade_action": "HOLD",
         "ml_forecast": {"expected_return_pct": 0.0, "clears_hurdle": False},
-        "engineered_features": {"volatility_range_pct": 1.0},
-        "market_data": {"taker_buy_ratio": 0.55},
+        "engineered_features": {"volatility_range_pct": 1.0}, "market_data": {"taker_buy_ratio": 0.55},
         "rag_context": "",
     }
     rc_out = risk_critic_node(state)
@@ -167,11 +134,8 @@ def test_agent_nodes_cost_alignment():
     assert f"{ROUND_TRIP_FRICTION_PCT:.2f}% round-trip friction" in rc_out["risk_critic_critique"]
 
     strat_state = {**state, "ml_forecast": {
-        "expected_return_pct": 0.25,
-        "clears_hurdle": True,
-        "direction": "UP",
-        "direction_badge": "BULLISH",
-        "direction_probability_up": 65.0,
+        "expected_return_pct": 0.25, "clears_hurdle": True, "direction": "UP",
+        "direction_badge": "BULLISH", "direction_probability_up": 65.0,
     }}
     strat_out = strategist_node(strat_state)
     assert strat_out["trade_action"] == "BUY"
@@ -179,12 +143,9 @@ def test_agent_nodes_cost_alignment():
 
 
 def test_risk_critic_validation_fail_closed():
-    """Verify risk critic fails closed on invalid actions and non-finite returns."""
     for invalid_action in ["SHORT", "LONG", "", None, 123]:
         out = risk_critic_node({
-            "symbol": "BTCUSDT",
-            "current_price": 65000.0,
-            "trade_action": invalid_action,
+            "symbol": "BTCUSDT", "current_price": 65000.0, "trade_action": invalid_action,
             "ml_forecast": {"expected_return_pct": 0.5, "clears_hurdle": True},
             "engineered_features": {"volatility_range_pct": 1.0},
         })
@@ -192,11 +153,8 @@ def test_risk_critic_validation_fail_closed():
         assert out["recommended_position_pct"] == 0.0
         assert "Unsupported Trade Action" in out["veto_reason"]
 
-    # Non-finite expected return fails closed
     out_nan = risk_critic_node({
-        "symbol": "BTCUSDT",
-        "current_price": 65000.0,
-        "trade_action": "BUY",
+        "symbol": "BTCUSDT", "current_price": 65000.0, "trade_action": "BUY",
         "ml_forecast": {"expected_return_pct": float("nan"), "clears_hurdle": True},
         "engineered_features": {"volatility_range_pct": 1.0},
     })
@@ -205,17 +163,12 @@ def test_risk_critic_validation_fail_closed():
 
 
 def test_ui_generate_live_forecast_hurdle(monkeypatch):
-    """Verify app forecast hurdle evaluation."""
     import src.feature_engineering as fe
 
     live_df = pd.DataFrame({
         "timestamp": pd.date_range("2026-07-01", periods=40, freq="1h", tz="UTC"),
-        "open": [65000.0] * 40,
-        "high": [65200.0] * 40,
-        "low": [64800.0] * 40,
-        "close": [65000.0] * 40,
-        "volume": [100.0] * 40,
-        "taker_buy_ratio": [0.55] * 40,
+        "open": [65000.0] * 40, "high": [65200.0] * 40, "low": [64800.0] * 40,
+        "close": [65000.0] * 40, "volume": [100.0] * 40, "taker_buy_ratio": [0.55] * 40,
     })
     dummy = {col: 1.0 for col in config.CLASSIFIER_FEATURES}
     dummy["vol_1h"] = 1.0
@@ -226,12 +179,11 @@ def test_ui_generate_live_forecast_hurdle(monkeypatch):
 
     res = app.generate_live_forecast(live_df, MagicMock(), MagicMock(), is_stale=False)
     assert res is not None
-    assert res["cleared_hurdle"] is False  # 0.10% fails round-trip hurdle ~0.14%
+    assert res["cleared_hurdle"] is False
     assert res["direction_badge"] == "SIDEWAYS (CHOP)"
 
 
 def test_tab2_scenarios_and_graph(monkeypatch):
-    """Verify consistency across council scenario payloads."""
     import sys
     monkeypatch.setattr(sys.modules["src.agents.strategist_node"], "_get_gemini_api_key", lambda: None)
     monkeypatch.setattr(sys.modules["src.agents.risk_critic_node"], "_get_gemini_api_key", lambda: None)
@@ -243,7 +195,6 @@ def test_tab2_scenarios_and_graph(monkeypatch):
 
 
 def test_format_portfolio_rationale():
-    """Verify portfolio rationale text formatting."""
     below = app.format_portfolio_rationale({"action": "HOLD", "notes": "Sub-hurdle fee drag: preserving capital."})
     assert f"below {MIN_HURDLE_PCT:.2f}% round-trip fee hurdle" in below
 
@@ -255,7 +206,6 @@ def test_format_portfolio_rationale():
 
 
 def test_model_pedigree_markdown(monkeypatch):
-    """Verify Tab 5 model pedigree markdown rendering."""
     md = app.build_model_pedigree_markdown()
     assert "0.30% (Historical)" in md
     assert f"`{ROUND_TRIP_FRICTION_PCT:.2f}%`" in md
