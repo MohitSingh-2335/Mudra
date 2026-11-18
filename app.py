@@ -1,3 +1,10 @@
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+try:
+    import onnxruntime
+except Exception:
+    pass
+
 # Linux / Streamlit Cloud SQLite upgrade hook for ChromaDB
 try:
     __import__("pysqlite3")
