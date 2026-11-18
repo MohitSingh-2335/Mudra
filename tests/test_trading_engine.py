@@ -38,23 +38,21 @@ from src.agents import (
 from src.backtesting import _simulate_from_signals
 from src.database.connection import init_db as real_init_db
 from src.database.models import Base, CouncilAudit, MarketTick, PaperPortfolio, Reconciliation
-from src.engine.paper_portfolio import (
-    evaluate_futures_long_short_plan,
-    evaluate_spot_hold_until_profit_decision,
-    execute_paper_order,
-    get_portfolio_summary,
-)
-from src.engine.sync import build_plain_english_reconciliation_story
-import src.engine.sync as sync
-from src.engine.sync import (
+from src.engine import (
     MarketFeedExhaustedError,
     _parse_trade_count,
+    build_plain_english_reconciliation_story,
     estimate_next_hour_price_range_usd,
+    evaluate_futures_long_short_plan,
     evaluate_multi_angle_consensus,
+    evaluate_spot_hold_until_profit_decision,
+    execute_paper_order,
     fetch_latest_confirmed_candle,
+    get_portfolio_summary,
     parse_retry_after,
     sync_hourly_quant_cycle,
 )
+import src.engine as sync
 from src.mcp_server import get_live_btc_derivatives_pulse, get_spot_and_futures_trade_plan
 
 
@@ -390,8 +388,8 @@ def test_both_providers_exhausted_raises_runtime_error(monkeypatch):
 
 
 def test_quant_cycle_feed_exhaustion_returns_failure_without_opening_db_session(monkeypatch):
-    monkeypatch.setattr("src.engine.sync.fetch_latest_confirmed_candle", MagicMock(side_effect=MarketFeedExhaustedError("All market feeds exhausted.")))
-    monkeypatch.setattr("src.engine.sync.test_connection", lambda: (True, "PostgreSQL", 1.0))
+    monkeypatch.setattr("src.engine.fetch_latest_confirmed_candle", MagicMock(side_effect=MarketFeedExhaustedError("All market feeds exhausted.")))
+    monkeypatch.setattr("src.engine.test_connection", lambda: (True, "PostgreSQL", 1.0))
     synced, message, summary = sync_hourly_quant_cycle(force=False)
     assert synced is False and "exhausted" in message.lower() and summary == {}
 
