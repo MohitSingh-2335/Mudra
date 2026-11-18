@@ -504,26 +504,46 @@ def _normalize_db_url(url: str) -> str:
     return clean
 
 
+def _find_postgres_url(obj: Any) -> Optional[str]:
+    if isinstance(obj, str):
+        s = obj.strip()
+        if s.startswith(("postgres://", "postgresql://", "postgresql+")):
+            return s
+        return None
+    if isinstance(obj, dict) or hasattr(obj, "items"):
+        try:
+            for k in ["DATABASE_URL", "database_url", "POSTGRES_URL", "postgres_url", "NEON_DATABASE_URL", "url", "uri", "connection_string"]:
+                if k in obj:
+                    res = _find_postgres_url(obj[k])
+                    if res:
+                        return res
+            for v in obj.values():
+                res = _find_postgres_url(v)
+                if res:
+                    return res
+        except Exception:
+            pass
+    return None
+
+
 def get_database_url() -> str:
-    db_url = os.getenv("DATABASE_URL")
+    db_url = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL")
     if db_url:
         return _normalize_db_url(db_url)
     try:
         import streamlit as st
         if hasattr(st, "secrets"):
-            if "DATABASE_URL" in st.secrets:
-                return _normalize_db_url(st.secrets["DATABASE_URL"])
-            if "neondb" in st.secrets and "DATABASE_URL" in st.secrets["neondb"]:
-                return _normalize_db_url(st.secrets["neondb"]["DATABASE_URL"])
+            found = _find_postgres_url(st.secrets)
+            if found:
+                return _normalize_db_url(found)
     except Exception:
         pass
     if SECRETS_FILE.exists():
         try:
             data = tomllib.loads(SECRETS_FILE.read_text(encoding="utf-8"))
-            if "DATABASE_URL" in data:
-                return _normalize_db_url(data["DATABASE_URL"])
-            if "neondb" in data and "DATABASE_URL" in data["neondb"]:
-                return _normalize_db_url(data["neondb"]["DATABASE_URL"])
+            found = _find_postgres_url(data)
+            if found:
+                return _normalize_db_url(found)
         except Exception:
             pass
     fallback = ROOT_DIR / "data" / "mudra_operational.db"
@@ -542,8 +562,21 @@ engine = create_db_engine()
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
+def ensure_connected_engine() -> Engine:
+    global engine, SessionLocal
+    if engine.dialect.name == "sqlite":
+        db_path = str(engine.url.database or "")
+        if db_path and db_path != ":memory:" and "mudra_operational" in db_path:
+            url = get_database_url()
+            if not url.startswith("sqlite"):
+                engine = create_db_engine(url)
+                SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    return engine
+
+
 @contextmanager
 def get_db() -> Generator[Session, None, None]:
+    ensure_connected_engine()
     session: Session = SessionLocal()
     try:
         yield session
@@ -600,6 +633,7 @@ def init_db(target_engine: Optional[Engine] = None) -> None:
 
 
 def test_connection() -> Tuple[bool, str, float]:
+    ensure_connected_engine()
     start = time.perf_counter()
     try:
         with engine.connect() as conn:
