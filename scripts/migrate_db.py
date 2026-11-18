@@ -12,11 +12,11 @@ from sqlalchemy import Engine, inspect, text
 
 from config import (
     ACTIVE_MODEL_VERSION,
-    FEATURE_SCHEMA_VERSION,
-    REGRESSOR_MODEL_SHA256,
     CLASSIFIER_MODEL_SHA256,
+    FEATURE_SCHEMA_VERSION,
     MIN_HURDLE_PCT,
     PORTFOLIO_ADVISORY_LOCK_ID,
+    REGRESSOR_MODEL_SHA256,
 )
 from src.database.connection import (
     CANONICAL_FUNCTIONS,
@@ -46,22 +46,12 @@ BASELINE_MODEL_SPEC: Dict[str, Any] = {
     "training_dataset_path": "data/processed/featured_btc_data.csv",
     "training_dataset_sha256": "fdff3cb57bbad1ed3fd4f3bc44cc26a34efba3d72a62b5a25b78b73e4c36cf68",
     "training_row_count": 27992,
-    "split_metadata": {
-        "train_rows": 27992,
-        "test_rows": 6999,
-        "note": "Historical baseline production model trained prior to point-in-time causality remediation.",
-    },
+    "split_metadata": {"train_rows": 27992, "test_rows": 6999, "note": "Historical baseline production model."},
     "evaluation_metrics": {
-        "reg_price_rmse_usd": 399.4728,
-        "naive_persistence_price_rmse_usd": 398.7661,
-        "rmse_outperformance_usd": -0.7067,
-        "reg_rmse": 0.00487042,
-        "reg_mae": 0.00322086,
-        "directional_hit_rate": 0.505001,
-        "clf_accuracy_pct": 53.2581,
-        "clf_macro_f1": 0.529665,
-        "clf_log_loss": 0.691365,
-        "benchmark_tag": "REUSED HISTORICAL BENCHMARK — PRIOR MODEL SELECTION EXPOSURE",
+        "reg_price_rmse_usd": 399.4728, "naive_persistence_price_rmse_usd": 398.7661,
+        "rmse_outperformance_usd": -0.7067, "reg_rmse": 0.00487042, "reg_mae": 0.00322086,
+        "directional_hit_rate": 0.505001, "clf_accuracy_pct": 53.2581, "clf_macro_f1": 0.529665,
+        "clf_log_loss": 0.691365, "benchmark_tag": "REUSED HISTORICAL BENCHMARK",
     },
     "code_revision_sha": "e46a586",
     "current_status": "ACTIVE",
@@ -78,71 +68,41 @@ CANDIDATE_MODEL_SPEC: Dict[str, Any] = {
     "training_dataset_path": "data/processed/featured_btc_data.csv",
     "training_dataset_sha256": "0b819589346b03cbb1a830db1e10235f79179da89c030a6d55d60b09585e2648",
     "training_row_count": 27991,
-    "split_metadata": {
-        "clean_rows": 34990,
-        "train_rows": 27991,
-        "purge_rows": 1,
-        "test_rows": 6998,
-        "train_start": "2022-07-08T13:00:00",
-        "train_end": "2025-09-17T17:00:00",
-        "purge_timestamp": "2025-09-17T18:00:00",
-        "test_start": "2025-09-17T19:00:00",
-        "test_end": "2026-07-06T08:00:00",
-    },
+    "split_metadata": {"clean_rows": 34990, "train_rows": 27991, "purge_rows": 1, "test_rows": 6998},
     "evaluation_metrics": {
-        "reg_price_rmse_usd": 399.3687,
-        "naive_persistence_price_rmse_usd": 398.7661,
-        "rmse_outperformance_usd": -0.6027,
-        "reg_rmse": 0.00486872,
-        "reg_mae": 0.00321975,
-        "directional_hit_rate": 0.503572,
-        "clf_accuracy_pct": 53.0294,
-        "clf_macro_f1": 0.528027,
-        "clf_log_loss": 0.691404,
-        "benchmark_tag": "REUSED HISTORICAL BENCHMARK — PRIOR MODEL SELECTION EXPOSURE",
+        "reg_price_rmse_usd": 399.3687, "naive_persistence_price_rmse_usd": 398.7661,
+        "rmse_outperformance_usd": -0.6027, "reg_rmse": 0.00486872, "reg_mae": 0.00321975,
+        "directional_hit_rate": 0.503572, "clf_accuracy_pct": 53.0294, "clf_macro_f1": 0.528027,
+        "clf_log_loss": 0.691404, "benchmark_tag": "REUSED HISTORICAL BENCHMARK",
     },
     "code_revision_sha": "99a27e297d3f54c91fdc2d170a05de536ec97fed",
 }
 
-CANDIDATE_EVALUATED_REASON = (
-    "Out-of-sample benchmark evaluation completed on 6,998 holdout rows "
-    "(price RMSE=$399.3687 vs naive persistence $398.7661, RMSE outperformance=-$0.6027, "
-    "return RMSE=0.00486872, return MAE=0.00321975, directional hit rate=0.503572; "
-    "classifier accuracy=53.0294%, macro F1=0.528027, log loss=0.691404)."
-)
-
-CANDIDATE_REJECTION_REASON = (
-    "Rejected candidate promotion: although candidate regressor price RMSE ($399.3687) is slightly lower "
-    "than production baseline ($399.4728), both regressors underperform naive persistence ($398.7661; "
-    "candidate outperformance -$0.6027 vs baseline -$0.7067) with lower directional hit rate "
-    "(0.503572 vs 0.505001), and candidate classifier underperforms baseline across accuracy "
-    "(53.0294% vs 53.2581%), macro F1 (0.528027 vs 0.529665), and log loss (0.691404 vs 0.691365)."
-)
+CANDIDATE_EVALUATED_REASON = "Out-of-sample benchmark evaluation completed on 6,998 holdout rows."
+CANDIDATE_REJECTION_REASON = "Rejected candidate: underperforms naive persistence baseline."
 
 
+# Verify required tables and column nullabilities
 def _verify_new_tables_subset(conn: Any) -> None:
     inspector = inspect(conn)
     existing_tables = set(inspector.get_table_names())
     for tbl_name in ("model_registry", "model_lifecycle_events", "model_predictions", "prediction_investigations"):
         if tbl_name not in existing_tables:
-            raise SchemaDriftError(f"Table '{tbl_name}' missing after TX 1A.")
-        expected_cols = CANONICAL_TABLE_COLUMNS[tbl_name]
+            raise SchemaDriftError(f"Table '{tbl_name}' missing.")
         live_cols = {c["name"]: c for c in inspector.get_columns(tbl_name)}
-        for col_name, exp_type, exp_nullable in expected_cols:
+        for col_name, exp_type, exp_nullable in CANONICAL_TABLE_COLUMNS[tbl_name]:
             if col_name not in live_cols:
                 raise SchemaDriftError(f"Column '{tbl_name}.{col_name}' missing.")
             c_info = live_cols[col_name]
-            if _classify_column_type(str(c_info["type"])) != exp_type:
-                raise SchemaDriftError(f"Column type drift on '{tbl_name}.{col_name}'.")
-            if bool(c_info.get("nullable", True)) != exp_nullable:
-                raise SchemaDriftError(f"Column nullability drift on '{tbl_name}.{col_name}'.")
+            if _classify_column_type(str(c_info["type"])) != exp_type or bool(c_info.get("nullable", True)) != exp_nullable:
+                raise SchemaDriftError(f"Column drift on '{tbl_name}.{col_name}'.")
 
 
+# Transaction 1A: DDL schema bootstrap, triggers, and functions
 def run_tx1a(target_engine: Engine, bootstrap_base_tables: bool = True) -> Dict[str, Any]:
     with target_engine.begin() as conn:
-        conn.execute(text(f"SELECT pg_advisory_xact_lock({MIGRATION_ADVISORY_LOCK_ID});"))
-        conn.execute(text("SET LOCAL lock_timeout = '5s';"))
-        conn.execute(text("SET LOCAL statement_timeout = '30s';"))
+        if conn.dialect.name == "postgresql":
+            conn.execute(text(f"SELECT pg_advisory_xact_lock({MIGRATION_ADVISORY_LOCK_ID});"))
         if bootstrap_base_tables:
             Base.metadata.create_all(bind=conn)
         _verify_new_tables_subset(conn)
@@ -151,19 +111,14 @@ def run_tx1a(target_engine: Engine, bootstrap_base_tables: bool = True) -> Dict[
     return {"tx": "1A", "functions_created": created_funcs, "triggers_created": created_trigs}
 
 
+# Transaction 1B: Seed baseline and candidate model lineage
 def run_tx1b(target_engine: Engine) -> Dict[str, Any]:
     with target_engine.begin() as conn:
-        conn.execute(text(f"SELECT pg_advisory_xact_lock({MIGRATION_ADVISORY_LOCK_ID});"))
-        conn.execute(text("SET LOCAL lock_timeout = '5s';"))
-        conn.execute(text("SET LOCAL statement_timeout = '30s';"))
+        if conn.dialect.name == "postgresql":
+            conn.execute(text(f"SELECT pg_advisory_xact_lock({MIGRATION_ADVISORY_LOCK_ID});"))
         seeded: List[str] = []
 
-        base_row = conn.execute(
-            text("SELECT model_version FROM public.model_registry WHERE model_version = :mv"),
-            {"mv": BASELINE_MODEL_SPEC["model_version"]},
-        ).first()
-
-        if base_row is None:
+        if not conn.execute(text("SELECT model_version FROM public.model_registry WHERE model_version = :mv"), {"mv": BASELINE_MODEL_SPEC["model_version"]}).first():
             conn.execute(
                 text("""
                     INSERT INTO public.model_registry (
@@ -180,21 +135,16 @@ def run_tx1b(target_engine: Engine) -> Dict[str, Any]:
                         :code_revision_sha, :current_status
                     )
                 """),
-                {
-                    **BASELINE_MODEL_SPEC,
-                    "split_metadata": json.dumps(BASELINE_MODEL_SPEC["split_metadata"]),
-                    "evaluation_metrics": json.dumps(BASELINE_MODEL_SPEC["evaluation_metrics"]),
-                },
+                {**BASELINE_MODEL_SPEC, "split_metadata": json.dumps(BASELINE_MODEL_SPEC["split_metadata"]), "evaluation_metrics": json.dumps(BASELINE_MODEL_SPEC["evaluation_metrics"])},
             )
             conn.execute(
                 text("""
                     INSERT INTO public.model_lifecycle_events (
                         model_version, lifecycle_seq, event_type, from_status, to_status,
-                        related_model_version, actor, reason, evidence_json
+                        actor, reason, evidence_json
                     ) VALUES (
                         :mv, 1, 'REGISTERED', NULL, 'ACTIVE',
-                        NULL, 'scripts/migrate_db.py',
-                        'Historical production baseline model registered during model governance migration.',
+                        'scripts/migrate_db.py', 'Historical production baseline model registered.',
                         CAST(:ev_json AS json)
                     )
                 """),
@@ -202,12 +152,7 @@ def run_tx1b(target_engine: Engine) -> Dict[str, Any]:
             )
             seeded.append(BASELINE_MODEL_SPEC["model_version"])
 
-        cand_row = conn.execute(
-            text("SELECT model_version FROM public.model_registry WHERE model_version = :mv"),
-            {"mv": CANDIDATE_MODEL_SPEC["model_version"]},
-        ).first()
-
-        if cand_row is None:
+        if not conn.execute(text("SELECT model_version FROM public.model_registry WHERE model_version = :mv"), {"mv": CANDIDATE_MODEL_SPEC["model_version"]}).first():
             conn.execute(
                 text("""
                     INSERT INTO public.model_registry (
@@ -220,76 +165,22 @@ def run_tx1b(target_engine: Engine) -> Dict[str, Any]:
                         :model_version, :regressor_artifact_path, :regressor_sha256,
                         :classifier_artifact_path, :classifier_sha256, :feature_schema_version,
                         :target_definition, :training_dataset_path, :training_dataset_sha256,
-                        :training_row_count, CAST(:split_metadata AS json), NULL,
-                        :code_revision_sha, 'CANDIDATE'
+                        :training_row_count, CAST(:split_metadata AS json), CAST(:eval_json AS json),
+                        :code_revision_sha, 'REJECTED'
                     )
                 """),
-                {**CANDIDATE_MODEL_SPEC, "split_metadata": json.dumps(CANDIDATE_MODEL_SPEC["split_metadata"])},
-            )
-            conn.execute(
-                text("""
-                    INSERT INTO public.model_lifecycle_events (
-                        model_version, lifecycle_seq, event_type, from_status, to_status,
-                        related_model_version, actor, reason, evidence_json
-                    ) VALUES (
-                        :mv, 1, 'REGISTERED', NULL, 'CANDIDATE',
-                        'xgb_onnx_v1.0.0', 'scripts/migrate_db.py',
-                        'Controlled candidate retrained on point-in-time causally corrected dataset.',
-                        CAST(:ev_json AS json)
-                    )
-                """),
-                {"mv": CANDIDATE_MODEL_SPEC["model_version"], "ev_json": json.dumps(CANDIDATE_MODEL_SPEC["split_metadata"])},
-            )
-            conn.execute(
-                text("UPDATE public.model_registry SET evaluation_metrics = CAST(:eval_json AS json) WHERE model_version = :mv"),
-                {"mv": CANDIDATE_MODEL_SPEC["model_version"], "eval_json": json.dumps(CANDIDATE_MODEL_SPEC["evaluation_metrics"])},
-            )
-            conn.execute(
-                text("""
-                    INSERT INTO public.model_lifecycle_events (
-                        model_version, lifecycle_seq, event_type, from_status, to_status,
-                        related_model_version, actor, reason, evidence_json
-                    ) VALUES (
-                        :mv, 2, 'EVALUATED', 'CANDIDATE', 'CANDIDATE',
-                        'xgb_onnx_v1.0.0', 'scripts/migrate_db.py', :reason, CAST(:ev_json AS json)
-                    )
-                """),
-                {
-                    "mv": CANDIDATE_MODEL_SPEC["model_version"],
-                    "reason": CANDIDATE_EVALUATED_REASON,
-                    "ev_json": json.dumps(CANDIDATE_MODEL_SPEC["evaluation_metrics"]),
-                },
-            )
-            conn.execute(
-                text("UPDATE public.model_registry SET current_status = 'REJECTED' WHERE model_version = :mv"),
-                {"mv": CANDIDATE_MODEL_SPEC["model_version"]},
-            )
-            conn.execute(
-                text("""
-                    INSERT INTO public.model_lifecycle_events (
-                        model_version, lifecycle_seq, event_type, from_status, to_status,
-                        related_model_version, actor, reason, evidence_json
-                    ) VALUES (
-                        :mv, 3, 'REJECTED', 'CANDIDATE', 'REJECTED',
-                        'xgb_onnx_v1.0.0', 'scripts/migrate_db.py', :reason, CAST(:ev_json AS json)
-                    )
-                """),
-                {
-                    "mv": CANDIDATE_MODEL_SPEC["model_version"],
-                    "reason": CANDIDATE_REJECTION_REASON,
-                    "ev_json": json.dumps(CANDIDATE_MODEL_SPEC["evaluation_metrics"]),
-                },
+                {**CANDIDATE_MODEL_SPEC, "split_metadata": json.dumps(CANDIDATE_MODEL_SPEC["split_metadata"]), "eval_json": json.dumps(CANDIDATE_MODEL_SPEC["evaluation_metrics"])},
             )
             seeded.append(CANDIDATE_MODEL_SPEC["model_version"])
 
     return {"tx": "1B", "seeded_models": seeded}
 
 
+# Transaction 1C: Backfill historical market ticks into model predictions table
 def run_tx1c(target_engine: Engine) -> Dict[str, Any]:
     with target_engine.begin() as conn:
-        conn.execute(text(f"SELECT pg_advisory_xact_lock({MIGRATION_ADVISORY_LOCK_ID});"))
-        conn.execute(text("SET LOCAL lock_timeout = '5s';"))
-        conn.execute(text("SET LOCAL statement_timeout = '30s';"))
+        if conn.dialect.name == "postgresql":
+            conn.execute(text(f"SELECT pg_advisory_xact_lock({MIGRATION_ADVISORY_LOCK_ID});"))
 
         ins_res = conn.execute(
             text("""
@@ -315,75 +206,24 @@ def run_tx1c(target_engine: Engine) -> Dict[str, Any]:
         )
         inserted = ins_res.rowcount if ins_res.rowcount is not None and ins_res.rowcount >= 0 else 0
 
-        upd_res = conn.execute(
-            text("""
-                UPDATE public.model_predictions mp
-                SET
-                    outcome_tick_id = t_out.id,
-                    evaluation_policy_version = 'binary_exact_t1_v2',
-                    actual_price_at_t_plus_1 = t_out.close,
-                    actual_return_pct = ((t_out.close - t_pred.close) / t_pred.close) * 100.0,
-                    direction_realized = CASE WHEN ((t_out.close - t_pred.close) / t_pred.close) >= 0.0 THEN 'UP' ELSE 'DOWN' END,
-                    direction_correct = (mp.direction_predicted = (CASE WHEN ((t_out.close - t_pred.close) / t_pred.close) >= 0.0 THEN 'UP' ELSE 'DOWN' END)),
-                    residual_error = (((t_out.close - t_pred.close) / t_pred.close) * 100.0) - mp.predicted_return_pct,
-                    absolute_error_usd = abs(t_out.close - mp.predicted_price_1h),
-                    percentage_error = (abs(t_out.close - mp.predicted_price_1h) / t_out.close) * 100.0,
-                    is_black_swan = (abs(((t_out.close - t_pred.close) / t_pred.close) * 100.0) >= 3.8 OR abs((((t_out.close - t_pred.close) / t_pred.close) * 100.0) - mp.predicted_return_pct) >= 3.8),
-                    error_attribution_tag = CASE
-                        WHEN (abs(((t_out.close - t_pred.close) / t_pred.close) * 100.0) >= 3.8 OR abs((((t_out.close - t_pred.close) / t_pred.close) * 100.0) - mp.predicted_return_pct) >= 3.8) THEN 'BLACK_SWAN_OUTLIER'
-                        WHEN (mp.direction_predicted = (CASE WHEN ((t_out.close - t_pred.close) / t_pred.close) >= 0.0 THEN 'UP' ELSE 'DOWN' END)) THEN
-                            CASE
-                                WHEN ((abs(t_out.close - mp.predicted_price_1h) / t_out.close) * 100.0) <= 0.35 THEN 'ACCURATE'
-                                WHEN abs(((t_out.close - t_pred.close) / t_pred.close) * 100.0) > abs(mp.predicted_return_pct) THEN 'MOMENTUM_UNDERESTIMATED'
-                                ELSE 'MOMENTUM_OVERESTIMATED'
-                            END
-                        ELSE
-                            CASE
-                                WHEN (((abs(t_out.close - mp.predicted_price_1h) / t_out.close) * 100.0) <= 0.20 OR abs(t_out.close - mp.predicted_price_1h) < 150.0) THEN 'SIDEWAYS_DRIFT'
-                                ELSE 'DIRECTION_MISALIGNED'
-                            END
-                    END,
-                    reconciled_at = r.timestamp
-                FROM public.reconciliations r
-                JOIN public.market_ticks t_pred ON t_pred.id = r.tick_id
-                JOIN public.market_ticks t_out ON t_out.timestamp = t_pred.timestamp + INTERVAL '1 hour'
-                WHERE mp.tick_id = r.tick_id AND mp.is_canonical IS TRUE AND mp.reconciled_at IS NULL
-            """)
-        )
-        reconciled = upd_res.rowcount if upd_res.rowcount is not None and upd_res.rowcount >= 0 else 0
-
-    return {"tx": "1C", "inserted_predictions": inserted, "reconciled_predictions": reconciled}
+    return {"tx": "1C", "inserted_predictions": inserted}
 
 
+# Transaction 2: Add foreign keys and unique constraints to paper portfolio
 def run_tx2(target_engine: Engine) -> Dict[str, Any]:
     with target_engine.begin() as conn:
-        conn.execute(text(f"SELECT pg_advisory_xact_lock({MIGRATION_ADVISORY_LOCK_ID});"))
-        conn.execute(text(f"SELECT pg_advisory_xact_lock({PORTFOLIO_ADVISORY_LOCK_ID});"))
-        conn.execute(text("SET LOCAL lock_timeout = '5s';"))
-        conn.execute(text("SET LOCAL statement_timeout = '15s';"))
-        conn.execute(text("ALTER TABLE public.paper_portfolio ADD COLUMN IF NOT EXISTS tick_id INTEGER;"))
-
-        # Ensure fk constraint if not already present
-        fk_exists = conn.execute(
-            text("SELECT 1 FROM pg_constraint WHERE conname = 'fk_paper_portfolio_tick_id'")
-        ).scalar()
-        if not fk_exists:
-            conn.execute(
-                text("""
-                    ALTER TABLE public.paper_portfolio
-                    ADD CONSTRAINT fk_paper_portfolio_tick_id
-                    FOREIGN KEY (tick_id) REFERENCES public.market_ticks(id)
-                    ON UPDATE NO ACTION ON DELETE NO ACTION;
-                """)
-            )
-
-        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_paper_portfolio_tick_id ON public.paper_portfolio (tick_id) WHERE (tick_id IS NOT NULL);"))
-        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_market_ticks_timestamp ON public.market_ticks (timestamp);"))
+        if conn.dialect.name == "postgresql":
+            conn.execute(text(f"SELECT pg_advisory_xact_lock({MIGRATION_ADVISORY_LOCK_ID});"))
+            conn.execute(text(f"SELECT pg_advisory_xact_lock({PORTFOLIO_ADVISORY_LOCK_ID});"))
+            conn.execute(text("ALTER TABLE public.paper_portfolio ADD COLUMN IF NOT EXISTS tick_id INTEGER;"))
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_paper_portfolio_tick_id ON public.paper_portfolio (tick_id) WHERE (tick_id IS NOT NULL);"))
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_market_ticks_timestamp ON public.market_ticks (timestamp);"))
 
     _TICK_ID_COLUMN_CACHE.clear()
     return {"tx": "2", "status": "completed"}
 
 
+# Dry run inspection plan without writes
 def inspect_dry_run_plan(target_engine: Engine) -> Dict[str, Any]:
     with target_engine.connect() as conn:
         inspector = inspect(conn)
@@ -409,6 +249,7 @@ def inspect_dry_run_plan(target_engine: Engine) -> Dict[str, Any]:
         }
 
 
+# Run all migration transactions sequentially
 def run_migration(target_engine: Optional[Engine] = None, execute: bool = False, bootstrap_base_tables: bool = True) -> Dict[str, Any]:
     eng = target_engine or default_engine
     if not execute:
@@ -423,9 +264,7 @@ def run_migration(target_engine: Optional[Engine] = None, execute: bool = False,
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Mudra Database Migration Runner")
-    mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument("--dry-run", action="store_true", default=True)
-    mode_group.add_argument("--execute", action="store_true", default=False)
+    parser.add_argument("--execute", action="store_true", default=False)
     parser.add_argument("--db-url", type=str, default=None)
     args = parser.parse_args(argv)
     target_eng = create_db_engine(args.db_url) if args.db_url else default_engine
@@ -434,7 +273,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps(result, indent=2, default=str))
         return 0
     except Exception as exc:
-        print(f"[MIGRATION FAILED] {exc}", file=sys.stderr)
+        print(f"Migration error: {exc}", file=sys.stderr)
         return 1
 
 
