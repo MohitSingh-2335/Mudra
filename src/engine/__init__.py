@@ -10,11 +10,11 @@ from .paper_portfolio import (
     evaluate_spot_hold_until_profit_decision,
     evaluate_futures_long_short_plan,
 )
-from .model_consensus import (
+from .sync import (
     estimate_next_hour_price_range_usd,
     evaluate_multi_angle_consensus,
+    sync_hourly_quant_cycle,
 )
-from .sync import sync_hourly_quant_cycle
 
 __all__ = [
     "reconcile_pending_ticks",
