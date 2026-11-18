@@ -329,6 +329,51 @@ def build_model_pedigree_markdown() -> str:
     )
 
 
+def classify_ground_truth_result(row) -> str:
+    # classifies ground truth outcomes into tradable matches, noise, directional errors, or opportunity losses
+    pred_ret = float(row.get("predicted_return_pct", 0.0) or 0.0)
+    act_ret = float(row.get("actual_return_pct", 0.0) or 0.0)
+    diff = float(row.get("absolute_error_usd", 0.0) or 0.0)
+    dir_ok = bool(row.get("direction_correct", False))
+    hurdle = MIN_HURDLE_PCT
+
+    if not dir_ok:
+        if diff < 100.0 or abs(act_ret) < hurdle:
+            return "DRIFT (CHOP)"
+        return "MISMATCH (DIR)"
+
+    # Opportunity Loss: Direction matched, but model under-predicted range below hurdle while actual exploded
+    if abs(pred_ret) < hurdle and abs(act_ret) >= hurdle and diff >= 150.0:
+        return "MISSED MOVE (RANGE)"
+
+    if abs(pred_ret) >= hurdle and abs(act_ret) >= hurdle:
+        return "MATCH (TRADABLE)"
+
+    return "MATCH (CHOP)"
+
+
+def format_ground_truth_diagnosis(row) -> str:
+    # formats human-readable economic explanation of why a prediction was accurate, noise, or a missed trade
+    pred_ret = float(row.get("predicted_return_pct", 0.0) or 0.0)
+    act_ret = float(row.get("actual_return_pct", 0.0) or 0.0)
+    diff = float(row.get("absolute_error_usd", 0.0) or 0.0)
+    dir_ok = bool(row.get("direction_correct", False))
+    hurdle = MIN_HURDLE_PCT
+
+    if not dir_ok:
+        if diff < 100.0:
+            return "Sideways Noise: Sub-$100 drift; fee hurdle protected capital."
+        return f"Direction Error: Forecasted {'UP' if pred_ret >= 0 else 'DOWN'}, market moved {'UP' if act_ret >= 0 else 'DOWN'} (${diff:,.0f} gap)."
+
+    if abs(pred_ret) < hurdle and abs(act_ret) >= hurdle and diff >= 150.0:
+        return f"Opportunity Loss: Actual move was {act_ret:+.2f}% (${diff:,.0f} gap); model predicted sub-hurdle ({pred_ret:+.2f}%), trade skipped."
+
+    if abs(pred_ret) >= hurdle and abs(act_ret) >= hurdle:
+        return f"Tradable Match: Both predicted ({pred_ret:+.2f}%) and actual ({act_ret:+.2f}%) cleared {hurdle:.2f}% fee hurdle."
+
+    return f"Noise Filtered: Sub-hurdle move ({act_ret:+.2f}%); correctly held cash."
+
+
 def filter_reconciliation_records(df: pd.DataFrame, selected_model: str) -> pd.DataFrame:
     if df.empty or "model_version" not in df.columns or selected_model in ("All Models", ""):
         return df.copy()
@@ -454,7 +499,7 @@ with c3:
     if forecast_result:
         dir_lbl = forecast_result["direction_label"]
         prob = forecast_result["prob_up"] if dir_lbl == "UP" else forecast_result["prob_down"]
-        st.metric("Predicted Direction", f"{dir_lbl} 🟢" if dir_lbl == "UP" else f"{dir_lbl} 🔴", f"{prob:.1f}% Confidence")
+        st.metric("Predicted Direction", dir_lbl, f"{prob:.1f}% Confidence")
     else:
         st.metric("Predicted Direction", "Computing...", "Awaiting Inference")
 
@@ -467,7 +512,7 @@ with c5:
 st.markdown("---")
 
 # Section 2: Previous Model Predictions vs. Real Market Outcomes (Ground Truth)
-st.subheader("📋 Previous AI Model Predictions vs. Real Market Outcomes (Ground Truth)")
+st.subheader("Previous AI Model Predictions vs. Real Market Outcomes (Ground Truth)")
 st.caption("Delayed T+1h ground-truth verification: Compares what each AI model predicted against the real Bitcoin closing price 1 hour later.")
 
 rec_df = db_state.get("rec_df", pd.DataFrame())
@@ -493,24 +538,24 @@ if not rec_df.empty:
     table_df["BTC Price at Prediction"] = table_df.get("close", table_df["predicted_price"]).apply(lambda x: f"${float(x or 0):,.2f}")
     table_df["AI Forecast Target"] = table_df["predicted_price"].apply(lambda x: f"${float(x or 0):,.2f}")
     table_df["Actual Next-Hour Close"] = table_df["actual_price_at_t_plus_1"].apply(lambda x: f"${float(x or 0):,.2f}")
-    table_df["Predicted Dir"] = table_df["predicted_return_pct"].apply(lambda r: "UP 🟢" if float(r or 0) >= 0 else "DOWN 🔴")
-    table_df["Actual Dir"] = table_df["actual_return_pct"].apply(lambda r: "UP 🟢" if float(r or 0) >= 0 else "DOWN 🔴")
-    table_df["Result"] = table_df["direction_correct"].apply(lambda c: "✅ MATCH" if c else "❌ MISMATCH")
+    table_df["Predicted Dir"] = table_df["predicted_return_pct"].apply(lambda r: "UP" if float(r or 0) >= 0 else "DOWN")
+    table_df["Actual Dir"] = table_df["actual_return_pct"].apply(lambda r: "UP" if float(r or 0) >= 0 else "DOWN")
     table_df["Difference ($)"] = table_df["absolute_error_usd"].apply(lambda e: f"${float(e or 0):,.2f}")
-    table_df["Diagnosis"] = table_df.get("error_attribution_tag", "Normal Variance").apply(lambda t: str(t).replace("_", " "))
+    table_df["Result"] = table_df.apply(classify_ground_truth_result, axis=1)
+    table_df["Diagnosis"] = table_df.apply(format_ground_truth_diagnosis, axis=1)
 
     show_cols = ["Time (UTC)", "Model", "BTC Price at Prediction", "AI Forecast Target", "Actual Next-Hour Close", "Predicted Dir", "Actual Dir", "Difference ($)", "Result", "Diagnosis"]
-    st.dataframe(table_df[show_cols].head(25), use_container_width=True, hide_index=True)
+    st.dataframe(table_df[show_cols].head(24), use_container_width=True, hide_index=True)
 else:
     if not is_neon_connected:
-        st.warning("⚠️ Streamlit Cloud is currently reading from local fallback storage (0 records). To load all 880+ hours of ground-truth predictions from Neon PostgreSQL, add DATABASE_URL to your Streamlit Cloud Secrets.")
+        st.warning("Streamlit Cloud is currently reading from local fallback storage (0 records). To load all 880+ hours of ground-truth predictions from Neon PostgreSQL, add DATABASE_URL to your Streamlit Cloud Secrets.")
     else:
         st.info("No historical reconciliation records found in database. Hourly worker logs will populate here continuously.")
 
 st.markdown("---")
 
 # Section 3: AI Multi-Agent & RAG Reasoning Box
-st.subheader("🧠 Why Did the AI Make This Prediction? (Multi-Agent Council & RAG Memory)")
+st.subheader("Why Did the AI Make This Prediction? (Multi-Agent Council & RAG Memory)")
 st.caption(
     "How Mudra uses a LangGraph multi-agent council to prevent bad trades: "
     "Machine learning models predict price moves, but independent agents evaluate market risk, fee hurdles, and past error memory before executing."
@@ -538,7 +583,7 @@ if current_price is not None and forecast_result is not None:
                 st.rerun()
 
     # 4-Agent Architecture Breakdown for Recruiters / Technical Interviews
-    st.markdown("##### 👥 Multi-Agent Responsibilities (LangGraph Architecture)")
+    st.markdown("##### Multi-Agent Responsibilities (LangGraph Architecture)")
     ag1, ag2, ag3, ag4 = st.columns(4)
     with ag1:
         st.markdown(
@@ -561,7 +606,7 @@ if current_price is not None and forecast_result is not None:
             "*Role:* Deterministic accounting. Deducts exchange taker fees (0.10%) and slippage (0.04%), managing cash and BTC balances in the paper portfolio."
         )
 
-    with st.expander("🎓 Technical Interview Notes: Why Machine Learning Alone Is Not Enough In Quant Trading", expanded=False):
+    with st.expander("Technical Interview Notes: Why Machine Learning Alone Is Not Enough In Quant Trading", expanded=False):
         st.markdown(
             """
             - **The 0.14% Fee Hurdle Reality:** On 1-hour Bitcoin candles, standard binary prediction accuracy of ~53% is statistically significant (baseline random walk is 50%). However, Binance charges 0.05% maker / 0.10% taker fee per trade (~0.14% round-trip friction with slippage). Trading every hour on slight edges results in negative PnL due to fee drag.
@@ -573,7 +618,7 @@ if current_price is not None and forecast_result is not None:
 st.markdown("---")
 
 # Section 4: Paper Trading Account & Live Model PnL ($10,000 Base)
-st.subheader("💰 Paper Trading Account & Live Model PnL ($10,000 Base)")
+st.subheader("Paper Trading Account & Live Model PnL ($10,000 Base)")
 st.caption(
     "Simulated execution accounting: Higher-confidence AI model (Active 53.26% vs. Shadow 52.49%) drives BUY/SELL/HOLD decisions. "
     "Deducts real exchange fees (0.14% round-trip friction) and tracks net portfolio earnings over time."
@@ -603,8 +648,8 @@ with p4:
 if not port_df.empty:
     st.plotly_chart(create_alpha_equity_curve(port_df), use_container_width=True)
 
-    st.markdown("**Recent Paper Trading Order Log & Strategy Rationale:**")
-    t_disp = port_df.iloc[::-1].copy().head(15)
+    st.markdown("**Recent Paper Trading Order Log & Strategy Rationale (Past 24 Hours / 24 Decisions):**")
+    t_disp = port_df.iloc[::-1].copy().head(24)
     t_disp["Time (UTC)"] = pd.to_datetime(t_disp["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
     t_disp["Order Action"] = t_disp["action"].apply(lambda a: f"[{str(a).upper().strip()}]")
     t_disp["Market Price (BTC)"] = t_disp["execution_price"].apply(lambda p: f"${float(p or 0.0):,.2f}")
@@ -626,7 +671,7 @@ else:
 st.markdown("---")
 
 # Section 5: Visual Price Action & Volatility Charts
-st.subheader("📊 Bitcoin Price Action & Real-Time TradingView Stream")
+st.subheader("Bitcoin Price Action & Real-Time TradingView Stream")
 st.caption("Live streaming price chart from Binance via TradingView (updates in real time):")
 components.html(
     """
@@ -649,11 +694,11 @@ st.caption("Python Plotly Technical Analysis (Hourly Candles with EMA 20, EMA 50
 st.plotly_chart(create_tradingview_candlestick(live_market_df), use_container_width=True)
 
 if not rec_df.empty:
-    with st.expander("📈 View Forecast Target vs. Realized Market Scatter Plot", expanded=False):
+    with st.expander("View Forecast Target vs. Realized Market Scatter Plot", expanded=False):
         st.plotly_chart(create_reconciliation_scatter(rec_df), use_container_width=True)
 
 # Section 5: Model Pedigree & Scientific Methodology
-with st.expander("🔬 Research Findings, Anti-Leakage Split & Model Governance", expanded=False):
+with st.expander("Research Findings, Anti-Leakage Split & Model Governance", expanded=False):
     st.markdown("#### Active Production Model Pedigree")
     st.markdown(build_model_pedigree_markdown())
     st.markdown(
