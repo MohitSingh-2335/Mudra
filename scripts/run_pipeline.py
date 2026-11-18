@@ -133,7 +133,7 @@ def run_pipeline(
 
     if run_threshold:
         try:
-            from scripts.experiments.sweep_threshold import run_threshold_sweep
+            from src.backtesting import run_threshold_sweep
             run_threshold_sweep()
         except Exception as exc:
             print(f"Threshold sweep skipped: {exc}")
