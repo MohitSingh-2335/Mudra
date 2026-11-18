@@ -19,7 +19,7 @@ from src.api import (
     PredictResponse,
     app as fastapi_app,
 )
-from src.database.models import Base, MarketTick, Reconciliation
+from src.database import Base, MarketTick, Reconciliation
 from src.engine import execute_paper_order
 
 
@@ -79,13 +79,13 @@ def test_agent_trade_endpoint(client):
 
 
 def test_reconciliation_summary_endpoint(client):
-    with patch("src.database.queries.get_reconciliation_kpis", return_value={"total_reconciled": 5, "directional_accuracy_pct": 60.0}):
+    with patch("src.database.get_reconciliation_kpis", return_value={"total_reconciled": 5, "directional_accuracy_pct": 60.0}):
         res = client.get("/reconciliation/summary")
         assert res.status_code == 200 and res.json()["total_reconciled"] == 5 and res.json()["directional_accuracy_pct"] == 60.0
 
 
 def test_portfolio_summary_endpoint(client):
-    with patch("src.database.queries.get_portfolio_kpis", return_value={"total_equity_usd": 10500.0, "realized_pnl_usd": 500.0}):
+    with patch("src.database.get_portfolio_kpis", return_value={"total_equity_usd": 10500.0, "realized_pnl_usd": 500.0}):
         res = client.get("/portfolio/summary?current_price=65000.0")
         assert res.status_code == 200 and res.json()["total_equity_usd"] == 10500.0 and res.json()["realized_pnl_usd"] == 500.0
 
