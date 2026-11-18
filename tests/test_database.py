@@ -14,8 +14,7 @@ from src.database.queries import (
     get_prediction_investigations,
     update_prediction_investigation_status,
 )
-from src.engine.sync import reconcile_pending_ticks
-from src.engine.paper_portfolio import execute_paper_order, get_portfolio_summary
+from src.engine import execute_paper_order, get_portfolio_summary, reconcile_pending_ticks
 from scripts.migrate_db import BASELINE_MODEL_SPEC, run_migration
 
 
