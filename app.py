@@ -291,18 +291,28 @@ def build_council_scenario_payload(scenario_selected: str, current_price: float,
 
 
 def format_portfolio_rationale(row) -> str:
-    act = str(row.get("action", "")).upper()
+    act = str(row.get("action", "")).upper().strip()
+    btc_bal = float(row.get("btc_balance", 0.0) or 0.0)
+    exec_price = float(row.get("execution_price", 0.0) or 0.0)
+    cash = float(row.get("cash_balance", 10000.0) or 10000.0)
     notes = str(row.get("notes", "") or "")
+
     if act == "BUY":
-        return f"Position Opened on approved bullish signal."
+        return f"Buy Order Executed: Allocated {float(row.get('btc_amount', 0.0)):.4f} BTC at ${exec_price:,.2f} on approved bullish signal."
     if act == "SELL":
-        return f"Position Closed."
+        return f"Sell Order Executed: Closed position at ${exec_price:,.2f}."
+    if act == "INITIAL_DEPOSIT":
+        return "Initial Deposit: Virtual bankroll of $10,000.00 USDT allocated for forward testing."
     if act == "HOLD":
+        if btc_bal > 0:
+            btc_val = btc_bal * exec_price
+            return f"Holding Active Position: {btc_bal:.4f} BTC (${btc_val:,.2f} value) held at BTC ${exec_price:,.2f}; letting runner ride."
         if "Sub-hurdle fee drag" in notes or "Fee hurdle" in notes:
             return f"Capital Preserved: Expected move is below {MIN_HURDLE_PCT:.2f}% round-trip fee hurdle."
         if "Risk Veto" in notes or "veto" in notes.lower():
             return "Risk Veto: Trade prevented by Risk Critic to protect capital."
-        return "Capital Preserved: Sideways chop; preserving cash until high-conviction setup."
+        price_clause = f" at BTC ${exec_price:,.2f}" if exec_price > 0 else ""
+        return f"Capital Preserved: Sideways chop{price_clause}; preserving cash until high-conviction setup."
     return notes or "Execution logged."
 
 
@@ -597,13 +607,18 @@ if not port_df.empty:
     t_disp = port_df.iloc[::-1].copy().head(15)
     t_disp["Time (UTC)"] = pd.to_datetime(t_disp["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
     t_disp["Order Action"] = t_disp["action"].apply(lambda a: f"[{str(a).upper().strip()}]")
-    t_disp["Execution Price"] = t_disp.apply(lambda r: f"${float(r.get('execution_price', 0.0)):,.2f}" if str(r.get("action")).upper() in ["BUY", "SELL"] and float(r.get("execution_price", 0.0)) > 0 else "-", axis=1)
-    t_disp["Trade Size"] = t_disp.apply(lambda r: f"{float(r.get('btc_amount', 0.0)):+.4f} BTC" if str(r.get("action")).upper() in ["BUY", "SELL"] else "-", axis=1)
+    t_disp["Market Price (BTC)"] = t_disp["execution_price"].apply(lambda p: f"${float(p or 0.0):,.2f}")
+    t_disp["Position / Trade"] = t_disp.apply(
+        lambda r: f"+{float(r.get('btc_amount', 0.0)):.4f} BTC" if str(r.get("action")).upper() == "BUY"
+        else (f"-{float(r.get('btc_amount', 0.0)):.4f} BTC" if str(r.get("action")).upper() == "SELL"
+        else (f"Holding {float(r.get('btc_balance', 0.0)):.4f} BTC" if float(r.get("btc_balance", 0.0)) > 0 else "100% Cash")),
+        axis=1
+    )
     t_disp["Fee Deducted ($)"] = t_disp.apply(lambda r: f"${float(r.get('fee_deducted_usd', 0.0)) + float(r.get('slippage_usd', 0.0)):,.2f}", axis=1)
     t_disp["Portfolio Equity ($)"] = t_disp["total_equity_usd"].apply(lambda eq: f"${float(eq or 10000.0):,.2f}")
     t_disp["Strategy Rationale"] = t_disp.apply(format_portfolio_rationale, axis=1)
 
-    show_port_cols = ["Time (UTC)", "Order Action", "Execution Price", "Trade Size", "Fee Deducted ($)", "Portfolio Equity ($)", "Strategy Rationale"]
+    show_port_cols = ["Time (UTC)", "Order Action", "Market Price (BTC)", "Position / Trade", "Fee Deducted ($)", "Portfolio Equity ($)", "Strategy Rationale"]
     st.dataframe(t_disp[show_port_cols], use_container_width=True, hide_index=True)
 else:
     st.info("Portfolio initialized with $10,000.00 USDT virtual bankroll.")
