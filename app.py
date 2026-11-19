@@ -34,7 +34,112 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Mudra — Bitcoin AI/ML Forecasting Engine", layout="wide", initial_sidebar_state="expanded")
-st.markdown("<style>.main { background-color: #0E1117; color: #E0E0E0; }</style>", unsafe_allow_html=True)
+
+# Polished custom dark theme and component styling
+CUSTOM_DASHBOARD_CSS = """
+<style>
+/* Main app dark theme background and clean typography */
+.main, .stApp {
+    background-color: #0E1117;
+    color: #E6EDF3;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* Polished Metric Cards */
+div[data-testid="stMetric"] {
+    background: linear-gradient(180deg, #161B22 0%, #0F141C 100%);
+    border: 1px solid #30363D;
+    border-radius: 8px;
+    padding: 12px 14px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+    transition: border-color 0.15s ease, transform 0.15s ease;
+}
+div[data-testid="stMetric"]:hover {
+    border-color: #58A6FF;
+    transform: translateY(-1px);
+}
+div[data-testid="stMetric"] label {
+    font-size: 0.76rem !important;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 600 !important;
+    color: #8B949E !important;
+}
+div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+    font-size: 1.45rem !important;
+    font-weight: 700 !important;
+    color: #F0F6FC !important;
+    letter-spacing: -0.02em;
+}
+div[data-testid="stMetric"] div[data-testid="stMetricDelta"] {
+    font-size: 0.82rem !important;
+    font-weight: 600 !important;
+}
+
+/* Bordered Container Polishing */
+div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapper"] {
+    background: #11151C;
+    border-color: #30363D !important;
+    border-radius: 10px !important;
+    padding: 4px !important;
+    margin-bottom: 0.5rem;
+}
+
+/* Section Header Badges */
+.section-badge {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #58A6FF;
+    background: rgba(56, 189, 248, 0.12);
+    border: 1px solid rgba(56, 189, 248, 0.25);
+    border-radius: 4px;
+    padding: 2px 8px;
+    margin-bottom: 6px;
+}
+
+/* Multi-Agent Council Highlight Card */
+.deliberation-card {
+    background: linear-gradient(135deg, #161B22 0%, #1A2333 100%);
+    border: 1px solid #30363D;
+    border-left: 4px solid #58A6FF;
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 12px;
+}
+
+/* Streamlit Dataframe Borders & Polish */
+div[data-testid="stDataFrame"] {
+    border: 1px solid #30363D;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+/* Buttons Styling */
+button[kind="primary"], button[kind="secondary"] {
+    border-radius: 6px !important;
+    font-weight: 600 !important;
+    transition: all 0.15s ease;
+}
+
+/* Sidebar Custom Styling */
+section[data-testid="stSidebar"] {
+    background-color: #0B0E14 !important;
+    border-right: 1px solid #21262D;
+}
+.sidebar-footer {
+    font-size: 0.75rem;
+    color: #6E7681;
+    margin-top: 1.5rem;
+    text-align: center;
+    border-top: 1px solid #21262D;
+    padding-top: 0.75rem;
+}
+</style>
+"""
+st.markdown(CUSTOM_DASHBOARD_CSS, unsafe_allow_html=True)
 
 from config import (
     ACTIVE_MODEL_VERSION, APP_SUBTITLE, APP_TITLE,
@@ -62,10 +167,28 @@ INITIAL_CAPITAL_USD = 10000.0
 def _base_chart_layout(title: str, height: int = 400) -> dict:
     return dict(
         template="plotly_dark",
-        title=dict(text=title, font=dict(size=14, color="#EAECEF"), x=0.01, y=0.99),
-        paper_bgcolor="#0E1117", plot_bgcolor="#131722",
-        margin=dict(l=40, r=40, t=40, b=20),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=11)),
+        title=dict(
+            text=f"<b>{title}</b>",
+            font=dict(size=14, color="#F0F6FC", family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif"),
+            x=0.01,
+            y=0.98,
+        ),
+        paper_bgcolor="#0E1117",
+        plot_bgcolor="#11151C",
+        margin=dict(l=40, r=40, t=44, b=24),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+            font=dict(size=11, color="#8B949E"),
+        ),
+        hoverlabel=dict(
+            bgcolor="#161B22",
+            bordercolor="#30363D",
+            font=dict(size=12, color="#F0F6FC"),
+        ),
         height=height,
     )
 
@@ -101,9 +224,9 @@ def create_tradingview_candlestick(df: pd.DataFrame) -> go.Figure:
         fig.add_trace(go.Bar(x=x_axis, y=df_plot["volume"], name="Volume (BTC)", marker=dict(color=vol_colors, opacity=0.7)), row=2, col=1)
 
     fig.update_layout(**_base_chart_layout("Bitcoin (BTC/USDT) Hourly Price & Volume Action", height=450), xaxis_rangeslider_visible=False, hovermode="x unified")
-    fig.update_yaxes(title_text="Price (USD)", row=1, col=1, gridcolor="#222733")
-    fig.update_yaxes(title_text="Volume (BTC)", row=2, col=1, gridcolor="#222733")
-    fig.update_xaxes(title_text="Time (UTC)", row=2, col=1, gridcolor="#222733")
+    fig.update_yaxes(title_text="Price (USD)", row=1, col=1, gridcolor="#21262D", zerolinecolor="#30363D")
+    fig.update_yaxes(title_text="Volume (BTC)", row=2, col=1, gridcolor="#21262D", zerolinecolor="#30363D")
+    fig.update_xaxes(title_text="Time (UTC)", row=2, col=1, gridcolor="#21262D", zerolinecolor="#30363D")
     return fig
 
 
@@ -118,15 +241,15 @@ def create_alpha_equity_curve(df: pd.DataFrame) -> go.Figure:
         df_plot = df_plot.sort_values("timestamp")
     x_axis = df_plot["timestamp"] if "timestamp" in df_plot.columns else df_plot.index
     fig = go.Figure()
-    fig.add_hline(y=float(INITIAL_CAPITAL_USD), line_dash="dot", line_color="#888888", annotation_text=f"Initial Capital (${INITIAL_CAPITAL_USD:,.2f})", annotation_position="bottom right")
+    fig.add_hline(y=float(INITIAL_CAPITAL_USD), line_dash="dot", line_color="#6E7681", annotation_text=f"Initial Capital (${INITIAL_CAPITAL_USD:,.2f})", annotation_position="bottom right", annotation_font=dict(color="#8B949E", size=11))
 
     if "benchmark_btc_equity" in df_plot.columns:
         fig.add_trace(go.Scatter(x=x_axis, y=df_plot["benchmark_btc_equity"], mode="lines", name="Bitcoin Buy & Hold Benchmark ($)", line=dict(color="#F7931A", width=1.5, dash="dash")))
     fig.add_trace(go.Scatter(x=x_axis, y=df_plot["total_equity_usd"], mode="lines+markers", name="AI Strategy Equity ($)", line=dict(color="#00F2FE", width=2.5), marker=dict(size=4, color="#00C087")))
 
     fig.update_layout(**_base_chart_layout("Paper Trading Portfolio Equity vs. $10,000 Baseline", height=380), hovermode="x unified")
-    fig.update_yaxes(title_text="Portfolio Equity (USD)", gridcolor="#222733")
-    fig.update_xaxes(title_text="Time (UTC)", gridcolor="#222733")
+    fig.update_yaxes(title_text="Portfolio Equity (USD)", gridcolor="#21262D", zerolinecolor="#30363D")
+    fig.update_xaxes(title_text="Time (UTC)", gridcolor="#21262D", zerolinecolor="#30363D")
     return fig
 
 
@@ -143,7 +266,7 @@ def create_reconciliation_scatter(df: pd.DataFrame) -> go.Figure:
 
     colors = ["#00C087" if c else "#FF3B69" for c in df_plot.get("direction_correct", [True] * len(df_plot))]
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x_axis, y=df_plot["actual_price_at_t_plus_1"], mode="lines", name="Actual BTC Close", line=dict(color="#FFFFFF", width=1.8)))
+    fig.add_trace(go.Scatter(x=x_axis, y=df_plot["actual_price_at_t_plus_1"], mode="lines", name="Actual BTC Close", line=dict(color="#E6EDF3", width=1.8)))
 
     pred_series = df_plot.get("predicted_price", pd.Series(0.0, index=df_plot.index)).fillna(0.0)
     actual_series = df_plot["actual_price_at_t_plus_1"].fillna(0.0)
@@ -160,8 +283,8 @@ def create_reconciliation_scatter(df: pd.DataFrame) -> go.Figure:
     ))
 
     fig.update_layout(**_base_chart_layout("Realized BTC Close vs. AI Forecast Targets", height=380), hovermode="closest")
-    fig.update_yaxes(title_text="Price (USD)", gridcolor="#222733")
-    fig.update_xaxes(title_text="Time (UTC)", gridcolor="#222733")
+    fig.update_yaxes(title_text="Price (USD)", gridcolor="#21262D", zerolinecolor="#30363D")
+    fig.update_xaxes(title_text="Time (UTC)", gridcolor="#21262D", zerolinecolor="#30363D")
     return fig
 
 
@@ -478,11 +601,11 @@ current_price = float(live_market_df["close"].iloc[-1]) if not live_market_df.em
 is_stale_fallback, stale_age_hours = check_feed_staleness(live_market_df)
 db_state = fetch_cloud_database_state(current_price=current_price)
 
-# Sidebar Controls
+# Sidebar Controls & System Status
 st.sidebar.title("Mudra BTC AI Engine")
 st.sidebar.caption("Machine Learning & Agentic Forecasting")
 
-if st.sidebar.button("Run Hourly Ingestion & Prediction", use_container_width=True):
+if st.sidebar.button("Run Hourly Ingestion & Prediction", use_container_width=True, help="Fetches newest candle from Binance Vision, executes active model inference, and stores prediction."):
     with st.spinner("Executing quant cycle..."):
         try:
             synced, msg, _ = sync_hourly_quant_cycle(force=True)
@@ -495,11 +618,11 @@ if st.sidebar.button("Run Hourly Ingestion & Prediction", use_container_width=Tr
         except Exception as exc:
             st.sidebar.error(f"Execution error: {exc}")
 
-if st.sidebar.button("Refresh Live Telemetry", use_container_width=True):
+if st.sidebar.button("Refresh Live Telemetry", use_container_width=True, help="Clears Streamlit cache and reloads live database and market data."):
     st.cache_data.clear()
     st.rerun()
 
-st.sidebar.markdown("---")
+st.sidebar.divider()
 st.sidebar.subheader("Live System Status")
 
 is_neon_connected = db_state["db_ok"] and "postgres" in str(db_state.get("db_ver", "")).lower()
@@ -516,239 +639,345 @@ elif not live_market_df.empty:
 else:
     st.sidebar.error("Market Feed: Offline")
 
+st.sidebar.markdown(
+    """
+    <div class="sidebar-footer">
+        <strong>Mudra Quantitative System</strong><br>
+        24/7 Autonomous Pipeline · Dual XGBoost + LangGraph<br>
+        Neon PostgreSQL Ground Truth
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 # Page Header
 st.title("Mudra — Bitcoin 1-Hour AI Forecasting & Ground Truth Evaluation")
 st.caption("Dual XGBoost Inference • Multi-Agent LangGraph Reasoning • Live Neon PostgreSQL Ground-Truth Verification")
 
 m2_forecast_result = generate_m2_forecast(live_df=live_market_df, m2_reg=m2_reg_model, m2_clf=m2_clf_model)
 
-# Top Headline Metric Cards (5 Columns in 1 Row)
-c1, c2, c3, c4, c5 = st.columns(5)
-p_24h = float(live_market_df["close"].iloc[-24]) if len(live_market_df) >= 24 else None
-d_24h = current_price - p_24h if current_price is not None and p_24h is not None else None
+# Section 1: Top Headline Metric Cards (Live Telemetry & Real-Time Targets)
+with st.container(border=True):
+    st.markdown('<span class="section-badge">Section 1 · Live Telemetry</span>', unsafe_allow_html=True)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    p_24h = float(live_market_df["close"].iloc[-24]) if len(live_market_df) >= 24 else None
+    d_24h = current_price - p_24h if current_price is not None and p_24h is not None else None
 
-forecast_result = generate_live_forecast(live_df=live_market_df, reg_model=reg_model, clf_model=clf_model, is_stale=is_stale_fallback)
+    forecast_result = generate_live_forecast(live_df=live_market_df, reg_model=reg_model, clf_model=clf_model, is_stale=is_stale_fallback)
 
-with c1:
-    st.metric("Live Bitcoin Price", f"${current_price:,.2f}" if current_price and not is_stale_fallback else "Unavailable", f"{format_signed_usd(d_24h)} (24h)" if d_24h and not is_stale_fallback else "1h Confirmed")
+    with c1:
+        st.metric(
+            "Live Bitcoin Price",
+            f"${current_price:,.2f}" if current_price and not is_stale_fallback else "Unavailable",
+            f"{format_signed_usd(d_24h)} (24h)" if d_24h and not is_stale_fallback else "1h Confirmed",
+            help="Latest confirmed 1-hour candle close from Binance Vision API."
+        )
 
-with c2:
-    if forecast_result:
-        st.metric("Model 1 Target (Active)", f"${forecast_result['pred_target']:,.2f}", f"{forecast_result['direction_label']} ({forecast_result['pred_ret_pct']:+.2f}%)")
-    else:
-        st.metric("Model 1 Target (Active)", "Computing...", "Awaiting Candle")
+    with c2:
+        if forecast_result:
+            st.metric(
+                "Model 1 Target (Active)",
+                f"${forecast_result['pred_target']:,.2f}",
+                f"{forecast_result['direction_label']} ({forecast_result['pred_ret_pct']:+.2f}%)",
+                help="Active XGBoost v1 regressor target price for the next 1-hour candle."
+            )
+        else:
+            st.metric("Model 1 Target (Active)", "Computing...", "Awaiting Candle", help="Model 1 forecast is calculating.")
 
-with c3:
-    if m2_forecast_result:
-        st.metric("Model 2 Target (Shadow)", f"${m2_forecast_result['pred_target']:,.2f}", f"{m2_forecast_result['direction_label']} ({m2_forecast_result['pred_ret_pct']:+.2f}%)")
-    else:
-        st.metric("Model 2 Target (Shadow)", "Standby", "Stationary Model")
+    with c3:
+        if m2_forecast_result:
+            st.metric(
+                "Model 2 Target (Shadow)",
+                f"${m2_forecast_result['pred_target']:,.2f}",
+                f"{m2_forecast_result['direction_label']} ({m2_forecast_result['pred_ret_pct']:+.2f}%)",
+                help="Shadow XGBoost v2 (Stationary Return) target price for the next 1-hour candle."
+            )
+        else:
+            st.metric("Model 2 Target (Shadow)", "Standby", "Stationary Model", help="Shadow Model 2 forecast is on standby.")
 
-with c4:
-    st.metric("Model 1 Accuracy", "53.26% Active", "XGBoost v1 (39 Features)")
+    with c4:
+        st.metric(
+            "Model 1 Accuracy",
+            "53.26% Active",
+            "XGBoost v1 (39 Features)",
+            help="Walk-forward out-of-sample directional accuracy on 6,998 test hours."
+        )
 
-with c5:
-    st.metric("Model 2 Accuracy", "52.49% Shadow", "XGBoost v2 (Stationary)")
+    with c5:
+        st.metric(
+            "Model 2 Accuracy",
+            "52.49% Shadow",
+            "XGBoost v2 (Stationary)",
+            help="Stationary return classifier out-of-sample directional accuracy."
+        )
 
-st.markdown("---")
+st.divider()
 
 # Section 2: Previous Model Predictions vs. Real Market Outcomes (Ground Truth)
-st.subheader("Previous AI Model Predictions vs. Real Market Outcomes (Ground Truth)")
+with st.container(border=True):
+    st.markdown('<span class="section-badge">Section 2 · Ground Truth</span>', unsafe_allow_html=True)
+    st.subheader("Previous AI Model Predictions vs. Real Market Outcomes (Ground Truth)")
 
-rec_df = db_state.get("rec_df", pd.DataFrame())
-rec_kpis = db_state.get("rec_kpis", {})
+    rec_df = db_state.get("rec_df", pd.DataFrame())
+    rec_kpis = db_state.get("rec_kpis", {})
 
-if not rec_df.empty:
-    total_eval = rec_kpis.get("total_reconciled") or len(rec_df)
-    hit_rate = rec_kpis.get("directional_accuracy_pct") or rec_kpis.get("win_rate_pct") or 52.8
-    mae = rec_kpis.get("mae_usd") or (float(rec_df["absolute_error_usd"].mean()) if "absolute_error_usd" in rec_df.columns else 284.0)
+    if not rec_df.empty:
+        total_eval = rec_kpis.get("total_reconciled") or len(rec_df)
+        hit_rate = rec_kpis.get("directional_accuracy_pct") or rec_kpis.get("win_rate_pct") or 52.8
+        mae = rec_kpis.get("mae_usd") or (float(rec_df["absolute_error_usd"].mean()) if "absolute_error_usd" in rec_df.columns else 284.0)
 
-    rk1, rk2, rk3 = st.columns(3)
-    with rk1:
-        st.metric("Total Predictions Evaluated", f"{total_eval} Hours", "Continuous Logging")
-    with rk2:
-        st.metric("Directional Hit Rate", f"{float(hit_rate):.1f}%", "vs. 50% Random Flip")
-    with rk3:
-        st.metric("Mean Dollar Error (MAE)", f"${float(mae):,.2f}", "Next-Hour Price Move")
+        rk1, rk2, rk3 = st.columns(3)
+        with rk1:
+            st.metric(
+                "Total Predictions Evaluated",
+                f"{total_eval} Hours",
+                "Continuous Logging",
+                help="Total 1-hour cycles reconciled against real exchange close prices."
+            )
+        with rk2:
+            st.metric(
+                "Directional Hit Rate",
+                f"{float(hit_rate):.1f}%",
+                "vs. 50% Random Flip",
+                help="Percentage of hourly forecasts where predicted direction matched actual market movement."
+            )
+        with rk3:
+            st.metric(
+                "Mean Dollar Error (MAE)",
+                f"${float(mae):,.2f}",
+                "Next-Hour Price Move",
+                help="Average absolute dollar gap between predicted target and actual close."
+            )
 
-    mf1, mf2 = st.columns([3, 1])
-    with mf1:
-        st.caption("Delayed T+1h ground-truth verification: Compares what each AI model predicted against the real Bitcoin closing price 1 hour later.")
-    with mf2:
-        model_options = ["All Models", "Model 1 (39 Feat)", "Model 2 (Stationary)"]
-        selected_model = st.selectbox("Filter Table by Model:", model_options, index=0)
+        st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
 
-    # Format Display Table
-    table_df = rec_df.copy()
-    table_df["Time (UTC)"] = pd.to_datetime(table_df["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
-    table_df["Model"] = table_df["model_version"].fillna("xgb_v1").apply(lambda m: "Model 1 (39 Feat)" if "v1" in str(m) else "Model 2 (Stationary)")
+        mf1, mf2 = st.columns([3, 1])
+        with mf1:
+            st.caption("Delayed T+1h ground-truth verification: Compares what each AI model predicted against the real Bitcoin closing price 1 hour later.")
+        with mf2:
+            model_options = ["All Models", "Model 1 (39 Feat)", "Model 2 (Stationary)"]
+            selected_model = st.selectbox("Filter Table by Model:", model_options, index=0)
 
-    if selected_model != "All Models":
-        table_df = table_df[table_df["Model"] == selected_model]
+        # Format Display Table
+        table_df = rec_df.copy()
+        table_df["Time (UTC)"] = pd.to_datetime(table_df["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
+        table_df["Model"] = table_df["model_version"].fillna("xgb_v1").apply(lambda m: "Model 1 (39 Feat)" if "v1" in str(m) else "Model 2 (Stationary)")
 
-    table_df["BTC Price at Prediction"] = table_df.get("close", table_df["predicted_price"]).apply(lambda x: f"${float(x or 0):,.2f}")
-    table_df["AI Forecast Target"] = table_df["predicted_price"].apply(lambda x: f"${float(x or 0):,.2f}")
-    table_df["Actual Next-Hour Close"] = table_df["actual_price_at_t_plus_1"].apply(lambda x: f"${float(x or 0):,.2f}")
-    table_df["Predicted Dir"] = table_df["predicted_return_pct"].apply(lambda r: "UP" if float(r or 0) >= 0 else "DOWN")
-    table_df["Actual Dir"] = table_df["actual_return_pct"].apply(lambda r: "UP" if float(r or 0) >= 0 else "DOWN")
-    table_df["Difference ($)"] = table_df["absolute_error_usd"].apply(lambda e: f"${float(e or 0):,.2f}")
-    table_df["Result"] = table_df.apply(classify_ground_truth_result, axis=1)
-    table_df["Diagnosis"] = table_df.apply(format_ground_truth_diagnosis, axis=1)
+        if selected_model != "All Models":
+            table_df = table_df[table_df["Model"] == selected_model]
 
-    show_cols = ["Time (UTC)", "Model", "BTC Price at Prediction", "AI Forecast Target", "Actual Next-Hour Close", "Predicted Dir", "Actual Dir", "Difference ($)", "Result", "Diagnosis"]
-    st.dataframe(table_df[show_cols].head(24), use_container_width=True, hide_index=True)
-else:
-    if not is_neon_connected:
-        st.warning("Streamlit Cloud is currently reading from local fallback storage (0 records). To load all 880+ hours of ground-truth predictions from Neon PostgreSQL, add DATABASE_URL to your Streamlit Cloud Secrets.")
+        table_df["BTC Price at Prediction"] = table_df.get("close", table_df["predicted_price"]).apply(lambda x: f"${float(x or 0):,.2f}")
+        table_df["AI Forecast Target"] = table_df["predicted_price"].apply(lambda x: f"${float(x or 0):,.2f}")
+        table_df["Actual Next-Hour Close"] = table_df["actual_price_at_t_plus_1"].apply(lambda x: f"${float(x or 0):,.2f}")
+        table_df["Predicted Dir"] = table_df["predicted_return_pct"].apply(lambda r: "UP" if float(r or 0) >= 0 else "DOWN")
+        table_df["Actual Dir"] = table_df["actual_return_pct"].apply(lambda r: "UP" if float(r or 0) >= 0 else "DOWN")
+        table_df["Difference ($)"] = table_df["absolute_error_usd"].apply(lambda e: f"${float(e or 0):,.2f}")
+        table_df["Result"] = table_df.apply(classify_ground_truth_result, axis=1)
+        table_df["Diagnosis"] = table_df.apply(format_ground_truth_diagnosis, axis=1)
+
+        show_cols = ["Time (UTC)", "Model", "BTC Price at Prediction", "AI Forecast Target", "Actual Next-Hour Close", "Predicted Dir", "Actual Dir", "Difference ($)", "Result", "Diagnosis"]
+        st.dataframe(table_df[show_cols].head(24), use_container_width=True, hide_index=True)
     else:
-        st.info("No historical reconciliation records found in database. Hourly worker logs will populate here continuously.")
+        if not is_neon_connected:
+            st.warning("Streamlit Cloud is currently reading from local fallback storage (0 records). To load all 880+ hours of ground-truth predictions from Neon PostgreSQL, add DATABASE_URL to your Streamlit Cloud Secrets.")
+        else:
+            st.info("No historical reconciliation records found in database. Hourly worker logs will populate here continuously.")
 
-st.markdown("---")
+st.divider()
 
 # Section 3: AI Multi-Agent & RAG Reasoning Box
-st.subheader("Why Did the AI Make This Prediction? (Multi-Agent Council & RAG Memory)")
-st.caption(
-    "How Mudra uses a LangGraph multi-agent council to prevent bad trades: "
-    "Machine learning models predict price moves, but independent agents evaluate market risk, fee hurdles, and past error memory before executing."
-)
+with st.container(border=True):
+    st.markdown('<span class="section-badge">Section 3 · Agentic Reasoning</span>', unsafe_allow_html=True)
+    st.subheader("Why Did the AI Make This Prediction? (Multi-Agent Council & RAG Memory)")
+    st.caption(
+        "How Mudra uses a LangGraph multi-agent council to prevent bad trades: "
+        "Machine learning models predict price moves, but independent agents evaluate market risk, fee hurdles, and past error memory before executing."
+    )
 
-if current_price is not None and forecast_result is not None:
-    audit_data = db_state.get("latest_audit") or {}
-    last_thesis = audit_data.get("thesis") or "Awaiting deliberation."
-    last_action = audit_data.get("final_decision") or "HOLD"
-    last_verdict = audit_data.get("risk_verdict") or "APPROVED"
-    conviction = audit_data.get("strategist_conviction") or 5
+    if current_price is not None and forecast_result is not None:
+        audit_data = db_state.get("latest_audit") or {}
+        last_thesis = audit_data.get("thesis") or "Awaiting deliberation."
+        last_action = audit_data.get("final_decision") or "HOLD"
+        last_verdict = audit_data.get("risk_verdict") or "APPROVED"
+        conviction = audit_data.get("strategist_conviction") or 5
 
-    r_col1, r_col2 = st.columns([2, 1])
-    with r_col1:
-        st.markdown(f"**Multi-Agent Decision:** `{last_action}` | **Risk Gate:** `{last_verdict}` | **Model Conviction:** `{conviction}/10`")
-        st.markdown(f"**Council Reasoning:** {last_thesis}")
-        st.info(f"**Market Features Analyzed:** Volatility Spread: `{forecast_result['spread_pct']:.2f}%` | 1h Price Range: `${forecast_result['candle_range_usd']:,.2f}` | Expected Return: `{forecast_result['pred_ret_pct']:+.2f}%`")
-    with r_col2:
-        if st.button("Run Live Multi-Agent Deliberation Now", use_container_width=True):
-            with st.spinner("Deliberating through LangGraph council..."):
-                m_data, t_data, f_data = build_council_scenario_payload("live", current_price, forecast_result, live_market_df)
-                res = run_trading_graph("BTCUSDT", current_price, m_data, t_data, f_data)
-                st.session_state["council_state"] = res
-                st.success("Council Deliberation Complete!")
-                st.rerun()
+        r_col1, r_col2 = st.columns([2.5, 1])
+        with r_col1:
+            st.markdown(
+                f"""
+                <div class="deliberation-card">
+                    <div style="font-size: 0.95rem; font-weight: 700; color: #F0F6FC; margin-bottom: 6px;">
+                        Multi-Agent Decision: <span style="color: #58A6FF;">{last_action}</span> &nbsp;|&nbsp; 
+                        Risk Gate: <span style="color: {'#00C087' if last_verdict == 'APPROVED' else '#FF3B69'};">{last_verdict}</span> &nbsp;|&nbsp; 
+                        Model Conviction: <span style="color: #F7931A;">{conviction}/10</span>
+                    </div>
+                    <div style="font-size: 0.85rem; color: #C9D1D9; line-height: 1.45; margin-bottom: 8px;">
+                        <strong>Council Reasoning:</strong> {last_thesis}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.info(f"**Market Features Analyzed:** Volatility Spread: `{forecast_result['spread_pct']:.2f}%` | 1h Price Range: `${forecast_result['candle_range_usd']:,.2f}` | Expected Return: `{forecast_result['pred_ret_pct']:+.2f}%`")
+        with r_col2:
+            st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
+            if st.button("Run Live Multi-Agent Deliberation Now", use_container_width=True, help="Executes LangGraph agentic loop across Strategist, Risk Critic, ChromaDB memory, and Execution agents."):
+                with st.spinner("Deliberating through LangGraph council..."):
+                    m_data, t_data, f_data = build_council_scenario_payload("live", current_price, forecast_result, live_market_df)
+                    res = run_trading_graph("BTCUSDT", current_price, m_data, t_data, f_data)
+                    st.session_state["council_state"] = res
+                    st.success("Council Deliberation Complete!")
+                    st.rerun()
 
-    # 4-Agent Architecture Breakdown for Recruiters / Technical Interviews
-    st.markdown("##### Multi-Agent Responsibilities (LangGraph Architecture)")
-    ag1, ag2, ag3, ag4 = st.columns(4)
-    with ag1:
-        st.markdown(
-            "**1. Strategist Agent**  \n"
-            "*Role:* Evaluates dual XGBoost signals (Active 39-feature vs. Shadow stationary). Proposes a trade ONLY when expected move exceeds the 0.14% exchange fee hurdle."
-        )
-    with ag2:
-        st.markdown(
-            "**2. Risk Critic Agent**  \n"
-            "*Role:* Evaluates volatility spread, range expansion, and liquidation risk. Has absolute veto power over the Strategist during choppy or adverse market regimes."
-        )
-    with ag3:
-        st.markdown(
-            "**3. ChromaDB RAG Memory**  \n"
-            "*Role:* Episodic vector memory. Embeds past market hours and retrieves historical mispredictions to stop the council from repeating past false-breakout mistakes."
-        )
-    with ag4:
-        st.markdown(
-            "**4. Execution Agent**  \n"
-            "*Role:* Deterministic accounting. Deducts exchange taker fees (0.10%) and slippage (0.04%), managing cash and BTC balances in the paper portfolio."
-        )
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+        # 4-Agent Architecture Breakdown for Recruiters / Technical Interviews
+        st.markdown("##### Multi-Agent Responsibilities (LangGraph Architecture)")
+        ag1, ag2, ag3, ag4 = st.columns(4)
+        with ag1:
+            with st.container(border=True):
+                st.markdown(
+                    "**1. Strategist Agent**  \n"
+                    "*Role:* Evaluates dual XGBoost signals (Active 39-feature vs. Shadow stationary). Proposes a trade ONLY when expected move exceeds the 0.14% exchange fee hurdle."
+                )
+        with ag2:
+            with st.container(border=True):
+                st.markdown(
+                    "**2. Risk Critic Agent**  \n"
+                    "*Role:* Evaluates volatility spread, range expansion, and liquidation risk. Has absolute veto power over the Strategist during choppy or adverse market regimes."
+                )
+        with ag3:
+            with st.container(border=True):
+                st.markdown(
+                    "**3. ChromaDB RAG Memory**  \n"
+                    "*Role:* Episodic vector memory. Embeds past market hours and retrieves historical mispredictions to stop the council from repeating past false-breakout mistakes."
+                )
+        with ag4:
+            with st.container(border=True):
+                st.markdown(
+                    "**4. Execution Agent**  \n"
+                    "*Role:* Deterministic accounting. Deducts exchange taker fees (0.10%) and slippage (0.04%), managing cash and BTC balances in the paper portfolio."
+                )
 
-    with st.expander("Technical Interview Notes: Why Machine Learning Alone Is Not Enough In Quant Trading", expanded=False):
-        st.markdown(
-            """
-            - **The 0.14% Fee Hurdle Reality:** On 1-hour Bitcoin candles, standard binary prediction accuracy of ~53% is statistically significant (baseline random walk is 50%). However, Binance charges 0.05% maker / 0.10% taker fee per trade (~0.14% round-trip friction with slippage). Trading every hour on slight edges results in negative PnL due to fee drag.
-            - **Why LangGraph Multi-Agent Architecture Was Chosen:** Pure ML outputs raw numbers. The LangGraph council separates *signal generation* (XGBoost) from *capital preservation* (Risk Critic). If the market is in sideways chop, the Risk Critic forces a `HOLD`, saving capital.
-            - **Episodic RAG Retrieval:** By vectorizing past hourly features into ChromaDB, the council checks: *"Did we previously lose money under this exact volatility and order-flow profile?"* If yes, the council reduces conviction or rejects the trade.
-            """
-        )
+        st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+        with st.expander("Technical Interview Notes: Why Machine Learning Alone Is Not Enough In Quant Trading", expanded=False):
+            st.markdown(
+                """
+                - **The 0.14% Fee Hurdle Reality:** On 1-hour Bitcoin candles, standard binary prediction accuracy of ~53% is statistically significant (baseline random walk is 50%). However, Binance charges 0.05% maker / 0.10% taker fee per trade (~0.14% round-trip friction with slippage). Trading every hour on slight edges results in negative PnL due to fee drag.
+                - **Why LangGraph Multi-Agent Architecture Was Chosen:** Pure ML outputs raw numbers. The LangGraph council separates *signal generation* (XGBoost) from *capital preservation* (Risk Critic). If the market is in sideways chop, the Risk Critic forces a `HOLD`, saving capital.
+                - **Episodic RAG Retrieval:** By vectorizing past hourly features into ChromaDB, the council checks: *"Did we previously lose money under this exact volatility and order-flow profile?"* If yes, the council reduces conviction or rejects the trade.
+                """
+            )
 
-st.markdown("---")
+st.divider()
 
 # Section 4: Paper Trading Account & Live Model PnL ($10,000 Base)
-st.subheader("Paper Trading Account & Live Model PnL ($10,000 Base)")
-st.caption(
-    "Simulated execution accounting: Higher-confidence AI model (Active 53.26% vs. Shadow 52.49%) drives BUY/SELL/HOLD decisions. "
-    "Deducts real exchange fees (0.14% round-trip friction) and tracks net portfolio earnings over time."
-)
-
-port_df = db_state.get("port_df", pd.DataFrame())
-port_kpis = db_state.get("port_kpis", {})
-
-total_equity = float(port_kpis.get("total_equity_usd") or 10000.0)
-realized_pnl = float(port_kpis.get("realized_pnl_usd") or 0.0)
-cash_balance = float(port_kpis.get("cash_balance") or 10000.0)
-btc_balance = float(port_kpis.get("btc_balance") or 0.0)
-pnl_diff = total_equity - INITIAL_CAPITAL_USD
-pnl_pct = (pnl_diff / INITIAL_CAPITAL_USD) * 100.0
-
-p1, p2, p3, p4 = st.columns(4)
-with p1:
-    st.metric("Total Account Equity", f"${total_equity:,.2f}", f"{format_signed_usd(pnl_diff)} ({pnl_pct:+.2f}%)")
-with p2:
-    st.metric("Net Realized PnL", f"{format_signed_usd(realized_pnl)}", f"After {ROUND_TRIP_FRICTION_PCT:.2f}% Fee Friction")
-with p3:
-    st.metric("Available Cash", f"${cash_balance:,.2f}", "USDT Liquid Reserve")
-with p4:
-    btc_val = btc_balance * (current_price or 0.0)
-    st.metric("Bitcoin Held", f"{btc_balance:.4f} BTC", f"${btc_val:,.2f} Value")
-
-if not port_df.empty:
-    st.plotly_chart(create_alpha_equity_curve(port_df), use_container_width=True)
-
-    st.markdown("**Recent Paper Trading Order Log & Strategy Rationale (Past 24 Hours / 24 Decisions):**")
-    t_disp = port_df.iloc[::-1].copy().head(24)
-    t_disp["Time (UTC)"] = pd.to_datetime(t_disp["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
-    t_disp["Order Action"] = t_disp["action"].apply(lambda a: f"[{str(a).upper().strip()}]")
-    t_disp["Market Price (BTC)"] = t_disp["execution_price"].apply(lambda p: f"${float(p or 0.0):,.2f}")
-    t_disp["Position / Trade"] = t_disp.apply(
-        lambda r: f"+{float(r.get('btc_amount', 0.0)):.4f} BTC" if str(r.get("action")).upper() == "BUY"
-        else (f"-{float(r.get('btc_amount', 0.0)):.4f} BTC" if str(r.get("action")).upper() == "SELL"
-        else (f"Holding {float(r.get('btc_balance', 0.0)):.4f} BTC" if float(r.get("btc_balance", 0.0)) > 0 else "100% Cash")),
-        axis=1
+with st.container(border=True):
+    st.markdown('<span class="section-badge">Section 4 · Paper Portfolio</span>', unsafe_allow_html=True)
+    st.subheader("Paper Trading Account & Live Model PnL ($10,000 Base)")
+    st.caption(
+        "Simulated execution accounting: Higher-confidence AI model (Active 53.26% vs. Shadow 52.49%) drives BUY/SELL/HOLD decisions. "
+        "Deducts real exchange fees (0.14% round-trip friction) and tracks net portfolio earnings over time."
     )
-    t_disp["Fee Deducted ($)"] = t_disp.apply(lambda r: f"${float(r.get('fee_deducted_usd', 0.0)) + float(r.get('slippage_usd', 0.0)):,.2f}", axis=1)
-    t_disp["Portfolio Equity ($)"] = t_disp["total_equity_usd"].apply(lambda eq: f"${float(eq or 10000.0):,.2f}")
-    t_disp["Strategy Rationale"] = t_disp.apply(format_portfolio_rationale, axis=1)
 
-    show_port_cols = ["Time (UTC)", "Order Action", "Market Price (BTC)", "Position / Trade", "Fee Deducted ($)", "Portfolio Equity ($)", "Strategy Rationale"]
-    st.dataframe(t_disp[show_port_cols], use_container_width=True, hide_index=True)
-else:
-    st.info("Portfolio initialized with $10,000.00 USDT virtual bankroll.")
+    port_df = db_state.get("port_df", pd.DataFrame())
+    port_kpis = db_state.get("port_kpis", {})
 
-st.markdown("---")
+    total_equity = float(port_kpis.get("total_equity_usd") or 10000.0)
+    realized_pnl = float(port_kpis.get("realized_pnl_usd") or 0.0)
+    cash_balance = float(port_kpis.get("cash_balance") or 10000.0)
+    btc_balance = float(port_kpis.get("btc_balance") or 0.0)
+    pnl_diff = total_equity - INITIAL_CAPITAL_USD
+    pnl_pct = (pnl_diff / INITIAL_CAPITAL_USD) * 100.0
+
+    p1, p2, p3, p4 = st.columns(4)
+    with p1:
+        st.metric(
+            "Total Account Equity",
+            f"${total_equity:,.2f}",
+            f"{format_signed_usd(pnl_diff)} ({pnl_pct:+.2f}%)",
+            help="Current total portfolio value (Liquid Cash + Mark-to-Market Bitcoin)."
+        )
+    with p2:
+        st.metric(
+            "Net Realized PnL",
+            f"{format_signed_usd(realized_pnl)}",
+            f"After {ROUND_TRIP_FRICTION_PCT:.2f}% Fee Friction",
+            help="Net profit or loss after subtracting exchange fees and execution slippage."
+        )
+    with p3:
+        st.metric(
+            "Available Cash",
+            f"${cash_balance:,.2f}",
+            "USDT Liquid Reserve",
+            help="Liquid virtual capital available to open new trading positions."
+        )
+    with p4:
+        btc_val = btc_balance * (current_price or 0.0)
+        st.metric(
+            "Bitcoin Held",
+            f"{btc_balance:.4f} BTC",
+            f"${btc_val:,.2f} Value",
+            help="Current spot Bitcoin position in the simulated portfolio."
+        )
+
+    if not port_df.empty:
+        st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+        st.plotly_chart(create_alpha_equity_curve(port_df), use_container_width=True)
+
+        st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+        st.markdown("**Recent Paper Trading Order Log & Strategy Rationale (Past 24 Hours / 24 Decisions):**")
+        t_disp = port_df.iloc[::-1].copy().head(24)
+        t_disp["Time (UTC)"] = pd.to_datetime(t_disp["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
+        t_disp["Order Action"] = t_disp["action"].apply(lambda a: f"[{str(a).upper().strip()}]")
+        t_disp["Market Price (BTC)"] = t_disp["execution_price"].apply(lambda p: f"${float(p or 0.0):,.2f}")
+        t_disp["Position / Trade"] = t_disp.apply(
+            lambda r: f"+{float(r.get('btc_amount', 0.0)):.4f} BTC" if str(r.get("action")).upper() == "BUY"
+            else (f"-{float(r.get('btc_amount', 0.0)):.4f} BTC" if str(r.get("action")).upper() == "SELL"
+            else (f"Holding {float(r.get('btc_balance', 0.0)):.4f} BTC" if float(r.get("btc_balance", 0.0)) > 0 else "100% Cash")),
+            axis=1
+        )
+        t_disp["Fee Deducted ($)"] = t_disp.apply(lambda r: f"${float(r.get('fee_deducted_usd', 0.0)) + float(r.get('slippage_usd', 0.0)):,.2f}", axis=1)
+        t_disp["Portfolio Equity ($)"] = t_disp["total_equity_usd"].apply(lambda eq: f"${float(eq or 10000.0):,.2f}")
+        t_disp["Strategy Rationale"] = t_disp.apply(format_portfolio_rationale, axis=1)
+
+        show_port_cols = ["Time (UTC)", "Order Action", "Market Price (BTC)", "Position / Trade", "Fee Deducted ($)", "Portfolio Equity ($)", "Strategy Rationale"]
+        st.dataframe(t_disp[show_port_cols], use_container_width=True, hide_index=True)
+    else:
+        st.info("Portfolio initialized with $10,000.00 USDT virtual bankroll.")
+
+st.divider()
 
 # Section 5: Visual Price Action & Volatility Charts
-st.subheader("Bitcoin Price Action & Real-Time TradingView Stream")
-st.caption("Live streaming price chart from Binance via TradingView (updates in real time):")
-components.html(
-    """
-    <div class="tradingview-widget-container" style="height:540px;width:100%;margin:0;padding:0;">
-      <div id="tradingview_mudra" style="height:100%;width:100%;"></div>
-      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-      <script type="text/javascript">
-      new TradingView.widget({
-        "autosize": true, "symbol": "BINANCE:BTCUSDT", "interval": "60", "timezone": "Etc/UTC",
-        "theme": "dark", "style": "1", "locale": "en", "toolbar_bg": "#0E1117", "enable_publishing": false,
-        "container_id": "tradingview_mudra", "backgroundColor": "#0E1117", "gridColor": "rgba(43, 49, 62, 0.4)"
-      });
-      </script>
-    </div>
-    """,
-    height=550,
-)
+with st.container(border=True):
+    st.markdown('<span class="section-badge">Section 5 · Market Charts</span>', unsafe_allow_html=True)
+    st.subheader("Bitcoin Price Action & Real-Time TradingView Stream")
+    st.caption("Live streaming price chart from Binance via TradingView (updates in real time):")
+    components.html(
+        """
+        <div class="tradingview-widget-container" style="height:540px;width:100%;margin:0;padding:0;">
+          <div id="tradingview_mudra" style="height:100%;width:100%;"></div>
+          <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+          <script type="text/javascript">
+          new TradingView.widget({
+            "autosize": true, "symbol": "BINANCE:BTCUSDT", "interval": "60", "timezone": "Etc/UTC",
+            "theme": "dark", "style": "1", "locale": "en", "toolbar_bg": "#0E1117", "enable_publishing": false,
+            "container_id": "tradingview_mudra", "backgroundColor": "#0E1117", "gridColor": "rgba(43, 49, 62, 0.4)"
+          });
+          </script>
+        </div>
+        """,
+        height=550,
+    )
 
-st.caption("Python Plotly Technical Analysis (Hourly Candles with EMA 20, EMA 50 & Volume):")
-st.plotly_chart(create_tradingview_candlestick(live_market_df), use_container_width=True)
+    st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+    st.caption("Python Plotly Technical Analysis (Hourly Candles with EMA 20, EMA 50 & Volume):")
+    st.plotly_chart(create_tradingview_candlestick(live_market_df), use_container_width=True)
 
-if not rec_df.empty:
-    with st.expander("View Forecast Target vs. Realized Market Scatter Plot", expanded=False):
-        st.plotly_chart(create_reconciliation_scatter(rec_df), use_container_width=True)
+    if not rec_df.empty:
+        with st.expander("View Forecast Target vs. Realized Market Scatter Plot", expanded=False):
+            st.plotly_chart(create_reconciliation_scatter(rec_df), use_container_width=True)
 
-# Section 5: Model Pedigree & Scientific Methodology
+# Section 6: Model Pedigree & Scientific Methodology
 with st.expander("Research Findings, Anti-Leakage Split & Model Governance", expanded=False):
     st.markdown("#### Active Production Model Pedigree")
     st.markdown(build_model_pedigree_markdown())
