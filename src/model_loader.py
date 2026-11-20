@@ -7,6 +7,11 @@ import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 import joblib
 
+try:
+    import lightgbm as lgb
+except ImportError:
+    lgb = None
+
 from config import (
     REGRESSOR_MODEL_PATH, REGRESSOR_MODEL_SHA256,
     CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256,
@@ -60,13 +65,32 @@ def load_verified_model(file_path: Union[str, Path], expected_sha256: str) -> An
     return joblib.load(io.BytesIO(raw_bytes))
 
 
+def restore_estimator_boosters(m: Any) -> None:
+    # restores booster handles for XGBoost (CPU mode) and LightGBM (Windows C++ handles)
+    if m.__class__.__name__.startswith("XGB") and hasattr(m, "set_params"):
+        try:
+            m.set_params(device="cpu")
+        except Exception:
+            pass
+    if lgb is not None:
+        try:
+            if hasattr(m, "calibrated_classifiers_"):
+                for cc in getattr(m, "calibrated_classifiers_", []):
+                    est = getattr(cc, "estimator", getattr(cc, "base_estimator", None))
+                    if est is not None and hasattr(est, "_Booster") and est._Booster is not None:
+                        est._Booster = lgb.Booster(model_str=est._Booster.model_to_string())
+            if m.__class__.__name__.startswith("LGBM") and hasattr(m, "_Booster") and m._Booster is not None:
+                m._Booster = lgb.Booster(model_str=m._Booster.model_to_string())
+        except Exception:
+            pass
+
+
 def load_production_models() -> Tuple[Any, Any]:
     # loads regressor and classifier with cpu device enforcement
     reg = load_verified_model(REGRESSOR_MODEL_PATH, REGRESSOR_MODEL_SHA256)
     clf = load_verified_model(CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256)
     for model in (reg, clf):
-        if hasattr(model, "set_params"):
-            model.set_params(device="cpu")
+        restore_estimator_boosters(model)
     return reg, clf
 
 
@@ -136,11 +160,7 @@ def get_registered_models() -> Dict[str, Dict[str, Any]]:
             clf_m = joblib.load(clf_path)
             reg_m = joblib.load(reg_path)
             for m in (clf_m, reg_m):
-                if hasattr(m, "set_params"):
-                    try:
-                        m.set_params(device="cpu")
-                    except Exception:
-                        pass
+                restore_estimator_boosters(m)
 
             registered[version] = {
                 "model_version": version,
