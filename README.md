@@ -72,8 +72,9 @@ Out-of-sample directional accuracy on the 6,998-hour test set demonstrates that 
 | Model Architecture | Role / Status | Regressor RMSE (USD) | Return MAE | Direction Accuracy | Log-Loss (50/50 = 0.6931) | Model Documentation |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Naive Persistence ($\hat{P}_{t+1} = P_t$)** | Baseline | **$398.77** | **0.003198** | 50.39% | 0.6931 | Reference Benchmark |
-| **[Model 1 (`xgb_onnx_v1.0.0`)](docs/models/model_1_xgb_v1.md)** | **Active Production** | $399.47 | 0.003221 | **53.26%** | **0.6914** | [Model Card](docs/models/model_1_xgb_v1.md) (39 Features) |
+| **[Model 1 (`xgb_onnx_v1.0.0`)](docs/models/model_1_xgb_v1.md)** | **Active Production** | $399.47 | 0.003221 | **53.26%** | 0.6914 | [Model Card](docs/models/model_1_xgb_v1.md) (39 Features) |
 | **[Model 2 (`xgb_v2.0.0`)](docs/models/model_2_xgb_v2.md)** | **Shadow Consensus** | $401.12 | 0.003222 | 52.07% | 0.6926 | [Model Card](docs/models/model_2_xgb_v2.md) (Stationary) |
+| **[Model 3 (`lgbm_v3.0.0`)](docs/models/model_3_lgbm_v3.md)** | **Promoted Candidate** | $400.22 | 0.003220 | 52.89% | **0.6913** | [Model Card](docs/models/model_3_lgbm_v3.md) (29 Stationary) |
 | **Amazon Chronos-2 (Zero-Shot)** | Foundation Model | $322.65 *(Scaled)* | - | 49.60% | - | Failed to beat coin flip |
 | **Google TimesFM 2.5 (Zero-Shot)**| Foundation Model | $314.65 *(Scaled)* | - | 48.60% | - | Failed to beat coin flip |
 | **Salesforce Moirai 2.0 (Zero-Shot)**| Foundation Model| $316.35 *(Scaled)* | - | 49.20% | - | Failed to beat coin flip |
