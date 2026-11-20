@@ -15,7 +15,7 @@ The following table summarizes every model evaluated across identical chronologi
 | **Naive Persistence** | Rule Baseline | Benchmark ($\hat{P}_{t+1}=P_t$) | Raw Price ($P_t$) | 50.39% | 0.6931 | 0.2500 | 0.5000 | 0.0000 | 0.003198 | **$398.77** | Default benchmark; difficult for decision trees to beat in USD RMSE due to extrapolation limits. |
 | **[Model 1 (`xgb_onnx_v1.0.0`)](../models/model_1_xgb_v1.md)** | XGBoost GBDT | **ACTIVE PRODUCTION** | `v1_39features` (39 Clf / 26 Reg) | **53.26%** | **0.6914** | **0.2491** | **0.5394** | **+0.0149** | 0.003221 | $399.47 | Primary active signal generator; statistically significant directional edge but relies on raw price levels. |
 | **[Model 2 (`xgb_v2.0.0`)](../models/model_2_xgb_v2.md)** | XGBoost GBDT | **SHADOW CANDIDATE** | `v2_36stationary` (36 features) | 52.07% | 0.6926 | 0.2497 | 0.5342 | +0.0135 | 0.003222 | $401.12 | Removed raw prices, but 15 unnormalized volume/dollar features remained; failed promotion gate. |
-| **[Model 3 (`lgbm_v3.0.0`)](../models/MODEL_CARD_TEMPLATE.md)** | LightGBM GBDT | **ROADMAP / PLANNED** | `v3_stationary` (Strict Stationarity) | *Planned* | *Planned* | *Planned* | *Planned* | *Planned* | *Planned* | *Planned* | Blueprint completed; targets 100% volume/price stationarity, LightGBM speed, and Isotonic calibration. |
+| **[Model 3 (`lgbm_v3.0.0`)](../models/model_3_lgbm_v3.md)** | LightGBM GBDT | **PROMOTED CANDIDATE** | `v3_29stationary` (29 features) | 52.89% | **0.6913** | **0.2491** | 0.5381 | **+0.0211** | **0.003220** | $400.22 | Passed all 5 promotion gates; achieved 100% scale invariance, highest Information Coefficient (+0.0211), and lowest log-loss. |
 
 ---
 
@@ -36,12 +36,15 @@ The following table summarizes every model evaluated across identical chronologi
 - **Outcome:** The model successfully executed without price levels and stabilized regressor variance. However, holdout directional accuracy dropped to 52.07% (log-loss 0.6926).
 - **Post-Mortem Discovery:** Code audit revealed that 15 of Model 2's 36 features remained non-stationary (8 raw dollar differences such as `Price Change`, `vol_1h`, and `macd`; plus 7 raw drifting counts/volumes such as `volume`, `number_of_trades`, and `onchain_hash_rate`). Furthermore, `sma_10_dist_pct` was computed against a 5-hour rolling mean (`rolling(5)`). As a result, Model 2 was designated as a shadow model and did not replace Model 1.
 
-### Generation 3: Model 3 (`lgbm_v3.0.0`) — Planned Specification
+### Generation 3: Model 3 (`lgbm_v3.0.0`)
 - **Hypothesis:** 
-  1. Enforcing 100% strict mathematical stationarity across all features (normalizing volume by 24h rolling volume, converting on-chain metrics to percentage growth rates, and converting MACD and price changes to percentage returns) will eliminate residual covariate shift.
-  2. Switching from XGBoost to LightGBM will enable faster leaf-wise tree growth, better categorical binning, and lower training latency.
-  3. Adding post-hoc probability calibration (Isotonic Regression or Platt scaling) on a dedicated calibration fold will transform uncalibrated GBDT tree outputs into true posterior probabilities, preventing overconfident mispredictions during low-conviction market regimes.
-- **Status:** Architectural blueprint documented in `docs/models/MODEL_CARD_TEMPLATE.md`; implementation pending experimental validation in notebook workspace.
+  1. Enforcing 100% strict mathematical scale invariance across all 29 features (using percentage returns, ratios, and rolling 24-hour log z-scores) eliminates residual covariate shift and prevents tree extrapolation breakdowns across multi-year price regimes.
+  2. Correcting the rolling window in `sma_10_dist_pct` to use a true 10-period SMA restores the trend-following signal.
+  3. Switching to regularized LightGBM (`num_leaves=15`, `min_child_samples=50`, `learning_rate=0.03`) prevents overfitting to high-frequency microstructural noise.
+  4. Platt Sigmoid Calibration (`CalibratedClassifierCV`) on clean validation data aligns probability outputs with true empirical win rates.
+  5. Huber loss regression bounds the impact of volatile crypto liquidation wicks, improving rank correlation.
+- **Outcome:** Model 3 achieved the highest Information Coefficient (+0.0211, p=0.0772, statistically significant at 10%), the lowest log-loss (0.6913), and tied for the best Brier score (0.2491) across all evaluated models.
+- **Status:** Officially evaluated, serialized (`artifacts/models/lgbm_v3_manifest.json`), and designated as a `PROMOTED CANDIDATE`.
 
 ---
 
