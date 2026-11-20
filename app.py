@@ -300,23 +300,27 @@ def load_models():
         reg.set_params(device="cpu")
         clf.set_params(device="cpu")
 
-        # Load Model 2 (Stationary) if available in registered models
+        # Load Model 2 (Stationary) and Model 3 (LightGBM) if available in registered models
         m2_reg, m2_clf = None, None
+        m3_reg, m3_clf = None, None
         try:
             from src.model_loader import get_registered_models
             reg_dict = get_registered_models()
             if "xgb_v2.0.0" in reg_dict:
                 m2_reg = reg_dict["xgb_v2.0.0"]["regressor"]
                 m2_clf = reg_dict["xgb_v2.0.0"]["classifier"]
+            if "lgbm_v3.0.0" in reg_dict:
+                m3_reg = reg_dict["lgbm_v3.0.0"]["regressor"]
+                m3_clf = reg_dict["lgbm_v3.0.0"]["classifier"]
         except Exception:
             pass
 
-        return reg, clf, m2_reg, m2_clf
+        return reg, clf, m2_reg, m2_clf, m3_reg, m3_clf
     except Exception:
-        return None, None, None, None
+        return None, None, None, None, None, None
 
 
-reg_model, clf_model, m2_reg_model, m2_clf_model = load_models()
+reg_model, clf_model, m2_reg_model, m2_clf_model, m3_reg_model, m3_clf_model = load_models()
 
 
 def format_signed_usd(val: Optional[float], decimals: int = 2) -> str:
@@ -400,6 +404,35 @@ def generate_m2_forecast(live_df: pd.DataFrame, m2_reg: Any, m2_clf: Any) -> Opt
             "pred_dollar_move": m2_move,
             "pred_ret_pct": m2_ret * 100.0,
             "direction_label": m2_dir,
+        }
+    except Exception:
+        return None
+
+
+def generate_m3_forecast(live_df: pd.DataFrame, m3_reg: Any, m3_clf: Any) -> Optional[Dict[str, Any]]:
+    # generates live next-hour target and direction for Model 3 (LightGBM)
+    if live_df is None or live_df.empty or m3_reg is None or len(live_df) < 35:
+        return None
+    try:
+        from src.model_loader import get_registered_models
+        from src.feature_engineering import extract_features_for_inference
+        reg_dict = get_registered_models()
+        if "lgbm_v3.0.0" not in reg_dict:
+            return None
+        c_feats = reg_dict["lgbm_v3.0.0"].get("features", [])
+        f_dict = extract_features_for_inference(live_df)
+        if not c_feats or not all(k in f_dict for k in c_feats):
+            return None
+        inp = pd.DataFrame([{k: f_dict[k] for k in c_feats}])
+        m3_ret = float(m3_reg.predict(inp)[0])
+        curr_price = float(live_df["close"].iloc[-1])
+        m3_move = curr_price * m3_ret
+        m3_dir = "UP" if m3_ret >= 0 else "DOWN"
+        return {
+            "pred_target": curr_price + m3_move,
+            "pred_dollar_move": m3_move,
+            "pred_ret_pct": m3_ret * 100.0,
+            "direction_label": m3_dir,
         }
     except Exception:
         return None
@@ -655,11 +688,12 @@ st.title("Mudra — Bitcoin 1-Hour AI Forecasting & Ground Truth Evaluation")
 st.caption("Dual XGBoost Inference • Multi-Agent LangGraph Reasoning • Live Neon PostgreSQL Ground-Truth Verification")
 
 m2_forecast_result = generate_m2_forecast(live_df=live_market_df, m2_reg=m2_reg_model, m2_clf=m2_clf_model)
+m3_forecast_result = generate_m3_forecast(live_df=live_market_df, m3_reg=m3_reg_model, m3_clf=m3_clf_model)
 
 # Section 1: Top Headline Metric Cards (Live Telemetry & Real-Time Targets)
 with st.container(border=True):
     st.markdown('<span class="section-badge">Section 1 · Live Telemetry</span>', unsafe_allow_html=True)
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     p_24h = float(live_market_df["close"].iloc[-24]) if len(live_market_df) >= 24 else None
     d_24h = current_price - p_24h if current_price is not None and p_24h is not None else None
 
@@ -696,19 +730,30 @@ with st.container(border=True):
             st.metric("Model 2 Target (Shadow)", "Standby", "Stationary Model", help="Shadow Model 2 forecast is on standby.")
 
     with c4:
-        st.metric(
-            "Model 1 Accuracy",
-            "53.26% Active",
-            "XGBoost v1 (39 Features)",
-            help="Walk-forward out-of-sample directional accuracy on 6,998 test hours."
-        )
+        if m3_forecast_result:
+            st.metric(
+                "Model 3 Target (Candidate)",
+                f"${m3_forecast_result['pred_target']:,.2f}",
+                f"{m3_forecast_result['direction_label']} ({m3_forecast_result['pred_ret_pct']:+.2f}%)",
+                help="Candidate LightGBM v3 (29 Stationary Features) target price for the next 1-hour candle."
+            )
+        else:
+            st.metric("Model 3 Target (Candidate)", "Standby", "LightGBM Model", help="Candidate Model 3 forecast is on standby.")
 
     with c5:
         st.metric(
             "Model 2 Accuracy",
-            "52.49% Shadow",
+            "52.07% Shadow",
             "XGBoost v2 (Stationary)",
             help="Stationary return classifier out-of-sample directional accuracy."
+        )
+
+    with c6:
+        st.metric(
+            "Model 3 Accuracy",
+            "52.89% Candidate",
+            "LightGBM v3 (Stationary)",
+            help="Candidate LightGBM v3 out-of-sample directional accuracy (Optuna walk-forward, MAE $394.88 vs Model 1 $396.22)."
         )
 
 st.divider()
@@ -755,13 +800,16 @@ with st.container(border=True):
         with mf1:
             st.caption("Delayed T+1h ground-truth verification: Compares what each AI model predicted against the real Bitcoin closing price 1 hour later.")
         with mf2:
-            model_options = ["All Models", "Model 1 (39 Feat)", "Model 2 (Stationary)"]
+            model_options = ["All Models", "Model 1 (39 Feat)", "Model 2 (Stationary)", "Model 3 (LightGBM)"]
             selected_model = st.selectbox("Filter Table by Model:", model_options, index=0)
 
         # Format Display Table
         table_df = rec_df.copy()
         table_df["Time (UTC)"] = pd.to_datetime(table_df["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
-        table_df["Model"] = table_df["model_version"].fillna("xgb_v1").apply(lambda m: "Model 1 (39 Feat)" if "v1" in str(m) else "Model 2 (Stationary)")
+        table_df["Model"] = table_df["model_version"].fillna("xgb_v1").apply(
+            lambda m: "Model 3 (LightGBM)" if ("v3" in str(m) or "lgbm" in str(m))
+            else ("Model 2 (Stationary)" if "v2" in str(m) else "Model 1 (39 Feat)")
+        )
 
         if selected_model != "All Models":
             table_df = table_df[table_df["Model"] == selected_model]
