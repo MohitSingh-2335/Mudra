@@ -126,13 +126,21 @@ def get_registered_models() -> Dict[str, Dict[str, Any]]:
                 continue
             clf_path = data.get("classifier_artifact_path") or CLASSIFIER_MODEL_PATH
             reg_path = data.get("regressor_artifact_path") or REGRESSOR_MODEL_PATH
+            from config import BASE_DIR
+            if not Path(clf_path).is_file():
+                clf_path = str(BASE_DIR / clf_path)
+            if not Path(reg_path).is_file():
+                reg_path = str(BASE_DIR / reg_path)
             if not Path(clf_path).is_file() or not Path(reg_path).is_file():
                 continue
             clf_m = joblib.load(clf_path)
             reg_m = joblib.load(reg_path)
             for m in (clf_m, reg_m):
                 if hasattr(m, "set_params"):
-                    m.set_params(device="cpu")
+                    try:
+                        m.set_params(device="cpu")
+                    except Exception:
+                        pass
 
             registered[version] = {
                 "model_version": version,
