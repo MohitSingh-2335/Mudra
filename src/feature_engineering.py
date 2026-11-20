@@ -102,6 +102,26 @@ def create_features(df: pd.DataFrame, drop_na: bool = True, is_training: bool = 
         if c not in df.columns:
             df[c] = 0.0
 
+    # Model 3 (v3_29stationary) scale-invariant indicators
+    df["return_1h"] = df["close"].pct_change(1, fill_method=None).fillna(0.0)
+    df["return_4h"] = df["close"].pct_change(4, fill_method=None).fillna(0.0)
+    df["return_24h"] = df["close"].pct_change(24, fill_method=None).fillna(0.0)
+    df["hl_range_mean_6h"] = df["hl_range_pct"].rolling(6).mean().bfill().fillna(0.0)
+    df["hl_range_std_6h"] = df["hl_range_pct"].rolling(6).std().fillna(0.0)
+    df["hl_range_max_6h"] = df["hl_range_pct"].rolling(6).max().bfill().fillna(0.0)
+    df["hl_range_min_6h"] = df["hl_range_pct"].rolling(6).min().bfill().fillna(0.0)
+    ret_std_6 = df["return_1h"].rolling(6).std()
+    ret_std_24 = df["return_1h"].rolling(24).std()
+    df["vol_regime_ratio_6h_24h"] = (ret_std_6 / (ret_std_24 + 1e-8)).fillna(1.0)
+    df["macd_pct"] = (df["macd"] / (df["close"] + 1e-8)).fillna(0.0)
+    macd_sig = df["macd"].ewm(span=9, adjust=False).mean()
+    df["macd_signal_diff_pct"] = ((df["macd"] - macd_sig) / (df["close"] + 1e-8)).fillna(0.0)
+
+    for raw_c, new_pref in [("volume", "vol"), ("taker_buy_base_volume", "taker"), ("number_of_trades", "trades")]:
+        log_v = np.log1p(df[raw_c])
+        df[f"{new_pref}_log_z24"] = ((log_v - log_v.rolling(24).mean()) / (log_v.rolling(24).std() + 1e-8)).fillna(0.0)
+    df["volume_ratio_6h_24h"] = (df["volume"].rolling(6).mean() / (df["volume"].rolling(24).mean() + 1e-8)).fillna(1.0)
+
     df = df.replace([np.inf, -np.inf], np.nan)
     return df.dropna().reset_index(drop=True) if drop_na else df
 
