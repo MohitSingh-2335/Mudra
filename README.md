@@ -65,15 +65,15 @@ CLEAN DATASET (34,990 Total 1-Hour Candles):
 ---
 
 ### 2.2 Model Benchmark Comparison
-Out-of-sample directional accuracy on the 6,998-hour test set demonstrates that neither classical gradient boosting nor zero-shot foundation models break beyond the ~53% ceiling:
+Out-of-sample directional accuracy on the 6,998-hour test set demonstrates that neither classical gradient boosting nor zero-shot foundation models break beyond the ~53% ceiling. Detailed model specifications and post-mortems are tracked in the [Model Evolution Ledger](docs/reports/model_evolution_ledger.md):
 
 ![Model Benchmark Comparison](docs/images/model_benchmark_comparison.png)
 
-| Model Architecture | Role / Status | Regressor RMSE (USD) | Return MAE | Direction Accuracy | Log-Loss (50/50 = 0.6931) | Status |
+| Model Architecture | Role / Status | Regressor RMSE (USD) | Return MAE | Direction Accuracy | Log-Loss (50/50 = 0.6931) | Model Documentation |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Naive Persistence ($\hat{P}_{t+1} = P_t$)** | Baseline | **$398.77** | **0.003198** | 50.42% | 0.6931 | Reference Benchmark |
-| **Model 1 (`xgb_onnx_v1.0.0`)** | **Active Production** | $399.47 | 0.003210 | **53.26%** | **0.6914** | **Active Model (39 Feat)** |
-| **Model 2 (`xgb_v2_stationary`)** | **Shadow Consensus** | $399.37 | 0.003200 | 52.49% | 0.6919 | **Shadow Model (Stationary)** |
+| **Naive Persistence ($\hat{P}_{t+1} = P_t$)** | Baseline | **$398.77** | **0.003198** | 50.39% | 0.6931 | Reference Benchmark |
+| **[Model 1 (`xgb_onnx_v1.0.0`)](docs/models/model_1_xgb_v1.md)** | **Active Production** | $399.47 | 0.003221 | **53.26%** | **0.6914** | [Model Card](docs/models/model_1_xgb_v1.md) (39 Features) |
+| **[Model 2 (`xgb_v2.0.0`)](docs/models/model_2_xgb_v2.md)** | **Shadow Consensus** | $401.12 | 0.003222 | 52.07% | 0.6926 | [Model Card](docs/models/model_2_xgb_v2.md) (Stationary) |
 | **Amazon Chronos-2 (Zero-Shot)** | Foundation Model | $322.65 *(Scaled)* | - | 49.60% | - | Failed to beat coin flip |
 | **Google TimesFM 2.5 (Zero-Shot)**| Foundation Model | $314.65 *(Scaled)* | - | 48.60% | - | Failed to beat coin flip |
 | **Salesforce Moirai 2.0 (Zero-Shot)**| Foundation Model| $316.35 *(Scaled)* | - | 49.20% | - | Failed to beat coin flip |
