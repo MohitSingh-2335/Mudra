@@ -56,7 +56,7 @@ from src.agents import (
 )
 from src.database import (
     CouncilAudit, HourlyPostmortem, MarketTick, ModelPrediction, ModelRegistry, PaperPortfolio, Reconciliation,
-    get_db, has_tick_id_column, test_connection,
+    get_db, has_tick_id_column, log_telemetry, test_connection,
 )
 
 logger = logging.getLogger("mudra.engine")
@@ -489,10 +489,12 @@ def fetch_latest_confirmed_candle(
     _clock_fn, _budget = clock_fn or time.perf_counter, total_deadline or EXCHANGE_RETRY_TOTAL_DEADLINE
 
     b_url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&limit=102"
+    t0_b = _clock_fn()
     binance_klines = _fetch_feed_with_retry(
         url=b_url, feed_name="Binance Vision", min_row_len=BINANCE_MIN_ROW_LEN,
         sleep_fn=_sleep_fn, jitter_fn=_jitter_fn, clock_fn=_clock_fn, now_dt_fn=now_dt_fn, total_deadline=_budget,
     )
+    b_lat = (_clock_fn() - t0_b) * 1000.0
     if binance_klines and _validate_candle_payload(binance_klines, min_row_len=BINANCE_MIN_ROW_LEN):
         now_ms = (now_dt_fn().timestamp() if now_dt_fn else datetime.now(timezone.utc).timestamp()) * 1000.0
         confirmed = [k for k in binance_klines if float(k[6]) < now_ms]
@@ -513,14 +515,18 @@ def fetch_latest_confirmed_candle(
                 "open": float(c[1]), "high": float(c[2]), "low": float(c[3]), "close": float(c[4]),
                 "volume": float(c[5]), "taker_buy_ratio": records[-1]["taker_buy_ratio"],
                 "number_of_trades": _parse_trade_count(c[8]), "candles": records,
+                "feed_name": "binance_vision", "feed_endpoint": "/api/v3/klines",
+                "feed_latency_ms": b_lat, "feed_status": 200, "feed_error": None,
             }
 
     c_url = "https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=3600"
+    t0_cb = _clock_fn()
     cb_candles = _fetch_feed_with_retry(
         url=c_url, headers={"User-Agent": "Mudra-Sync/1.0"}, feed_name="Coinbase Institutional",
         min_row_len=COINBASE_MIN_ROW_LEN, sleep_fn=_sleep_fn, jitter_fn=_jitter_fn,
         clock_fn=_clock_fn, now_dt_fn=now_dt_fn, total_deadline=_budget,
     )
+    cb_lat = (_clock_fn() - t0_cb) * 1000.0
     if cb_candles and _validate_candle_payload(cb_candles, min_row_len=COINBASE_MIN_ROW_LEN):
         now_sec = now_dt_fn().timestamp() if now_dt_fn else datetime.now(timezone.utc).timestamp()
         confirmed = [k for k in cb_candles if (float(k[0]) + 3600.0) <= now_sec]
@@ -539,6 +545,8 @@ def fetch_latest_confirmed_candle(
                 "timestamp": datetime.fromtimestamp(float(c[0]), tz=timezone.utc),
                 "open": float(c[3]), "high": float(c[2]), "low": float(c[1]), "close": float(c[4]),
                 "volume": float(c[5]), "taker_buy_ratio": 0.50, "number_of_trades": None, "candles": records,
+                "feed_name": "binance_vision", "feed_endpoint": "/api/v3/klines",
+                "feed_latency_ms": b_lat, "feed_status": 503, "feed_error": "BINANCE_UNAVAILABLE_FALLBACK_TO_COINBASE",
             }
 
     raise MarketFeedExhaustedError("Failed to fetch confirmed 1-hour candle from all market feeds.")
@@ -593,12 +601,27 @@ def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]
         return False, f"Database unreachable: {ver}", {}
 
     if candle is None:
+        t0_fetch = time.perf_counter()
         try:
             candle = fetch_latest_confirmed_candle()
         except MarketFeedExhaustedError as exc:
+            lat_err = (time.perf_counter() - t0_fetch) * 1000.0
+            try:
+                with get_db() as err_sess:
+                    log_telemetry(err_sess, "binance_vision", "/api/v3/klines", lat_err, 503, str(exc))
+            except Exception:
+                pass
             return False, f"Market feed error: {exc}", {}
 
     with get_db() as session:
+        # log binance_vision feed telemetry to database
+        feed_svc = candle.get("feed_name", "binance_vision")
+        feed_ep = candle.get("feed_endpoint", "/api/v3/klines")
+        feed_lat = float(candle.get("feed_latency_ms", 150.0))
+        feed_status = int(candle.get("feed_status", 200))
+        feed_err = candle.get("feed_error")
+        log_telemetry(session, feed_svc, feed_ep, feed_lat, feed_status, feed_err)
+
         latest_ts = _normalize_utc_timestamp(candle["timestamp"])
         backfill_missing_candles(session, candle)
 
@@ -953,10 +976,55 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
                     "error_usd": abs_err,
                 })
 
+            # log mcp derivatives funding pulse telemetry
+            t0_mcp = time.perf_counter()
+            try:
+                from src.mcp_server import get_live_btc_derivatives_pulse
+                pulse = get_live_btc_derivatives_pulse()
+                pulse_lat = (time.perf_counter() - t0_mcp) * 1000.0
+                pulse_status = 200 if pulse.get("status") == "LIVE" else 503
+                pulse_err = None if pulse_status == 200 else str(pulse.get("error") or "OFFLINE_FALLBACK")
+            except Exception as mcp_err:
+                pulse_lat = (time.perf_counter() - t0_mcp) * 1000.0
+                pulse_status = 503
+                pulse_err = str(mcp_err)
+                pulse = {"status": "fallback", "funding_rate_8h_pct": 0.01, "derivatives_regime": "Neutral Funding", "futures_basis_usd": 0.0}
+            log_telemetry(session, "mcp_derivatives", "/fapi/v1/premiumIndex", pulse_lat, pulse_status, pulse_err)
+
+            # log mcp btc news headlines telemetry
+            t0_news = time.perf_counter()
+            try:
+                from src.mcp_server import get_recent_btc_news_headlines
+                news = get_recent_btc_news_headlines(hours_back=6, max_items=5)
+                news_lat = (time.perf_counter() - t0_news) * 1000.0
+                news_status = 200 if news.get("status") == "LIVE" else 503
+                news_err = None if news_status == 200 else str(news.get("error") or "FEED_OFFLINE")
+            except Exception as news_err_exc:
+                news_lat = (time.perf_counter() - t0_news) * 1000.0
+                news_status = 503
+                news_err = str(news_err_exc)
+                news = {"status": "UNAVAILABLE", "headlines": []}
+            log_telemetry(session, "mcp_rss_news", "coindesk+cointelegraph_rss", news_lat, news_status, news_err)
+
             mcp_ctx = fetch_mcp_context(limit=3)
+            if pulse.get("status") == "LIVE":
+                mcp_ctx["funding_rate_8h_pct"] = float(pulse.get("funding_rate_8h_pct", 0.01))
+                mcp_ctx["derivatives_regime"] = str(pulse.get("derivatives_regime", "Neutral Funding"))
+                mcp_ctx["futures_basis_usd"] = float(pulse.get("futures_basis_usd", 0.0))
+            if news.get("status") == "LIVE":
+                mcp_ctx["news_headlines"] = news.get("headlines", [])
+
             prior_feats = dict(prior.features) if isinstance(prior.features, dict) else {}
             prior_feats.setdefault("close", float(prior.close))
+
+            # log gemini post-mortem telemetry
+            t0_gem = time.perf_counter()
             postmortem = generate_hourly_postmortem_with_gemini(prior_feats, mcp_ctx, model_outcomes)
+            gem_lat = (time.perf_counter() - t0_gem) * 1000.0
+            gem_ok = (postmortem.get("gemini_status") == "OK")
+            gem_status = 200 if gem_ok else (429 if "quota" in str(postmortem.get("error_detail", "")).lower() else 503)
+            gem_err = None if gem_ok else str(postmortem.get("error_detail") or "GEMINI_UNAVAILABLE")
+            log_telemetry(session, "gemini_api", "hourly_postmortem", gem_lat, gem_status, gem_err)
 
             with session.begin_nested():
                 existing_pm = session.execute(
