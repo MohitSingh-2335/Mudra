@@ -665,7 +665,7 @@ def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]
                         close_f = float(candle["close"])
                         c_price = float(close_f * (1.0 + c_ret))
                         c_ret_pct = float(((c_price - close_f) / close_f) * 100.0)
-                        c_dir = ("UP" if c_prob_up >= 0.5 else "DOWN") if hasattr(c_clf, "predict_proba") else ("UP" if c_ret_pct >= 0.0 else "DOWN")
+                        c_dir = "UP" if c_ret_pct >= 0.0 else "DOWN"
 
                         with session.begin_nested():
                             ensure_model_registered(session, cand_version, cand_spec)
