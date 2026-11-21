@@ -157,8 +157,12 @@ def get_registered_models() -> Dict[str, Dict[str, Any]]:
                 reg_path = str(BASE_DIR / reg_path)
             if not Path(clf_path).is_file() or not Path(reg_path).is_file():
                 continue
-            clf_m = joblib.load(clf_path)
-            reg_m = joblib.load(reg_path)
+
+            # Verify integrity using SHA-256 digest when present in manifest
+            clf_sha = data.get("classifier_sha256")
+            reg_sha = data.get("regressor_sha256")
+            clf_m = load_verified_model(clf_path, clf_sha) if clf_sha else joblib.load(clf_path)
+            reg_m = load_verified_model(reg_path, reg_sha) if reg_sha else joblib.load(reg_path)
             for m in (clf_m, reg_m):
                 restore_estimator_boosters(m)
 
