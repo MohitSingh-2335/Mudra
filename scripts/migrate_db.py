@@ -15,10 +15,9 @@ from config import (
     MIN_HURDLE_PCT, PORTFOLIO_ADVISORY_LOCK_ID, REGRESSOR_MODEL_SHA256,
 )
 from src.database import (
-    Base, CANONICAL_FUNCTIONS, CANONICAL_TABLE_COLUMNS, CANONICAL_TRIGGERS,
+    Base, CANONICAL_TABLE_COLUMNS,
     SchemaDriftError, _TICK_ID_COLUMN_CACHE, _classify_column_type,
-    create_db_engine, engine as default_engine, ensure_canonical_function,
-    ensure_canonical_trigger, verify_db_schema,
+    create_db_engine, engine as default_engine, verify_db_schema,
 )
 
 MIGRATION_ADVISORY_LOCK_ID = 888002
@@ -70,7 +69,7 @@ CANDIDATE_MODEL_SPEC: Dict[str, Any] = {
 def _verify_new_tables_subset(conn: Any) -> None:
     inspector = inspect(conn)
     existing_tables = set(inspector.get_table_names())
-    for tbl_name in ("model_registry", "model_lifecycle_events", "model_predictions", "prediction_investigations"):
+    for tbl_name in ("model_registry", "model_lifecycle_events", "model_predictions"):
         if tbl_name not in existing_tables:
             raise SchemaDriftError(f"Table '{tbl_name}' missing.")
         live_cols = {c["name"]: c for c in inspector.get_columns(tbl_name)}
@@ -89,9 +88,7 @@ def run_tx1a(target_engine: Engine, bootstrap_base_tables: bool = True) -> Dict[
         if bootstrap_base_tables:
             Base.metadata.create_all(bind=conn)
         _verify_new_tables_subset(conn)
-        created_funcs = sum(1 for f in CANONICAL_FUNCTIONS if ensure_canonical_function(conn, f))
-        created_trigs = sum(1 for t in CANONICAL_TRIGGERS if ensure_canonical_trigger(conn, t))
-    return {"tx": "1A", "functions_created": created_funcs, "triggers_created": created_trigs}
+    return {"tx": "1A", "status": "tables_verified"}
 
 
 def run_tx1b(target_engine: Engine) -> Dict[str, Any]:
