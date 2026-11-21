@@ -1,9 +1,5 @@
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-try:
-    import onnxruntime
-except Exception:
-    pass
 
 # Linux / Streamlit Cloud SQLite upgrade hook for ChromaDB
 try:
@@ -515,14 +511,11 @@ def format_portfolio_rationale(row) -> str:
 
 def build_model_pedigree_markdown() -> str:
     return (
-        "| Parameter | Active Value | Rationale |\n"
-        "| :--- | :--- | :--- |\n"
-        "| **Model Architecture** | `XGBRegressor (CPU)` | Sub-millisecond single-row latency |\n"
-        f"| **Model Checkpoint** | `{ACTIVE_MODEL_VERSION}` | Optuna 50 Bayesian trial champion |\n"
-        "| **Cross-Validation RMSE**| `$396.22` | Chronological walk-forward split |\n"
-        "| **Directional Accuracy**| `53.17%` | Out-of-sample test set |\n"
-        f"| **Historical Backtest Friction** | `0.30% (Historical)` | Legacy Phase 1 report assumption (7,000h study); current canonical friction is `{ROUND_TRIP_FRICTION_PCT:.2f}%` (`{TOTAL_FRICTION_PER_SIDE_PCT:.2f}%` per side) |\n"
-        f"| **Net Strategy Alpha (Historical)** | `+33.55 pp (Historical)` | Measured under the historical `0.30%` friction assumption; not evidence of equivalent performance under current canonical `{ROUND_TRIP_FRICTION_PCT:.2f}%` friction |"
+        "| Model Version | Architecture | Status | Features | Accuracy | Log-Loss | Friction Benchmark |\n"
+        "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
+        f"| **Model 1** (`xgb_onnx_v1.0.0`) | XGBoost Regressor + Classifier | Active Production | 42 (Raw + engineered) | 53.26% | 0.6914 | `0.30% (Historical)` benchmark; canonical `{ROUND_TRIP_FRICTION_PCT:.2f}%` (`{TOTAL_FRICTION_PER_SIDE_PCT:.2f}%`/side) |\n"
+        f"| **Model 2** (`xgb_v2.0.0`) | XGBoost Stationary | Live Shadow | 29 (Leak-free stationary) | 52.07% | 0.6926 | Evaluated under canonical `{ROUND_TRIP_FRICTION_PCT:.2f}%` hurdle |\n"
+        f"| **Model 3** (`lgbm_v3.0.0`) | LightGBM GBDT | Shadow Candidate | 29 (Stationary + Platt) | 52.89% | 0.6913 | Evaluated under canonical `{ROUND_TRIP_FRICTION_PCT:.2f}%` hurdle |"
     )
 
 
@@ -692,14 +685,15 @@ m3_forecast_result = generate_m3_forecast(live_df=live_market_df, m3_reg=m3_reg_
 
 # Section 1: Top Headline Metric Cards (Live Telemetry & Real-Time Targets)
 with st.container(border=True):
-    st.markdown('<span class="section-badge">Section 1 · Live Telemetry</span>', unsafe_allow_html=True)
-    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+    st.markdown('<span class="section-badge">Section 1 · Live Telemetry & Model Targets</span>', unsafe_allow_html=True)
     p_24h = float(live_market_df["close"].iloc[-24]) if len(live_market_df) >= 24 else None
     d_24h = current_price - p_24h if current_price is not None and p_24h is not None else None
 
     forecast_result = generate_live_forecast(live_df=live_market_df, reg_model=reg_model, clf_model=clf_model, is_stale=is_stale_fallback)
 
-    with c1:
+    # Row 1: 4 columns - Live BTC Price + Targets for M1, M2, M3
+    r1_c1, r1_c2, r1_c3, r1_c4 = st.columns(4)
+    with r1_c1:
         st.metric(
             "Live Bitcoin Price",
             f"${current_price:,.2f}" if current_price and not is_stale_fallback else "Unavailable",
@@ -707,7 +701,7 @@ with st.container(border=True):
             help="Latest confirmed 1-hour candle close from Binance Vision API."
         )
 
-    with c2:
+    with r1_c2:
         if forecast_result:
             st.metric(
                 "Model 1 Target (Active)",
@@ -718,7 +712,7 @@ with st.container(border=True):
         else:
             st.metric("Model 1 Target (Active)", "Computing...", "Awaiting Candle", help="Model 1 forecast is calculating.")
 
-    with c3:
+    with r1_c3:
         if m2_forecast_result:
             st.metric(
                 "Model 2 Target (Shadow)",
@@ -729,7 +723,7 @@ with st.container(border=True):
         else:
             st.metric("Model 2 Target (Shadow)", "Standby", "Stationary Model", help="Shadow Model 2 forecast is on standby.")
 
-    with c4:
+    with r1_c4:
         if m3_forecast_result:
             st.metric(
                 "Model 3 Target (Candidate)",
@@ -740,332 +734,409 @@ with st.container(border=True):
         else:
             st.metric("Model 3 Target (Candidate)", "Standby", "LightGBM Model", help="Candidate Model 3 forecast is on standby.")
 
-    with c5:
+    st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
+
+    # Row 2: 3 columns - Accuracy & Metric for M1, M2, M3
+    r2_c1, r2_c2, r2_c3 = st.columns(3)
+    with r2_c1:
         st.metric(
-            "Model 1 Accuracy",
-            "53.26% Active",
+            "Model 1 (Active)",
+            "53.26% · Log-Loss 0.6914",
             "XGBoost v1 (39 Features)",
             help="Walk-forward out-of-sample directional accuracy on 6,998 test hours."
         )
 
-    with c6:
+    with r2_c2:
         st.metric(
-            "Model 2 Accuracy",
-            "52.07% Shadow",
+            "Model 2 (Shadow)",
+            "52.07% · Log-Loss 0.6926",
             "XGBoost v2 (Stationary)",
             help="Stationary return classifier out-of-sample directional accuracy."
         )
 
-    with c7:
+    with r2_c3:
         st.metric(
-            "Model 3 Accuracy",
-            "52.89% Candidate",
+            "Model 3 (Candidate)",
+            "52.89% · Log-Loss 0.6913",
             "LightGBM v3 (Stationary)",
             help="Candidate LightGBM v3 (29 stationary features + Platt calibration): 52.89% accuracy, 0.6913 log-loss, 0.2491 Brier, 0.5381 ROC-AUC, +0.0211 Spearman IC."
         )
 
 st.divider()
 
-# Section 2: Previous Model Predictions vs. Real Market Outcomes (Ground Truth)
-with st.container(border=True):
-    st.markdown('<span class="section-badge">Section 2 · Ground Truth</span>', unsafe_allow_html=True)
-    st.subheader("Previous AI Model Predictions vs. Real Market Outcomes (Ground Truth)")
+# Native 4-Tab Recruiter-Friendly Dashboard
+tab_models, tab_ground_truth, tab_portfolio, tab_agent = st.tabs([
+    "Model Evolution & SHAP",
+    "Ground Truth (T+1h)",
+    "Paper Portfolio & Charts",
+    "AI Reasoning (LangGraph + RAG + MCP)",
+])
 
-    rec_df = db_state.get("rec_df", pd.DataFrame())
-    rec_kpis = db_state.get("rec_kpis", {})
+# Tab 1: Model Evolution & SHAP
+with tab_models:
+    with st.container(border=True):
+        st.markdown('<span class="section-badge">Model Evolution & Governance</span>', unsafe_allow_html=True)
+        st.subheader("Model Benchmark Comparison (Active vs. Shadow Candidates)")
+        st.caption("Empirical holdout validation metrics comparing production model against stationary shadow models.")
 
-    if not rec_df.empty:
-        total_eval = rec_kpis.get("total_reconciled") or len(rec_df)
-        hit_rate = rec_kpis.get("directional_accuracy_pct") or rec_kpis.get("win_rate_pct") or 52.8
-        mae = rec_kpis.get("mae_usd") or (float(rec_df["absolute_error_usd"].mean()) if "absolute_error_usd" in rec_df.columns else 284.0)
+        manifest_rows = []
+        manifest_files = [
+            ROOT_DIR / "artifacts" / "models" / "model_manifest.json",
+            ROOT_DIR / "artifacts" / "models" / "xgb_v2_manifest.json",
+            ROOT_DIR / "artifacts" / "models" / "lgbm_v3_manifest.json",
+        ]
+        for mf in manifest_files:
+            if mf.exists():
+                try:
+                    with open(mf, "r", encoding="utf-8") as f:
+                        m_data = json.load(f)
+                    met = m_data.get("metrics", {})
+                    acc = f"{met['holdout_accuracy']*100:.2f}%" if "holdout_accuracy" in met else "N/A"
+                    ll = f"{met['holdout_log_loss']:.4f}" if "holdout_log_loss" in met else "N/A"
+                    br = f"{met['holdout_brier_score']:.4f}" if "holdout_brier_score" in met else "N/A"
+                    auc = f"{met['holdout_roc_auc']:.4f}" if "holdout_roc_auc" in met else "N/A"
+                    ic = f"{met['holdout_spearman_ic']:+.4f}" if "holdout_spearman_ic" in met else "N/A"
+                    status = m_data.get("status", "ACTIVE_PRODUCTION")
+                    feat_count = len(m_data.get("features", []))
+                    schema_lbl = f"{m_data.get('feature_schema_version', 'v1')} ({feat_count} feat)"
+                    manifest_rows.append({
+                        "Model Version": m_data.get("model_version", mf.stem),
+                        "Schema": schema_lbl,
+                        "Accuracy": acc,
+                        "Log-Loss": ll,
+                        "Brier": br,
+                        "ROC-AUC": auc,
+                        "Spearman IC": ic,
+                        "Status": status,
+                    })
+                except Exception:
+                    pass
+        if manifest_rows:
+            st.dataframe(pd.DataFrame(manifest_rows), use_container_width=True, hide_index=True)
 
-        rk1, rk2, rk3 = st.columns(3)
-        with rk1:
-            st.metric(
-                "Total Predictions Evaluated",
-                f"{total_eval} Hours",
-                "Continuous Logging",
-                help="Total 1-hour cycles reconciled against real exchange close prices."
+        shap_path = ROOT_DIR / "docs" / "images" / "shap_classifier_summary.png"
+        if shap_path.exists():
+            st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+            st.subheader("TreeSHAP Feature Importance & Interpretability")
+            st.image(str(shap_path), use_column_width=True)
+            st.caption("Top TreeSHAP features driving model direction: taker_buy_ratio (aggressive market orders), volatility range, and short-term momentum.")
+
+        with st.expander("Research Findings, Anti-Leakage Split & Model Governance", expanded=False):
+            st.markdown("#### Active Production Model Pedigree")
+            st.markdown(build_model_pedigree_markdown())
+            st.markdown(
+                """
+                #### Anti-Leakage Chronological Split Boundary
+                ```text
+                CLEAN DATASET (34,990 Total 1-Hour Candles):
+                ├── Range: 2022-07-08 13:00 UTC to 2026-07-06 08:00 UTC
+                └── Note: 1 irregular exchange-halt row (2023-03-24 12:00 UTC) removed
+
+                TRAIN PERIOD (80% Chronological — 27,991 Hours):
+                ├── Start: 2022-07-08 13:00:00 UTC
+                └── End:   2025-09-17 17:00:00 UTC (No future market data visible to model)
+
+                PURGE BUFFER (1-Hour Causality Guard — 1 Hour):
+                └── Excluded: 2025-09-17 18:00:00 UTC (Prevents T+1h target leakage across boundary)
+
+                OUT-OF-SAMPLE TEST PERIOD (20% Holdout — 6,998 Hours):
+                ├── Start: 2025-09-17 19:00:00 UTC
+                └── End:   2026-07-06 08:00:00 UTC (Pure out-of-sample forward evaluation)
+                ```
+
+                #### Controlled Model Benchmark & Rejection Rationale
+                | Model Version | Regressor RMSE (USD) | Direction Hit Rate | Classifier Accuracy | Classifier Macro F1 | Governance Status |
+                | :--- | :--- | :--- | :--- | :--- | :--- |
+                | **Naive Persistence** | **$398.77** | *Baseline* | *Baseline* | *Baseline* | Reference Benchmark |
+                | **`xgb_onnx_v1.0.0`** *(Active)* | $399.47 | **50.50%** | **53.26%** | **0.5297** | **ACTIVE PRODUCTION** |
+                | **`p1_controlled_candidate_v1`** | $399.37 | 50.36% | 53.03% | 0.5280 | **REJECTED CANDIDATE** |
+
+                *Note: Simulated paper-trading performance demonstrates execution accounting and fee-hurdle discipline.*
+                """
             )
-        with rk2:
-            st.metric(
-                "Directional Hit Rate",
-                f"{float(hit_rate):.1f}%",
-                "vs. 50% Random Flip",
-                help="Percentage of hourly forecasts where predicted direction matched actual market movement."
+            st.caption("Forecast Error Investigations & Root-Cause Audit Log (investigation_headline_search, investigation_status_filter available)")
+
+# Tab 2: Ground Truth (T+1h)
+with tab_ground_truth:
+    with st.container(border=True):
+        st.markdown('<span class="section-badge">Section 2 · Ground Truth Evaluation</span>', unsafe_allow_html=True)
+        st.subheader("Previous AI Model Predictions vs. Real Market Outcomes (Ground Truth)")
+
+        rec_df = db_state.get("rec_df", pd.DataFrame())
+        rec_kpis = db_state.get("rec_kpis", {})
+
+        if not rec_df.empty:
+            total_eval = rec_kpis.get("total_reconciled") or len(rec_df)
+            hit_rate = rec_kpis.get("directional_accuracy_pct") or rec_kpis.get("win_rate_pct") or 52.8
+            mae = rec_kpis.get("mae_usd") or (float(rec_df["absolute_error_usd"].mean()) if "absolute_error_usd" in rec_df.columns else 284.0)
+
+            rk1, rk2, rk3 = st.columns(3)
+            with rk1:
+                st.metric(
+                    "Total Predictions Evaluated",
+                    f"{total_eval} Hours",
+                    "Continuous Logging",
+                    help="Total 1-hour cycles reconciled against real exchange close prices."
+                )
+            with rk2:
+                st.metric(
+                    "Directional Hit Rate",
+                    f"{float(hit_rate):.1f}%",
+                    "vs. 50% Random Flip",
+                    help="Percentage of hourly forecasts where predicted direction matched actual market movement."
+                )
+            with rk3:
+                st.metric(
+                    "Mean Dollar Error (MAE)",
+                    f"${float(mae):,.2f}",
+                    "Next-Hour Price Move",
+                    help="Average absolute dollar gap between predicted target and actual close."
+                )
+
+            st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+
+            mf1, mf2 = st.columns([3, 1])
+            with mf1:
+                st.caption("Delayed T+1h ground-truth verification: Compares what each AI model predicted against the real Bitcoin closing price 1 hour later.")
+            with mf2:
+                model_options = ["All Models", "Model 1 (39 Feat)", "Model 2 (Stationary)", "Model 3 (LightGBM)"]
+                selected_model = st.selectbox("Filter Table by Model:", model_options, index=0)
+
+            # Format Display Table
+            table_df = rec_df.copy()
+            table_df["Time (UTC)"] = pd.to_datetime(table_df["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
+            table_df["Model"] = table_df["model_version"].fillna("xgb_v1").apply(
+                lambda m: "Model 3 (LightGBM)" if ("v3" in str(m) or "lgbm" in str(m))
+                else ("Model 2 (Stationary)" if "v2" in str(m) else "Model 1 (39 Feat)")
             )
-        with rk3:
-            st.metric(
-                "Mean Dollar Error (MAE)",
-                f"${float(mae):,.2f}",
-                "Next-Hour Price Move",
-                help="Average absolute dollar gap between predicted target and actual close."
-            )
 
-        st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+            if selected_model != "All Models":
+                table_df = table_df[table_df["Model"] == selected_model]
 
-        mf1, mf2 = st.columns([3, 1])
-        with mf1:
-            st.caption("Delayed T+1h ground-truth verification: Compares what each AI model predicted against the real Bitcoin closing price 1 hour later.")
-        with mf2:
-            model_options = ["All Models", "Model 1 (39 Feat)", "Model 2 (Stationary)", "Model 3 (LightGBM)"]
-            selected_model = st.selectbox("Filter Table by Model:", model_options, index=0)
+            table_df["BTC Price at Prediction"] = table_df.get("close", table_df["predicted_price"]).apply(lambda x: f"${float(x or 0):,.2f}")
+            table_df["AI Forecast Target"] = table_df["predicted_price"].apply(lambda x: f"${float(x or 0):,.2f}")
+            table_df["Actual Next-Hour Close"] = table_df["actual_price_at_t_plus_1"].apply(lambda x: f"${float(x or 0):,.2f}")
+            table_df["Predicted Dir"] = table_df["predicted_return_pct"].apply(lambda r: "UP" if float(r or 0) >= 0 else "DOWN")
+            table_df["Actual Dir"] = table_df["actual_return_pct"].apply(lambda r: "UP" if float(r or 0) >= 0 else "DOWN")
+            table_df["Difference ($)"] = table_df["absolute_error_usd"].apply(lambda e: f"${float(e or 0):,.2f}")
+            table_df["Result"] = table_df.apply(classify_ground_truth_result, axis=1)
+            table_df["Diagnosis"] = table_df.apply(format_ground_truth_diagnosis, axis=1)
 
-        # Format Display Table
-        table_df = rec_df.copy()
-        table_df["Time (UTC)"] = pd.to_datetime(table_df["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
-        table_df["Model"] = table_df["model_version"].fillna("xgb_v1").apply(
-            lambda m: "Model 3 (LightGBM)" if ("v3" in str(m) or "lgbm" in str(m))
-            else ("Model 2 (Stationary)" if "v2" in str(m) else "Model 1 (39 Feat)")
-        )
+            show_cols = ["Time (UTC)", "Model", "BTC Price at Prediction", "AI Forecast Target", "Actual Next-Hour Close", "Predicted Dir", "Actual Dir", "Difference ($)", "Result", "Diagnosis"]
+            st.dataframe(table_df[show_cols].head(24), use_container_width=True, hide_index=True)
 
-        if selected_model != "All Models":
-            table_df = table_df[table_df["Model"] == selected_model]
-
-        table_df["BTC Price at Prediction"] = table_df.get("close", table_df["predicted_price"]).apply(lambda x: f"${float(x or 0):,.2f}")
-        table_df["AI Forecast Target"] = table_df["predicted_price"].apply(lambda x: f"${float(x or 0):,.2f}")
-        table_df["Actual Next-Hour Close"] = table_df["actual_price_at_t_plus_1"].apply(lambda x: f"${float(x or 0):,.2f}")
-        table_df["Predicted Dir"] = table_df["predicted_return_pct"].apply(lambda r: "UP" if float(r or 0) >= 0 else "DOWN")
-        table_df["Actual Dir"] = table_df["actual_return_pct"].apply(lambda r: "UP" if float(r or 0) >= 0 else "DOWN")
-        table_df["Difference ($)"] = table_df["absolute_error_usd"].apply(lambda e: f"${float(e or 0):,.2f}")
-        table_df["Result"] = table_df.apply(classify_ground_truth_result, axis=1)
-        table_df["Diagnosis"] = table_df.apply(format_ground_truth_diagnosis, axis=1)
-
-        show_cols = ["Time (UTC)", "Model", "BTC Price at Prediction", "AI Forecast Target", "Actual Next-Hour Close", "Predicted Dir", "Actual Dir", "Difference ($)", "Result", "Diagnosis"]
-        st.dataframe(table_df[show_cols].head(24), use_container_width=True, hide_index=True)
-    else:
-        if not is_neon_connected:
-            st.warning("Streamlit Cloud is currently reading from local fallback storage (0 records). To load all 880+ hours of ground-truth predictions from Neon PostgreSQL, add DATABASE_URL to your Streamlit Cloud Secrets.")
+            st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+            with st.expander("View Forecast Target vs. Realized Market Scatter Plot", expanded=True):
+                st.plotly_chart(create_reconciliation_scatter(rec_df), use_container_width=True)
         else:
-            st.info("No historical reconciliation records found in database. Hourly worker logs will populate here continuously.")
+            if not is_neon_connected:
+                st.warning("Streamlit Cloud is currently reading from local fallback storage (0 records). To load all 880+ hours of ground-truth predictions from Neon PostgreSQL, add DATABASE_URL to your Streamlit Cloud Secrets.")
+            else:
+                st.info("No historical reconciliation records found in database. Hourly worker logs will populate here continuously.")
 
-st.divider()
+# Tab 3: Paper Portfolio & Charts
+with tab_portfolio:
+    with st.container(border=True):
+        st.markdown('<span class="section-badge">Section 3 · Paper Portfolio & Execution</span>', unsafe_allow_html=True)
+        st.subheader("Paper Trading Account & Live Model PnL ($10,000 Base)")
+        st.caption(
+            "Simulated execution accounting: Higher-confidence AI model drives BUY/SELL/HOLD decisions. "
+            f"Deducts real exchange fees ({ROUND_TRIP_FRICTION_PCT:.2f}% round-trip friction) and tracks net portfolio earnings over time."
+        )
 
-# Section 3: AI Multi-Agent & RAG Reasoning Box
-with st.container(border=True):
-    st.markdown('<span class="section-badge">Section 3 · Agentic Reasoning</span>', unsafe_allow_html=True)
-    st.subheader("Why Did the AI Make This Prediction? (Multi-Agent Council & RAG Memory)")
-    st.caption(
-        "How Mudra uses a LangGraph multi-agent council to prevent bad trades: "
-        "Machine learning models predict price moves, but independent agents evaluate market risk, fee hurdles, and past error memory before executing."
-    )
+        port_df = db_state.get("port_df", pd.DataFrame())
+        port_kpis = db_state.get("port_kpis", {})
 
-    if current_price is not None and forecast_result is not None:
-        audit_data = db_state.get("latest_audit") or {}
-        last_thesis = audit_data.get("thesis") or "Awaiting deliberation."
-        last_action = audit_data.get("final_decision") or "HOLD"
-        last_verdict = audit_data.get("risk_verdict") or "APPROVED"
-        conviction = audit_data.get("strategist_conviction") or 5
+        total_equity = float(port_kpis.get("total_equity_usd") or 10000.0)
+        realized_pnl = float(port_kpis.get("realized_pnl_usd") or 0.0)
+        cash_balance = float(port_kpis.get("cash_balance") or 10000.0)
+        btc_balance = float(port_kpis.get("btc_balance") or 0.0)
+        pnl_diff = total_equity - INITIAL_CAPITAL_USD
+        pnl_pct = (pnl_diff / INITIAL_CAPITAL_USD) * 100.0
 
-        r_col1, r_col2 = st.columns([2.5, 1])
-        with r_col1:
-            st.markdown(
-                f"""
-                <div class="deliberation-card">
-                    <div style="font-size: 0.95rem; font-weight: 700; color: #F0F6FC; margin-bottom: 6px;">
-                        Multi-Agent Decision: <span style="color: #58A6FF;">{last_action}</span> &nbsp;|&nbsp; 
-                        Risk Gate: <span style="color: {'#00C087' if last_verdict == 'APPROVED' else '#FF3B69'};">{last_verdict}</span> &nbsp;|&nbsp; 
-                        Model Conviction: <span style="color: #F7931A;">{conviction}/10</span>
-                    </div>
-                    <div style="font-size: 0.85rem; color: #C9D1D9; line-height: 1.45; margin-bottom: 8px;">
-                        <strong>Council Reasoning:</strong> {last_thesis}
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
+        p1, p2, p3, p4 = st.columns(4)
+        with p1:
+            st.metric(
+                "Total Account Equity",
+                f"${total_equity:,.2f}",
+                f"{format_signed_usd(pnl_diff)} ({pnl_pct:+.2f}%)",
+                help="Current total portfolio value (Liquid Cash + Mark-to-Market Bitcoin)."
             )
-            st.info(f"**Market Features Analyzed:** Volatility Spread: `{forecast_result['spread_pct']:.2f}%` | 1h Price Range: `${forecast_result['candle_range_usd']:,.2f}` | Expected Return: `{forecast_result['pred_ret_pct']:+.2f}%`")
-        with r_col2:
-            st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
-            if st.button("Run Live Multi-Agent Deliberation Now", use_container_width=True, help="Executes LangGraph agentic loop across Strategist, Risk Critic, ChromaDB memory, and Execution agents."):
-                with st.spinner("Deliberating through LangGraph council..."):
-                    m_data, t_data, f_data = build_council_scenario_payload("live", current_price, forecast_result, live_market_df)
-                    res = run_trading_graph("BTCUSDT", current_price, m_data, t_data, f_data)
-                    st.session_state["council_state"] = res
-                    st.success("Council Deliberation Complete!")
-                    st.rerun()
-
-        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
-        # 4-Agent Architecture Breakdown for Recruiters / Technical Interviews
-        st.markdown("##### Multi-Agent Responsibilities (LangGraph Architecture)")
-        ag1, ag2, ag3, ag4 = st.columns(4)
-        with ag1:
-            with st.container(border=True):
-                st.markdown(
-                    "**1. Strategist Agent**  \n"
-                    "*Role:* Evaluates dual XGBoost signals (Active 39-feature vs. Shadow stationary). Proposes a trade ONLY when expected move exceeds the 0.14% exchange fee hurdle."
-                )
-        with ag2:
-            with st.container(border=True):
-                st.markdown(
-                    "**2. Risk Critic Agent**  \n"
-                    "*Role:* Evaluates volatility spread, range expansion, and liquidation risk. Has absolute veto power over the Strategist during choppy or adverse market regimes."
-                )
-        with ag3:
-            with st.container(border=True):
-                st.markdown(
-                    "**3. ChromaDB RAG Memory**  \n"
-                    "*Role:* Episodic vector memory. Embeds past market hours and retrieves historical mispredictions to stop the council from repeating past false-breakout mistakes."
-                )
-        with ag4:
-            with st.container(border=True):
-                st.markdown(
-                    "**4. Execution Agent**  \n"
-                    "*Role:* Deterministic accounting. Deducts exchange taker fees (0.10%) and slippage (0.04%), managing cash and BTC balances in the paper portfolio."
-                )
-
-        st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
-        with st.expander("Technical Interview Notes: Why Machine Learning Alone Is Not Enough In Quant Trading", expanded=False):
-            st.markdown(
-                """
-                - **The 0.14% Fee Hurdle Reality:** On 1-hour Bitcoin candles, standard binary prediction accuracy of ~53% is statistically significant (baseline random walk is 50%). However, Binance charges 0.05% maker / 0.10% taker fee per trade (~0.14% round-trip friction with slippage). Trading every hour on slight edges results in negative PnL due to fee drag.
-                - **Why LangGraph Multi-Agent Architecture Was Chosen:** Pure ML outputs raw numbers. The LangGraph council separates *signal generation* (XGBoost) from *capital preservation* (Risk Critic). If the market is in sideways chop, the Risk Critic forces a `HOLD`, saving capital.
-                - **Episodic RAG Retrieval:** By vectorizing past hourly features into ChromaDB, the council checks: *"Did we previously lose money under this exact volatility and order-flow profile?"* If yes, the council reduces conviction or rejects the trade.
-                """
+        with p2:
+            st.metric(
+                "Net Realized PnL",
+                f"{format_signed_usd(realized_pnl)}",
+                f"After {ROUND_TRIP_FRICTION_PCT:.2f}% Fee Friction",
+                help="Net profit or loss after subtracting exchange fees and execution slippage."
+            )
+        with p3:
+            st.metric(
+                "Available Cash",
+                f"${cash_balance:,.2f}",
+                "USDT Liquid Reserve",
+                help="Liquid virtual capital available to open new trading positions."
+            )
+        with p4:
+            btc_val = btc_balance * (current_price or 0.0)
+            st.metric(
+                "Bitcoin Held",
+                f"{btc_balance:.4f} BTC",
+                f"${btc_val:,.2f} Value",
+                help="Current spot Bitcoin position in the simulated portfolio."
             )
 
-st.divider()
+        if not port_df.empty:
+            st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+            st.plotly_chart(create_alpha_equity_curve(port_df), use_container_width=True)
 
-# Section 4: Paper Trading Account & Live Model PnL ($10,000 Base)
-with st.container(border=True):
-    st.markdown('<span class="section-badge">Section 4 · Paper Portfolio</span>', unsafe_allow_html=True)
-    st.subheader("Paper Trading Account & Live Model PnL ($10,000 Base)")
-    st.caption(
-        "Simulated execution accounting: Higher-confidence AI model (Active 53.26% vs. Shadow 52.49%) drives BUY/SELL/HOLD decisions. "
-        "Deducts real exchange fees (0.14% round-trip friction) and tracks net portfolio earnings over time."
-    )
+            st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+            st.markdown("**Recent Paper Trading Order Log & Strategy Rationale (Past 24 Hours / 24 Decisions):**")
+            t_disp = port_df.iloc[::-1].copy().head(24)
+            t_disp["Time (UTC)"] = pd.to_datetime(t_disp["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
+            t_disp["Order Action"] = t_disp["action"].apply(lambda a: f"[{str(a).upper().strip()}]")
+            t_disp["Market Price (BTC)"] = t_disp["execution_price"].apply(lambda p: f"${float(p or 0.0):,.2f}")
+            t_disp["Position / Trade"] = t_disp.apply(
+                lambda r: f"+{float(r.get('btc_amount', 0.0)):.4f} BTC" if str(r.get("action")).upper() == "BUY"
+                else (f"-{float(r.get('btc_amount', 0.0)):.4f} BTC" if str(r.get("action")).upper() == "SELL"
+                else (f"Holding {float(r.get('btc_balance', 0.0)):.4f} BTC" if float(r.get("btc_balance", 0.0)) > 0 else "100% Cash")),
+                axis=1
+            )
+            t_disp["Fee Deducted ($)"] = t_disp.apply(lambda r: f"${float(r.get('fee_deducted_usd', 0.0)) + float(r.get('slippage_usd', 0.0)):,.2f}", axis=1)
+            t_disp["Portfolio Equity ($)"] = t_disp["total_equity_usd"].apply(lambda eq: f"${float(eq or 10000.0):,.2f}")
+            t_disp["Strategy Rationale"] = t_disp.apply(format_portfolio_rationale, axis=1)
 
-    port_df = db_state.get("port_df", pd.DataFrame())
-    port_kpis = db_state.get("port_kpis", {})
+            show_port_cols = ["Time (UTC)", "Order Action", "Market Price (BTC)", "Position / Trade", "Fee Deducted ($)", "Portfolio Equity ($)", "Strategy Rationale"]
+            st.dataframe(t_disp[show_port_cols], use_container_width=True, hide_index=True)
+        else:
+            st.info("Portfolio initialized with $10,000.00 USDT virtual bankroll.")
 
-    total_equity = float(port_kpis.get("total_equity_usd") or 10000.0)
-    realized_pnl = float(port_kpis.get("realized_pnl_usd") or 0.0)
-    cash_balance = float(port_kpis.get("cash_balance") or 10000.0)
-    btc_balance = float(port_kpis.get("btc_balance") or 0.0)
-    pnl_diff = total_equity - INITIAL_CAPITAL_USD
-    pnl_pct = (pnl_diff / INITIAL_CAPITAL_USD) * 100.0
-
-    p1, p2, p3, p4 = st.columns(4)
-    with p1:
-        st.metric(
-            "Total Account Equity",
-            f"${total_equity:,.2f}",
-            f"{format_signed_usd(pnl_diff)} ({pnl_pct:+.2f}%)",
-            help="Current total portfolio value (Liquid Cash + Mark-to-Market Bitcoin)."
+    with st.container(border=True):
+        st.markdown('<span class="section-badge">Live Market Charts</span>', unsafe_allow_html=True)
+        st.subheader("Bitcoin Price Action & Real-Time TradingView Stream")
+        components.html(
+            """
+            <div class="tradingview-widget-container" style="height:540px;width:100%;margin:0;padding:0;">
+              <div id="tradingview_mudra" style="height:100%;width:100%;"></div>
+              <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+              <script type="text/javascript">
+              new TradingView.widget({
+                "autosize": true, "symbol": "BINANCE:BTCUSDT", "interval": "60", "timezone": "Etc/UTC",
+                "theme": "dark", "style": "1", "locale": "en", "toolbar_bg": "#0E1117", "enable_publishing": false,
+                "container_id": "tradingview_mudra", "backgroundColor": "#0E1117", "gridColor": "rgba(43, 49, 62, 0.4)"
+              });
+              </script>
+            </div>
+            """,
+            height=550,
         )
-    with p2:
-        st.metric(
-            "Net Realized PnL",
-            f"{format_signed_usd(realized_pnl)}",
-            f"After {ROUND_TRIP_FRICTION_PCT:.2f}% Fee Friction",
-            help="Net profit or loss after subtracting exchange fees and execution slippage."
-        )
-    with p3:
-        st.metric(
-            "Available Cash",
-            f"${cash_balance:,.2f}",
-            "USDT Liquid Reserve",
-            help="Liquid virtual capital available to open new trading positions."
-        )
-    with p4:
-        btc_val = btc_balance * (current_price or 0.0)
-        st.metric(
-            "Bitcoin Held",
-            f"{btc_balance:.4f} BTC",
-            f"${btc_val:,.2f} Value",
-            help="Current spot Bitcoin position in the simulated portfolio."
-        )
-
-    if not port_df.empty:
         st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
-        st.plotly_chart(create_alpha_equity_curve(port_df), use_container_width=True)
+        st.caption("Python Plotly Technical Analysis (Hourly Candles with EMA 20, EMA 50 & Volume):")
+        st.plotly_chart(create_tradingview_candlestick(live_market_df), use_container_width=True)
+
+# Tab 4: AI Reasoning (LangGraph + RAG + MCP)
+with tab_agent:
+    with st.container(border=True):
+        st.markdown('<span class="section-badge">Section 4 · Agentic Reasoning & MCP</span>', unsafe_allow_html=True)
+        st.subheader("Why Did the AI Make This Prediction? (Multi-Agent Council & RAG Memory)")
+        st.caption(
+            "Experimental multi-agent explanation and risk governance layer built on top of deterministic risk rules and fee hurdles: "
+            "Machine learning models predict price moves, while independent agents evaluate market risk, fee hurdles, and past error memory before executing."
+        )
+
+        # Live MCP Derivatives Pulse and Model Consensus cards
+        try:
+            from src.agents import fetch_mcp_context, get_multi_model_consensus
+            mcp_ctx = fetch_mcp_context(limit=3)
+        except Exception:
+            mcp_ctx = {"funding_rate_8h_pct": 0.01, "derivatives_regime": "Neutral Funding", "futures_basis_usd": 0.0, "recent_error_memories": []}
+
+        mp1, mp2, mp3 = st.columns(3)
+        with mp1:
+            st.metric("Derivatives Funding Rate (8h)", f"{mcp_ctx.get('funding_rate_8h_pct', 0.01):+.4f}%", mcp_ctx.get("derivatives_regime", "Neutral"))
+        with mp2:
+            st.metric("Futures Basis Gap", f"${mcp_ctx.get('futures_basis_usd', 0.0):+,.2f}", "Binance Futures vs. Spot")
+        with mp3:
+            if forecast_result:
+                try:
+                    mc_summary = get_multi_model_consensus(forecast_result.get("features", {}))
+                    st.metric("Multi-Model Consensus", f"{mc_summary.get('up_count', 0)}/{mc_summary.get('total', 0)} Bullish", mc_summary.get("summary", "Consensus Active"))
+                except Exception:
+                    st.metric("Multi-Model Consensus", "Consensus Active", "Dual Models")
+            else:
+                st.metric("Multi-Model Consensus", "Awaiting Data", "Standby")
 
         st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
-        st.markdown("**Recent Paper Trading Order Log & Strategy Rationale (Past 24 Hours / 24 Decisions):**")
-        t_disp = port_df.iloc[::-1].copy().head(24)
-        t_disp["Time (UTC)"] = pd.to_datetime(t_disp["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
-        t_disp["Order Action"] = t_disp["action"].apply(lambda a: f"[{str(a).upper().strip()}]")
-        t_disp["Market Price (BTC)"] = t_disp["execution_price"].apply(lambda p: f"${float(p or 0.0):,.2f}")
-        t_disp["Position / Trade"] = t_disp.apply(
-            lambda r: f"+{float(r.get('btc_amount', 0.0)):.4f} BTC" if str(r.get("action")).upper() == "BUY"
-            else (f"-{float(r.get('btc_amount', 0.0)):.4f} BTC" if str(r.get("action")).upper() == "SELL"
-            else (f"Holding {float(r.get('btc_balance', 0.0)):.4f} BTC" if float(r.get("btc_balance", 0.0)) > 0 else "100% Cash")),
-            axis=1
-        )
-        t_disp["Fee Deducted ($)"] = t_disp.apply(lambda r: f"${float(r.get('fee_deducted_usd', 0.0)) + float(r.get('slippage_usd', 0.0)):,.2f}", axis=1)
-        t_disp["Portfolio Equity ($)"] = t_disp["total_equity_usd"].apply(lambda eq: f"${float(eq or 10000.0):,.2f}")
-        t_disp["Strategy Rationale"] = t_disp.apply(format_portfolio_rationale, axis=1)
 
-        show_port_cols = ["Time (UTC)", "Order Action", "Market Price (BTC)", "Position / Trade", "Fee Deducted ($)", "Portfolio Equity ($)", "Strategy Rationale"]
-        st.dataframe(t_disp[show_port_cols], use_container_width=True, hide_index=True)
-    else:
-        st.info("Portfolio initialized with $10,000.00 USDT virtual bankroll.")
+        if current_price is not None and forecast_result is not None:
+            audit_data = db_state.get("latest_audit") or {}
+            last_thesis = audit_data.get("thesis") or "Awaiting deliberation."
+            last_action = audit_data.get("final_decision") or "HOLD"
+            last_verdict = audit_data.get("risk_verdict") or "APPROVED"
+            conviction = audit_data.get("strategist_conviction") or 5
 
-st.divider()
+            r_col1, r_col2 = st.columns([2.5, 1])
+            with r_col1:
+                st.markdown(
+                    f"""
+                    <div class="deliberation-card">
+                        <div style="font-size: 0.95rem; font-weight: 700; color: #F0F6FC; margin-bottom: 6px;">
+                            Multi-Agent Decision: <span style="color: #58A6FF;">{last_action}</span> &nbsp;|&nbsp; 
+                            Risk Gate: <span style="color: {'#00C087' if last_verdict == 'APPROVED' else '#FF3B69'};">{last_verdict}</span> &nbsp;|&nbsp; 
+                            Model Conviction: <span style="color: #F7931A;">{conviction}/10</span>
+                        </div>
+                        <div style="font-size: 0.85rem; color: #C9D1D9; line-height: 1.45; margin-bottom: 8px;">
+                            <strong>Council Reasoning:</strong> {last_thesis}
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                st.info(f"**Market Features Analyzed:** Volatility Spread: `{forecast_result['spread_pct']:.2f}%` | 1h Price Range: `${forecast_result['candle_range_usd']:,.2f}` | Expected Return: `{forecast_result['pred_ret_pct']:+.2f}%`")
+            with r_col2:
+                st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
+                if st.button("Run Live Multi-Agent Deliberation Now", use_container_width=True, help="Executes LangGraph agentic loop across Strategist, Risk Critic, ChromaDB memory, and Execution agents."):
+                    with st.spinner("Deliberating through LangGraph council..."):
+                        m_data, t_data, f_data = build_council_scenario_payload("live", current_price, forecast_result, live_market_df)
+                        res = run_trading_graph("BTCUSDT", current_price, m_data, t_data, f_data)
+                        st.session_state["council_state"] = res
+                        st.success("Council Deliberation Complete!")
+                        st.rerun()
 
-# Section 5: Visual Price Action & Volatility Charts
-with st.container(border=True):
-    st.markdown('<span class="section-badge">Section 5 · Market Charts</span>', unsafe_allow_html=True)
-    st.subheader("Bitcoin Price Action & Real-Time TradingView Stream")
-    st.caption("Live streaming price chart from Binance via TradingView (updates in real time):")
-    components.html(
-        """
-        <div class="tradingview-widget-container" style="height:540px;width:100%;margin:0;padding:0;">
-          <div id="tradingview_mudra" style="height:100%;width:100%;"></div>
-          <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-          <script type="text/javascript">
-          new TradingView.widget({
-            "autosize": true, "symbol": "BINANCE:BTCUSDT", "interval": "60", "timezone": "Etc/UTC",
-            "theme": "dark", "style": "1", "locale": "en", "toolbar_bg": "#0E1117", "enable_publishing": false,
-            "container_id": "tradingview_mudra", "backgroundColor": "#0E1117", "gridColor": "rgba(43, 49, 62, 0.4)"
-          });
-          </script>
-        </div>
-        """,
-        height=550,
-    )
+            st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+            # 4-Agent Architecture Breakdown for Recruiters / Technical Interviews
+            st.markdown("##### Multi-Agent Responsibilities (LangGraph Architecture)")
+            ag1, ag2, ag3, ag4 = st.columns(4)
+            with ag1:
+                with st.container(border=True):
+                    st.markdown(
+                        "**1. Strategist Agent**  \n"
+                        "*Role:* Evaluates multi-model signals (XGBoost v1/v2 & LightGBM v3). Proposes a trade ONLY when expected move exceeds the exchange fee hurdle."
+                    )
+            with ag2:
+                with st.container(border=True):
+                    st.markdown(
+                        "**2. Risk Critic Agent**  \n"
+                        "*Role:* Evaluates volatility spread, range expansion, and liquidation risk. Has absolute veto power over the Strategist during choppy or adverse market regimes."
+                    )
+            with ag3:
+                with st.container(border=True):
+                    st.markdown(
+                        "**3. ChromaDB RAG Memory**  \n"
+                        "*Role:* Episodic vector memory. Embeds past market hours and retrieves historical mispredictions to stop the council from repeating past false-breakout mistakes."
+                    )
+            with ag4:
+                with st.container(border=True):
+                    st.markdown(
+                        "**4. Execution Agent**  \n"
+                        f"*Role:* Deterministic accounting. Deducts exchange taker fees and slippage ({ROUND_TRIP_FRICTION_PCT:.2f}% round-trip friction), managing cash and BTC balances in the paper portfolio."
+                    )
 
-    st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
-    st.caption("Python Plotly Technical Analysis (Hourly Candles with EMA 20, EMA 50 & Volume):")
-    st.plotly_chart(create_tradingview_candlestick(live_market_df), use_container_width=True)
-
-    if not rec_df.empty:
-        with st.expander("View Forecast Target vs. Realized Market Scatter Plot", expanded=False):
-            st.plotly_chart(create_reconciliation_scatter(rec_df), use_container_width=True)
-
-# Section 6: Model Pedigree & Scientific Methodology
-with st.expander("Research Findings, Anti-Leakage Split & Model Governance", expanded=False):
-    st.markdown("#### Active Production Model Pedigree")
-    st.markdown(build_model_pedigree_markdown())
-    st.markdown(
-        """
-        #### Anti-Leakage Chronological Split Boundary
-        ```text
-        CLEAN DATASET (34,990 Total 1-Hour Candles):
-        ├── Range: 2022-07-08 13:00 UTC to 2026-07-06 08:00 UTC
-        └── Note: 1 irregular exchange-halt row (2023-03-24 12:00 UTC) removed
-
-        TRAIN PERIOD (80% Chronological — 27,991 Hours):
-        ├── Start: 2022-07-08 13:00:00 UTC
-        └── End:   2025-09-17 17:00:00 UTC (No future market data visible to model)
-
-        PURGE BUFFER (1-Hour Causality Guard — 1 Hour):
-        └── Excluded: 2025-09-17 18:00:00 UTC (Prevents T+1h target leakage across boundary)
-
-        OUT-OF-SAMPLE TEST PERIOD (20% Holdout — 6,998 Hours):
-        ├── Start: 2025-09-17 19:00:00 UTC
-        └── End:   2026-07-06 08:00:00 UTC (Pure out-of-sample forward evaluation)
-        ```
-
-        #### Controlled Model Benchmark & Rejection Rationale
-        | Model Version | Regressor RMSE (USD) | Direction Hit Rate | Classifier Accuracy | Classifier Macro F1 | Governance Status |
-        | :--- | :--- | :--- | :--- | :--- | :--- |
-        | **Naive Persistence** | **$398.77** | *Baseline* | *Baseline* | *Baseline* | Reference Benchmark |
-        | **`xgb_onnx_v1.0.0`** *(Active)* | $399.47 | **50.50%** | **53.26%** | **0.5297** | **ACTIVE PRODUCTION** |
-        | **`p1_controlled_candidate_v1`** | $399.37 | 50.36% | 53.03% | 0.5280 | **REJECTED CANDIDATE** |
-
-        *Note: Simulated paper-trading performance demonstrates execution accounting and fee-hurdle discipline.*
-        """
-    )
-    # Search / Filter for Forecast Error Investigations & Root-Cause Audit Log
-    st.caption("Forecast Error Investigations & Root-Cause Audit Log (investigation_headline_search, investigation_status_filter available)")
+            st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+            with st.expander("Technical Interview Notes: Why Machine Learning Alone Is Not Enough In Quant Trading", expanded=False):
+                st.markdown(
+                    f"""
+                    - **The Fee Hurdle Reality:** On 1-hour Bitcoin candles, standard binary prediction accuracy of ~53% is statistically significant (baseline random walk is 50%). However, Binance charges maker/taker fees (~{ROUND_TRIP_FRICTION_PCT:.2f}% round-trip friction with slippage). Trading every hour on slight edges results in negative PnL due to fee drag.
+                    - **Why LangGraph Multi-Agent Architecture Was Chosen:** Pure ML outputs raw numbers. The LangGraph council separates *signal generation* (XGBoost/LightGBM) from *capital preservation* (Risk Critic). If the market is in sideways chop, the Risk Critic forces a `HOLD`, saving capital.
+                    - **Episodic RAG Retrieval:** By vectorizing past hourly features into ChromaDB, the council checks: *"Did we previously lose money under this exact volatility and order-flow profile?"* If yes, the council reduces conviction or rejects the trade.
+                    """
+                )
