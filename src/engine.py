@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from config import (
     ACTIVE_MODEL_VERSION,
+    CLASSIFIER_MODEL_PATH,
     EXCHANGE_CONNECT_TIMEOUT,
     EXCHANGE_MAX_RETRY_AFTER_CAP,
     EXCHANGE_READ_TIMEOUT,
@@ -38,6 +39,7 @@ from config import (
     INITIAL_CAPITAL_USD,
     MIN_HURDLE_PCT,
     PORTFOLIO_ADVISORY_LOCK_ID,
+    REGRESSOR_MODEL_PATH,
     ROUND_TRIP_FRICTION_PCT,
     SLIPPAGE_PCT,
     SLIPPAGE_RATE,
@@ -51,7 +53,7 @@ from src.agents import (
     run_trading_graph,
 )
 from src.database import (
-    CouncilAudit, MarketTick, ModelPrediction, PaperPortfolio, Reconciliation,
+    CouncilAudit, MarketTick, ModelPrediction, ModelRegistry, PaperPortfolio, Reconciliation,
     get_db, has_tick_id_column, test_connection,
 )
 
@@ -589,6 +591,40 @@ def is_paper_trade_executed_for_tick(session: Session, tick_id: int) -> bool:
     return audit is not None and (not audit.execution_notes or "[FORCED_REANALYSIS]" not in audit.execution_notes)
 
 
+def ensure_model_registered(session: Session, model_version: str, cand_spec: Optional[Dict[str, Any]] = None) -> None:
+    # ensures discovered candidate model is registered in model_registry table before inserting predictions
+    if not model_version:
+        return
+    existing = session.execute(
+        select(ModelRegistry).where(ModelRegistry.model_version == model_version)
+    ).scalars().first()
+    if existing:
+        return
+
+    spec = cand_spec if isinstance(cand_spec, dict) else {}
+    manifest = spec.get("manifest_data", {}) if isinstance(spec.get("manifest_data"), dict) else spec
+    status = "ACTIVE" if model_version == ACTIVE_MODEL_VERSION else "CANDIDATE"
+
+    new_reg = ModelRegistry(
+        model_version=model_version,
+        regressor_artifact_path=str(manifest.get("regressor_artifact_path") or REGRESSOR_MODEL_PATH),
+        regressor_sha256=str(manifest.get("regressor_sha256") or ""),
+        classifier_artifact_path=str(manifest.get("classifier_artifact_path") or CLASSIFIER_MODEL_PATH),
+        classifier_sha256=str(manifest.get("classifier_sha256") or ""),
+        feature_schema_version=str(manifest.get("feature_schema_version") or "unknown"),
+        target_definition="next_1h_btc_return_and_direction",
+        evaluation_metrics=manifest.get("metrics"),
+        current_status=status,
+        lifecycle_seq=1,
+    )
+    try:
+        with session.begin_nested():
+            session.add(new_reg)
+            session.flush()
+    except IntegrityError:
+        pass
+
+
 def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]] = None) -> Tuple[bool, str, Dict[str, Any]]:
     # executes end-to-end quantitative cycle: candle ingestion, ML inference, multi-agent council, and ledger
     db_ok, ver, _ = test_connection()
@@ -657,43 +693,50 @@ def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]
             for cand_version, cand_spec in all_registered.items():
                 if cand_version == ACTIVE_MODEL_VERSION:
                     continue
-                c_feats = cand_spec.get("features", [])
-                if c_feats and all(k in signals_output for k in c_feats):
-                    c_input_df = pd.DataFrame([{k: signals_output[k] for k in c_feats}])
-                    c_clf = cand_spec["classifier"]
-                    c_reg = cand_spec["regressor"]
-                    c_prob_up = float(c_clf.predict_proba(c_input_df)[0, 1]) if hasattr(c_clf, "predict_proba") else 0.5
-                    c_ret = float(c_reg.predict(c_input_df)[0])
-                    close_f = float(candle["close"])
-                    c_price = float(close_f * (1.0 + c_ret))
-                    c_ret_pct = float(((c_price - close_f) / close_f) * 100.0)
-                    c_dir = "UP" if c_ret_pct >= 0.0 else "DOWN"
+                try:
+                    c_feats = cand_spec.get("features", [])
+                    if c_feats and all(k in signals_output for k in c_feats):
+                        c_input_df = pd.DataFrame([{k: signals_output[k] for k in c_feats}])
+                        c_clf = cand_spec.get("classifier")
+                        c_reg = cand_spec.get("regressor")
+                        if c_clf is None or c_reg is None:
+                            continue
+                        c_prob_up = float(c_clf.predict_proba(c_input_df)[0, 1]) if hasattr(c_clf, "predict_proba") else 0.5
+                        c_ret = float(c_reg.predict(c_input_df)[0])
+                        close_f = float(candle["close"])
+                        c_price = float(close_f * (1.0 + c_ret))
+                        c_ret_pct = float(((c_price - close_f) / close_f) * 100.0)
+                        c_dir = "UP" if c_ret_pct >= 0.0 else "DOWN"
 
-                    cand_pred = session.execute(
-                        select(ModelPrediction).where(
-                            ModelPrediction.tick_id == current_tick.id,
-                            ModelPrediction.model_version == cand_version,
-                        )
-                    ).scalars().first()
+                        with session.begin_nested():
+                            ensure_model_registered(session, cand_version, cand_spec)
+                            cand_pred = session.execute(
+                                select(ModelPrediction).where(
+                                    ModelPrediction.tick_id == current_tick.id,
+                                    ModelPrediction.model_version == cand_version,
+                                )
+                            ).scalars().first()
 
-                    if not cand_pred:
-                        cand_pred = ModelPrediction(
-                            tick_id=current_tick.id,
-                            model_version=cand_version,
-                            run_mode="SHADOW",
-                            is_canonical=True,
-                            is_primary=False,
-                            feature_schema_version=cand_spec.get("manifest_data", {}).get("feature_schema_version", "v2_36stationary"),
-                            predicted_return_pct=c_ret_pct,
-                            predicted_price_1h=c_price,
-                            direction_predicted=c_dir,
-                            direction_prob_up=c_prob_up,
-                            clears_hurdle=bool(abs(c_ret_pct) >= MIN_HURDLE_PCT),
-                        )
-                        session.add(cand_pred)
-                        session.flush()
+                            if not cand_pred:
+                                cand_pred = ModelPrediction(
+                                    tick_id=current_tick.id,
+                                    model_version=cand_version,
+                                    run_mode="SHADOW",
+                                    is_canonical=True,
+                                    is_primary=False,
+                                    feature_schema_version=cand_spec.get("manifest_data", {}).get("feature_schema_version", "v2_36stationary"),
+                                    predicted_return_pct=c_ret_pct,
+                                    predicted_price_1h=c_price,
+                                    direction_predicted=c_dir,
+                                    direction_prob_up=c_prob_up,
+                                    clears_hurdle=bool(abs(c_ret_pct) >= MIN_HURDLE_PCT),
+                                )
+                                session.add(cand_pred)
+                                session.flush()
+                except Exception as model_err:
+                    sync_logger.warning("Failed candidate model prediction for %s: %s", cand_version, type(model_err).__name__)
         except Exception as cand_exc:
-            sync_logger.warning("Failed candidate model prediction: %s", type(cand_exc).__name__)
+            sync_logger.warning("Failed candidate model discovery loop: %s", type(cand_exc).__name__)
 
         reconcile_pending_ticks(session, current_tick)
 
