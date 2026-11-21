@@ -418,7 +418,13 @@ def create_db_engine(db_url: Optional[str] = None) -> Engine:
     url = db_url or get_database_url()
     if "sqlite" in url:
         return create_engine(url, connect_args={"check_same_thread": False}, echo=False)
-    return create_engine(url, pool_pre_ping=True, pool_size=5, max_overflow=10, pool_recycle=300, connect_args={"connect_timeout": 10}, echo=False)
+    try:
+        return create_engine(url, pool_pre_ping=True, pool_size=5, max_overflow=10, pool_recycle=300, connect_args={"connect_timeout": 10}, echo=False)
+    except Exception as exc:
+        logger.warning("Failed to create remote database engine, falling back to sqlite: %s", exc)
+        fallback = ROOT_DIR / "data" / "mudra_operational.db"
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        return create_engine(f"sqlite:///{fallback.as_posix()}", connect_args={"check_same_thread": False}, echo=False)
 
 
 engine = create_db_engine()
@@ -651,14 +657,15 @@ def get_latest_council_audit() -> Optional[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # 5. RETRO-COMPATIBILITY MAPPINGS
 # ---------------------------------------------------------------------------
-# Allows existing callers to reference submodules during migration
-connection = sys.modules[__name__]
-models = sys.modules[__name__]
-queries = sys.modules[__name__]
-
-sys.modules["src.database.models"] = sys.modules[__name__]
-sys.modules["src.database.connection"] = sys.modules[__name__]
-sys.modules["src.database.queries"] = sys.modules[__name__]
+# retro-compatibility mappings for callers referencing legacy submodules
+this_mod = sys.modules.get(__name__)
+if this_mod is not None:
+    connection = this_mod
+    models = this_mod
+    queries = this_mod
+    sys.modules.setdefault("src.database.models", this_mod)
+    sys.modules.setdefault("src.database.connection", this_mod)
+    sys.modules.setdefault("src.database.queries", this_mod)
 
 __all__ = [
     "Base", "MarketTick", "ApiTelemetry", "CouncilAudit", "Reconciliation",
