@@ -16,7 +16,7 @@
   1. Replacing raw price levels with normalized percentage distances (`candle_body_pct`, `hl_range_pct`, `sma_10_dist_pct`, `ema_10_dist_pct`, `ema_30_dist_pct`, `bb_width_pct`, `bb_pct_b`) will remove price-level memorization and eliminate covariate shift across multi-year price regimes.
   2. Switching the regressor loss from `reg:squarederror` to Pseudo-Huber loss (`reg:pseudohubererror`) will make return predictions robust to extreme tail spikes.
 - **Key Variables Changed:**
-  - Removed 11 price-level and macro features: `close_lag_1`, `Rolling_Mean_Close`, `Rolling_Std_Close`, `bb_high`, `bb_low`, `ema_10`, `ema_30`, `close_open_diff`, `fng_value`, `fng_mean_3d`, `onchain_num_tx_change`, `onchain_hash_rate_change`, `onchain_miners_revenue_change`.
+  - Removed 13 price-level and macro features: `close_lag_1`, `Rolling_Mean_Close`, `Rolling_Std_Close`, `bb_high`, `bb_low`, `ema_10`, `ema_30`, `close_open_diff`, `fng_value`, `fng_mean_3d`, `onchain_num_tx_change`, `onchain_hash_rate_change`, `onchain_miners_revenue_change`.
   - Added 8 normalized percentage features: `candle_body_pct`, `hl_range_pct`, `sma_10_dist_pct`, `ema_10_dist_pct`, `ema_30_dist_pct`, `bb_width_pct`, `bb_pct_b`, `return_1h_lag`.
   - Added raw microstructure trade variables: `taker_buy_base_volume`, `number_of_trades`.
   - Unified regressor and classifier feature schema to identical 36 features.
@@ -98,4 +98,4 @@ All metrics evaluated against the locked 6,998-hour out-of-sample holdout test p
 - **Handoff Hypothesis Motivating Model 3 (`lgbm_v3.0.0`):**
   1. Complete the stationarity transformation by converting the remaining 15 raw dollar and volume features into strictly normalized ratio features (e.g. Volume divided by 24-hour rolling volume, and dollar differences expressed as fractional returns).
   2. Transition from XGBoost to LightGBM to improve training speed and leaf-wise split granularity.
-  3. Implement post-hoc probability calibration (Isotonic Regression) on an isolated calibration set to transform tree probability outputs into well-calibrated trading probabilities.
+  3. Implement post-hoc probability calibration (Platt Sigmoid Calibration) on an isolated calibration set to transform tree probability outputs into well-calibrated trading probabilities.
