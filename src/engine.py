@@ -706,7 +706,7 @@ def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]
                         close_f = float(candle["close"])
                         c_price = float(close_f * (1.0 + c_ret))
                         c_ret_pct = float(((c_price - close_f) / close_f) * 100.0)
-                        c_dir = "UP" if c_ret_pct >= 0.0 else "DOWN"
+                        c_dir = ("UP" if c_prob_up >= 0.5 else "DOWN") if hasattr(c_clf, "predict_proba") else ("UP" if c_ret_pct >= 0.0 else "DOWN")
 
                         with session.begin_nested():
                             ensure_model_registered(session, cand_version, cand_spec)
@@ -982,6 +982,67 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
                     audit.veto_attribution = "NEUTRAL"
             else:
                 audit.veto_attribution = "N/A_APPROVED"
+
+    # fallback pass: reconciles any orphaned candidate ModelPrediction records whose outcome tick exists
+    try:
+        with session.begin_nested():
+            orphan_preds = session.execute(
+                select(ModelPrediction, MarketTick)
+                .join(MarketTick, ModelPrediction.tick_id == MarketTick.id)
+                .where(ModelPrediction.outcome_tick_id.is_(None))
+            ).all()
+
+            for pred_row, prior_tick in orphan_preds:
+                target_ts = prior_tick.timestamp + timedelta(hours=1)
+                outcome_tick = current_tick if current_tick.timestamp == target_ts else session.execute(
+                    select(MarketTick).where(MarketTick.timestamp == target_ts)
+                ).scalars().first()
+
+                if not outcome_tick or outcome_tick.close <= 0:
+                    continue
+
+                act_p = max(1.0, float(outcome_tick.close))
+                base_p = max(1.0, float(prior_tick.close))
+                u_pred_price = float(pred_row.predicted_price_1h)
+                u_pred_ret = float(pred_row.predicted_return_pct)
+                act_ret = ((act_p - base_p) / base_p) * 100.0
+                u_abs_err = abs(act_p - u_pred_price)
+                u_pct_err = (u_abs_err / act_p) * 100.0
+                u_residual = act_ret - u_pred_ret
+                u_dir_real = "UP" if act_ret >= 0.0 else "DOWN"
+                u_dir_correct = (pred_row.direction_predicted == u_dir_real)
+                u_is_swan = bool(abs(act_ret) >= 3.8 or abs(u_residual) >= 3.8)
+
+                if u_is_swan:
+                    u_tag = "BLACK_SWAN_OUTLIER"
+                elif u_dir_correct:
+                    if u_pct_err <= 0.35:
+                        u_tag = "ACCURATE"
+                    elif abs(act_ret) > abs(u_pred_ret):
+                        u_tag = "MOMENTUM_UNDERESTIMATED"
+                    else:
+                        u_tag = "MOMENTUM_OVERESTIMATED"
+                else:
+                    if u_pct_err <= 0.20 or u_abs_err < 150.0:
+                        u_tag = "SIDEWAYS_DRIFT"
+                    else:
+                        u_tag = "DIRECTION_MISALIGNED"
+
+                pred_row.outcome_tick_id = outcome_tick.id
+                pred_row.evaluation_policy_version = "binary_exact_t1_v2"
+                pred_row.actual_price_at_t_plus_1 = act_p
+                pred_row.actual_return_pct = act_ret
+                pred_row.direction_realized = u_dir_real
+                pred_row.direction_correct = u_dir_correct
+                pred_row.residual_error = u_residual
+                pred_row.absolute_error_usd = u_abs_err
+                pred_row.percentage_error = u_pct_err
+                pred_row.is_black_swan = u_is_swan
+                pred_row.error_attribution_tag = u_tag
+                pred_row.reconciled_at = datetime.now(timezone.utc)
+            session.flush()
+    except Exception as orphan_exc:
+        logger.warning("Could not reconcile orphan model predictions: %s", orphan_exc)
 
     session.flush()
     return reconciled_records
