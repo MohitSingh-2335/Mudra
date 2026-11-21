@@ -6,6 +6,7 @@ Handles paper portfolio accounting, Binance/Coinbase live ingestion, multi-agent
 import json
 import logging
 import math
+import os
 import random
 import sys
 import time
