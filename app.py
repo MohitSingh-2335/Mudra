@@ -9,6 +9,7 @@ try:
 except Exception:
     pass
 
+import html
 import os
 import sys
 from datetime import datetime, timezone
@@ -1066,6 +1067,98 @@ def prepare_reconciliation_table_display(df: pd.DataFrame) -> pd.DataFrame:
     return disp
 
 
+def render_ground_truth_html_table(df_subset: pd.DataFrame) -> None:
+    # renders styled html table with multi-line word-wrapped ai diagnosis descriptions
+    if df_subset.empty:
+        st.info("No records to display.")
+        return
+
+    rows_html = []
+    for idx, (_, row) in enumerate(df_subset.iterrows()):
+        bg_color = "#0D1117" if idx % 2 == 0 else "#111620"
+
+        time_val = html.escape(str(row.get("Time (UTC)", "—")))
+        model_val = html.escape(str(row.get("Model", "—")))
+        start_price = html.escape(str(row.get("Start Price", "—")))
+        pred_target = html.escape(str(row.get("Pred Target", "—")))
+        actual_val = html.escape(str(row.get("Actual (T+1h)", "—")))
+        error_val = html.escape(str(row.get("Error ($)", "—")))
+        pred_dir = str(row.get("Pred Dir", "—")).upper()
+        actual_dir = str(row.get("Actual Dir", "—")).upper()
+        result_val = str(row.get("Result", "—"))
+        diag_val = html.escape(str(row.get("AI Diagnosis (1-Line)", row.get("AI Diagnosis", "—"))))
+
+        # direction badges with color coding
+        if pred_dir == "UP":
+            pdir_badge = '<span style="background: rgba(46, 160, 67, 0.15); color: #3FB950; border: 1px solid rgba(46, 160, 67, 0.3); padding: 2px 7px; border-radius: 4px; font-weight: 700; font-size: 0.72rem; letter-spacing: 0.04em;">UP</span>'
+        elif pred_dir == "DOWN":
+            pdir_badge = '<span style="background: rgba(248, 81, 73, 0.15); color: #F85149; border: 1px solid rgba(248, 81, 73, 0.3); padding: 2px 7px; border-radius: 4px; font-weight: 700; font-size: 0.72rem; letter-spacing: 0.04em;">DOWN</span>'
+        else:
+            pdir_badge = f'<span style="color: #8B949E; font-size: 0.72rem;">{html.escape(pred_dir)}</span>'
+
+        if actual_dir == "UP":
+            adir_badge = '<span style="background: rgba(46, 160, 67, 0.15); color: #3FB950; border: 1px solid rgba(46, 160, 67, 0.3); padding: 2px 7px; border-radius: 4px; font-weight: 700; font-size: 0.72rem; letter-spacing: 0.04em;">UP</span>'
+        elif actual_dir == "DOWN":
+            adir_badge = '<span style="background: rgba(248, 81, 73, 0.15); color: #F85149; border: 1px solid rgba(248, 81, 73, 0.3); padding: 2px 7px; border-radius: 4px; font-weight: 700; font-size: 0.72rem; letter-spacing: 0.04em;">DOWN</span>'
+        else:
+            adir_badge = f'<span style="color: #8B949E; font-size: 0.72rem;">{html.escape(actual_dir)}</span>'
+
+        # outcome result badges
+        esc_res = html.escape(result_val)
+        if "MATCH" in result_val:
+            res_badge = f'<span style="background: rgba(46, 160, 67, 0.15); color: #3FB950; border: 1px solid rgba(46, 160, 67, 0.3); padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.72rem; white-space: nowrap;">{esc_res}</span>'
+        elif "MISMATCH" in result_val:
+            res_badge = f'<span style="background: rgba(248, 81, 73, 0.15); color: #F85149; border: 1px solid rgba(248, 81, 73, 0.3); padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.72rem; white-space: nowrap;">{esc_res}</span>'
+        else:
+            res_badge = f'<span style="background: rgba(210, 153, 34, 0.15); color: #D29922; border: 1px solid rgba(210, 153, 34, 0.3); padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.72rem; white-space: nowrap;">{esc_res}</span>'
+
+        # diagnosis styling with wrap across 2 to 3 lines
+        diag_color = "#8B949E" if "unavailable" in diag_val.lower() else "#E6EDF3"
+        diag_font_style = "italic" if "unavailable" in diag_val.lower() else "normal"
+
+        row_html = (
+            f'<tr style="background: {bg_color}; border-bottom: 1px solid #21262D;">'
+            f'<td style="padding: 10px 12px; white-space: nowrap; font-size: 0.78rem; color: #8B949E;">{time_val}</td>'
+            f'<td style="padding: 10px 12px; white-space: nowrap; font-weight: 600; font-size: 0.8rem; color: #58A6FF;">{model_val}</td>'
+            f'<td style="padding: 10px 12px; white-space: nowrap; font-family: monospace; font-size: 0.82rem; text-align: right; color: #8B949E;">{start_price}</td>'
+            f'<td style="padding: 10px 12px; white-space: nowrap; font-family: monospace; font-size: 0.82rem; text-align: right; color: #C9D1D9;">{pred_target}</td>'
+            f'<td style="padding: 10px 12px; white-space: nowrap; font-family: monospace; font-size: 0.82rem; text-align: right; font-weight: 600; color: #F0F6FC;">{actual_val}</td>'
+            f'<td style="padding: 10px 12px; white-space: nowrap; font-family: monospace; font-size: 0.82rem; text-align: right; color: #E6EDF3;">{error_val}</td>'
+            f'<td style="padding: 10px 12px; text-align: center; vertical-align: middle;">{pdir_badge}</td>'
+            f'<td style="padding: 10px 12px; text-align: center; vertical-align: middle;">{adir_badge}</td>'
+            f'<td style="padding: 10px 12px; text-align: center; vertical-align: middle;">{res_badge}</td>'
+            f'<td style="padding: 10px 12px; white-space: normal !important; word-wrap: break-word !important; overflow-wrap: break-word !important; line-height: 1.45; min-width: 280px; max-width: 480px; font-size: 0.81rem; color: {diag_color}; font-style: {diag_font_style}; vertical-align: middle;">{diag_val}</td>'
+            f'</tr>'
+        )
+        rows_html.append(row_html)
+
+    table_body = "\n".join(rows_html)
+    full_table_html = (
+        '<div style="max-height: 540px; overflow-y: auto; overflow-x: auto; border: 1px solid #30363D; border-radius: 8px; background: #0D1117; margin-bottom: 12px;">\n'
+        '  <table style="width: 100%; border-collapse: collapse; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, sans-serif; font-size: 0.82rem; text-align: left;">\n'
+        '    <thead>\n'
+        '      <tr style="position: sticky; top: 0; background: #161B22; z-index: 10; border-bottom: 2px solid #30363D;">\n'
+        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap;">Time (UTC)</th>\n'
+        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap;">Model</th>\n'
+        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; text-align: right;">Start Price</th>\n'
+        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; text-align: right;">Pred Target</th>\n'
+        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; text-align: right;">Actual (T+1h)</th>\n'
+        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; text-align: right;">Error ($)</th>\n'
+        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; text-align: center;">Pred Dir</th>\n'
+        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; text-align: center;">Actual Dir</th>\n'
+        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; text-align: center;">Result</th>\n'
+        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; min-width: 280px; max-width: 480px;">AI Diagnosis (Full)</th>\n'
+        '      </tr>\n'
+        '    </thead>\n'
+        '    <tbody>\n'
+        f'{table_body}\n'
+        '    </tbody>\n'
+        '  </table>\n'
+        '</div>'
+    )
+    st.markdown(full_table_html, unsafe_allow_html=True)
+
+
 # ---------------------------------------------------------------------------
 # 3. DATA FETCHING (NEON POSTGRESQL & BINANCE VISION)
 # ---------------------------------------------------------------------------
@@ -1451,7 +1544,10 @@ with tab_ground_truth:
             table_df["AI Diagnosis (1-Line)"] = table_df.apply(format_ground_truth_diagnosis, axis=1)
 
             show_cols = ["Time (UTC)", "Model", "Start Price", "Pred Target", "Actual (T+1h)", "Error ($)", "Pred Dir", "Actual Dir", "Result", "AI Diagnosis (1-Line)"]
-            st.dataframe(table_df[show_cols].head(50), use_container_width=True, hide_index=True)
+            render_ground_truth_html_table(table_df[show_cols].head(50))
+
+            with st.expander("View Raw Compact Data Grid (Glide Table)", expanded=False):
+                st.dataframe(table_df[show_cols].head(50), use_container_width=True, hide_index=True)
 
             st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
             with st.expander("View Forecast Target vs. Realized Market Scatter Plot", expanded=True):
