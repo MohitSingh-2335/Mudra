@@ -68,10 +68,11 @@ def generate_benchmark_figure():
         "TimesFM 2.5\n(Zero-Shot)",
         "Moirai 2.0\n(Zero-Shot)",
         "Model 2\n(Stationary)",
+        "Model 3\n(LightGBM)",
         "Model 1\n(Active XGB)"
     ]
-    accuracies = [50.42, 49.60, 48.60, 49.20, 52.49, 53.26]
-    colors = ["#888888", "#E67E22", "#E67E22", "#E67E22", "#00C087", "#00F2FE"]
+    accuracies = [50.42, 49.60, 48.60, 49.20, 52.07, 52.89, 53.26]
+    colors = ["#888888", "#E67E22", "#E67E22", "#E67E22", "#00C087", "#3B82F6", "#00F2FE"]
     
     fig, ax = plt.subplots(figsize=(10, 4.5), dpi=200)
     bars = ax.bar(models, accuracies, color=colors, width=0.55, edgecolor="#FFFFFF", linewidth=0.5)
