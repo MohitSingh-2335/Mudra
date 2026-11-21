@@ -404,17 +404,24 @@ def query_macro_sentiment_rag(query: str = "Bitcoin macroeconomic market sentime
 
 
 def fetch_mcp_context(limit: int = 3) -> Dict[str, Any]:
-    # fetches live derivatives funding pulse and recent error memories from MCP tools
+    # fetches live derivatives funding pulse, recent news, and error memories from mcp tools
     try:
-        from src.mcp_server import get_live_btc_derivatives_pulse, get_recent_prediction_error_memories
+        from src.mcp_server import (
+            get_live_btc_derivatives_pulse,
+            get_recent_btc_news_headlines,
+            get_recent_prediction_error_memories,
+        )
         pulse = get_live_btc_derivatives_pulse()
         errs = get_recent_prediction_error_memories(limit=limit)
+        news = get_recent_btc_news_headlines(hours_back=2, max_items=5)
+        headlines = news.get("headlines", []) if isinstance(news, dict) else []
         return {
             "status": "success",
             "funding_rate_8h_pct": float(pulse.get("funding_rate_8h_pct", 0.01)),
             "derivatives_regime": str(pulse.get("derivatives_regime", "Neutral Funding")),
             "futures_basis_usd": float(pulse.get("futures_basis_usd", 0.0)),
             "recent_error_memories": errs if isinstance(errs, list) else [],
+            "news_headlines": headlines,
         }
     except Exception:
         return {
@@ -423,6 +430,101 @@ def fetch_mcp_context(limit: int = 3) -> Dict[str, Any]:
             "derivatives_regime": "Neutral Funding (Offline Fallback)",
             "futures_basis_usd": 0.0,
             "recent_error_memories": [],
+            "news_headlines": [],
+        }
+
+
+def generate_hourly_postmortem_with_gemini(
+    tick_features: Dict[str, Any],
+    mcp_context: Dict[str, Any],
+    model_outcomes: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    # generates grounded 1-line post-mortem explanation per model using gemini
+    model_versions = [str(m.get("model_version", "unknown")) for m in model_outcomes]
+
+    api_key = _get_gemini_api_key()
+    if not api_key or os.getenv("PYTEST_CURRENT_TEST"):
+        return {
+            "gemini_status": "UNAVAILABLE",
+            "error_detail": "Gemini API key missing or test mode active",
+            "market_summary": "Gemini unavailable (offline or missing key)",
+            "per_model": {
+                mv: {
+                    "root_cause_driver": "GEMINI_UNAVAILABLE",
+                    "diagnosis_summary": "Gemini API unavailable (check quota/logs) — manual review needed.",
+                }
+                for mv in model_versions
+            },
+        }
+
+    try:
+        headlines = mcp_context.get("news_headlines", []) if isinstance(mcp_context, dict) else []
+        news_str = "\n".join(f"- {h}" for h in headlines) if headlines else "No breaking news reported in last 2 hours."
+
+        models_str = "\n".join([
+            f"- Model {m.get('model_version')}: Predicted ${float(m.get('predicted_price', 0)):,.2f} ({m.get('direction_predicted')}, {float(m.get('predicted_return_pct', 0)):+.2f}%) | "
+            f"Actual ${float(m.get('actual_price', 0)):,.2f} ({m.get('direction_realized')}, {float(m.get('actual_return_pct', 0)):+.2f}%) | "
+            f"Result: {'CORRECT' if m.get('direction_correct') else 'WRONG'} | Error: ${float(m.get('error_usd', 0)):,.2f}"
+            for m in model_outcomes
+        ])
+
+        prompt = f"""You are Mudra's Lead Quantitative Post-Mortem Analyst.
+Analyze the hourly Bitcoin forecast outcome across registered models.
+Ground all statements strictly in the provided data. Do not hallucinate external events, prices, or numbers.
+
+Market Candlestick Telemetry:
+- Start Price: ${float(tick_features.get('close', 0)):,.2f}
+- High/Low Volatility Spread: {float(tick_features.get('volatility_range_pct', 0)):.2f}%
+- Taker Buy Ratio: {float(tick_features.get('taker_buy_ratio', 0.5)):.2%}
+- RSI Estimate: {float(tick_features.get('rsi_estimate', 50)):.1f}
+
+Recent News Context (Last 2 Hours):
+{news_str}
+
+Model Predictions vs Actual Outcomes:
+{models_str}
+
+Respond with strictly valid JSON matching this schema:
+{{
+  "market_summary": "1-2 sentence factual recap of price move and relevant news or order flow",
+  "per_model": {{
+    "<model_version>": {{
+      "root_cause_driver": "TOP_FEATURE_OR_NEWS_OR_REGIME",
+      "diagnosis_summary": "1 concise sentence explaining error or success citing specific numbers"
+    }}
+  }}
+}}"""
+
+        raw_resp = generate_with_gemini_fallback(api_key, prompt)
+        parsed = json.loads(_clean_json_response(raw_resp))
+
+        per_model = {}
+        raw_per_model = parsed.get("per_model", {})
+        for mv in model_versions:
+            m_data = raw_per_model.get(mv, {})
+            per_model[mv] = {
+                "root_cause_driver": str(m_data.get("root_cause_driver", "TELEMETRY_DRIVER")),
+                "diagnosis_summary": str(m_data.get("diagnosis_summary", "Reconciliation completed.")),
+            }
+
+        return {
+            "gemini_status": "OK",
+            "error_detail": None,
+            "market_summary": str(parsed.get("market_summary", "Hourly reconciliation completed.")),
+            "per_model": per_model,
+        }
+    except Exception as exc:
+        return {
+            "gemini_status": "UNAVAILABLE",
+            "error_detail": str(exc),
+            "market_summary": "Gemini post-mortem generation failed.",
+            "per_model": {
+                mv: {
+                    "root_cause_driver": "GEMINI_UNAVAILABLE",
+                    "diagnosis_summary": "Gemini API unavailable (check quota/logs) — manual review needed.",
+                }
+                for mv in model_versions
+            },
         }
 
 
