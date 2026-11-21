@@ -2,7 +2,7 @@
 
 **Model Identifier:** `lgbm_v3.0.0`  
 **Model Family:** LightGBM Gradient Boosted Decision Trees + Platt Sigmoid Calibration  
-**Governance Status:** `PROMOTED CANDIDATE`  
+**Governance Status:** `SHADOW CANDIDATE`  
 **Artifact Manifest:** `artifacts/models/lgbm_v3_manifest.json`  
 **Development Branch:** `model-3` (`models/model-3.ipynb`)  
 **Last Updated:** 2026-11-21  
@@ -13,7 +13,7 @@
 
 - **Targeted Weakness of Model 2:**
   Model 2 removed raw price levels, but an audit revealed that 15 of its 36 features remained non-stationary:
-  1. 8 raw dollar differences (`Price Change`, `Volatility`, `vol_1h`, `vol_mean_6h`, `vol_std_6h`, `vol_max_6h`, `vol_min_6h`, `macd`, `price_volatility_interaction`).
+  1. 8 raw dollar differences (`Price Change`, `vol_1h`, `vol_mean_6h`, `vol_std_6h`, `vol_max_6h`, `vol_min_6h`, `macd`, `price_volatility_interaction`).
   2. 7 drifting trade counts and volume features (`volume`, `volume_lag_1`, `number_of_trades`, `taker_buy_base_volume`, `trades_mean_6h`, `onchain_num_tx`, `onchain_hash_rate`).
   3. A rolling window bug in `sma_10_dist_pct` (computed using a 5-hour rolling mean instead of 10).
   4. Raw decision tree outputs were uncalibrated, causing probability overconfidence in low-conviction regimes.
@@ -84,8 +84,8 @@ All metrics evaluated against the locked out-of-sample holdout test partition (6
 | **Log-Loss** | 0.6931 | 0.6914 | 0.6926 | **0.6913** | **-0.0001 (Best)** |
 | **Brier Score** | 0.2500 | 0.2491 | 0.2497 | **0.2491** | Tied (Best) |
 | **ROC-AUC** | 0.5000 | **0.5394** | 0.5342 | **0.5381** | -0.0013 |
-| **Spearman Rank IC** | 0.0000 | +0.0149 | +0.0135 | **+0.0211** | **+0.0062 (Highest Alpha)** |
-| **Spearman p-value** | 1.0000 | 0.2114 | 0.2582 | **0.0772** | **Statistically Significant (<0.10)** |
+| **Spearman Rank IC** | 0.0000 | +0.0149 | +0.0135 | **+0.0211** | **+0.0062 (Highest rank correlation)** |
+| **Spearman p-value** | 1.0000 | 0.2114 | 0.2582 | **0.0772** | **Not statistically significant at α=0.05** |
 | **Return MAE** | 0.003198 | 0.003221 | 0.003222 | **0.003220** | **-0.000001** |
 | **Price RMSE** | **$398.77** | $399.47 | $401.12 | **$400.22** | Honest, no leakage |
 | **Scale Invariance** | 100% | 0% (Raw USD used) | 58% (15 raw features) | **100% (29 stationary)** | Complete invariance |
@@ -94,24 +94,29 @@ All metrics evaluated against the locked out-of-sample holdout test partition (6
 
 ## 5. Strengths & What Worked
 
-1. **Highest Information Coefficient (+0.0211, p=0.077):** Model 3 achieved the highest Spearman Rank IC across all three model generations and the only one reaching statistical significance at the 10% level. The Huber loss regressor correctly ranks relative return magnitudes.
+1. **Highest rank correlation (+0.0211, p=0.0772 — not statistically significant at α=0.05):** Model 3 achieved the highest Spearman Rank IC across all three model generations. The Huber loss regressor correctly ranks relative return magnitudes.
 2. **Lowest Log-Loss (0.6913):** Platt Sigmoid Calibration successfully aligned probability outputs with empirical frequencies, achieving the best log-loss in the repository.
 3. **100% Scale Invariance:** Every single feature is a percentage change, ratio, or rolling 24-hour log z-score. The model can operate unchanged whether Bitcoin is trading at $20,000, $65,000, or $150,000.
 4. **Clean Bug Fixes:** Fixed the 5-period bug in `sma_10_dist_pct` and pruned the 15 unnormalized volume/dollar features that impaired Model 2.
-5. **Passed All 5 Quantitative Promotion Gates:** Satisfied every requirement defined in the Model 3 blueprint.
+5. **Strict Promotion Gates Evaluation:**
+   - Gate 1 (Accuracy > 53.26%): FAILED (`52.89%`)
+   - Gate 2 (Log-Loss < 0.6914 & Brier < 0.2491): PARTIAL (Log-Loss `0.6913` passed; Brier `0.2491` tied)
+   - Gate 3 (Return MAE < 0.003198 & post-fee viability): FAILED (`0.003220`)
+   - Gate 4 (CPU latency < 50ms & SHA-256 manifest): PASSED
+   - Gate 5 (168h continuous live shadow execution): PENDING
 
 ---
 
 ## 6. Weaknesses & Honest Post-Mortem Findings
 
 1. **Directional Accuracy Trade-Off (52.89% vs 53.26%):** Model 1 achieved slightly higher raw accuracy (53.26%) on this specific holdout set partly because its raw price levels memorized the persistent upward trend of late 2025. Model 3 sacrificed that regime-specific memorization in exchange for true scale invariance that will not fail during regime shifts.
-2. **Price RMSE Extrapolation Ceiling:** Like all gradient-boosted decision trees, Model 3 cannot beat the Naive Persistence Price RMSE ($398.80 vs $400.22) because decision trees predict step functions and cannot extrapolate beyond their leaf boundaries. This confirms that price RMSE is an uninformative metric for quantitative strategy performance and return ranking is the true objective.
+2. **Price RMSE Extrapolation Ceiling:** Like all gradient-boosted decision trees, Model 3 cannot beat the Naive Persistence Price RMSE ($398.77 vs $400.22) because decision trees predict step functions and cannot extrapolate beyond their leaf boundaries. This confirms that price RMSE is an uninformative metric for quantitative strategy performance and return ranking is the true objective.
 3. **OpenMP Environment Sensitivity on Windows:** LightGBM requires careful handling of DataFrame views and memory layout on Windows environments to prevent C-level pointer exceptions.
 
 ---
 
 ## 7. Deployment Decision & Handoff to Next Model
 
-- **Deployment Status:** `PROMOTED CANDIDATE`.
-- **Decision Rationale:** Model 3 successfully passed all 5 quantitative promotion gates, achieved the highest Information Coefficient (+0.0211), the lowest log-loss (0.6913), and 100% feature stationarity.
-- **Production Recommendation:** Integrate `lgbm_v3` into `src/model_loader.py` and run it as an active candidate alongside Model 1 in the continuous shadow execution pipeline.
+- **Deployment Status:** `SHADOW CANDIDATE`
+- **Decision Rationale:** While Model 3 achieved the highest rank correlation (+0.0211, p=0.0772 — not statistically significant at α=0.05), lowest log-loss (0.6913), and 100% feature stationarity, it did not surpass Model 1 on holdout accuracy (52.89% vs 53.26%) or naive Return MAE (0.003220 vs 0.003198), failing Gate 1 and Gate 3.
+- **Production Recommendation:** Deployed as a shadow candidate model in `src/engine.py` and `app.py` for continuous 168-hour live out-of-sample consensus evaluation alongside Model 1.
