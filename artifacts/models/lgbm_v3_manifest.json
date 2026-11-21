@@ -1,6 +1,6 @@
 {
   "model_version": "lgbm_v3.0.0",
-  "status": "PROMOTED_CANDIDATE",
+  "status": "SHADOW_CANDIDATE",
   "feature_schema_version": "v3_29stationary",
   "classifier_artifact_path": "artifacts/models/lgbm_v3_classifier.pkl",
   "classifier_sha256": "91acb8e0d7ded1b2aedcb3f0cefa9f3e3c2cc48f333fa2801bb46a4f7149a57d",
@@ -107,7 +107,7 @@
     "holdout_spearman_ic": 0.0211,
     "holdout_spearman_pvalue": 0.077174,
     "holdout_return_mae": 0.00322,
-    "naive_price_rmse": 398.8,
+    "naive_price_rmse": 398.77,
     "model_price_rmse": 400.22
   },
   "hyperparameters": {
@@ -129,10 +129,10 @@
     }
   },
   "promotion_gates": {
-    "gate_1_directional_accuracy": "PASSED (>50% and log-loss < 0.6931)",
-    "gate_2_probability_calibration": "PASSED (brier < 0.25, roc_auc > 0.50)",
-    "gate_3_alpha_spearman_ic": "PASSED (positive rank IC)",
-    "gate_4_scale_invariance": "PASSED (all 29 features stationary)",
-    "gate_5_zero_lookahead_bias": "PASSED (purged walk-forward and honest RMSE)"
+    "gate_1_directional_accuracy": "FAILED (Accuracy 52.89% <= 53.26% gate threshold)",
+    "gate_2_probability_calibration": "PARTIAL (Log-Loss 0.6913 passed; Brier 0.2491 tied)",
+    "gate_3_economic_viability": "FAILED (Return MAE 0.003220 >= 0.003198 naive baseline)",
+    "gate_4_inference_latency_security": "PASSED (CPU latency < 50ms and verified SHA-256 manifest)",
+    "gate_5_operational_stability": "PENDING (Requires 168h continuous live shadow execution)"
   }
 }
