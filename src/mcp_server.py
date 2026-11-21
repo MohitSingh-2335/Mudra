@@ -110,5 +110,66 @@ def get_spot_and_futures_trade_plan(
     return {"spot_plan": spot_plan, "futures_plan": futures_plan, "spot_hold_until_profit_plan": spot_plan, "futures_3x_isolated_plan": futures_plan}
 
 
+@mcp.tool()
+def get_recent_btc_news_headlines(hours_back: int = 2, max_items: int = 5) -> Dict[str, Any]:
+    # fetches recent public bitcoin rss news headlines from coindesk and cointelegraph
+    import xml.etree.ElementTree as ET
+    from datetime import timedelta
+    from email.utils import parsedate_to_datetime
+
+    feeds = [
+        ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+        ("Cointelegraph", "https://cointelegraph.com/rss/tag/bitcoin"),
+    ]
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, int(hours_back)))
+    headlines: List[Dict[str, Any]] = []
+    errors: List[str] = []
+
+    for source_name, url in feeds:
+        try:
+            resp = requests.get(url, timeout=(3.0, 5.0), headers={"User-Agent": "Mudra-Quant/1.0"})
+            if resp.status_code == 200:
+                root = ET.fromstring(resp.content)
+                for item in root.findall(".//item"):
+                    title_elem = item.find("title")
+                    pub_elem = item.find("pubDate")
+                    title = title_elem.text.strip() if title_elem is not None and title_elem.text else ""
+                    if not title:
+                        continue
+                    pub_dt = None
+                    if pub_elem is not None and pub_elem.text:
+                        try:
+                            pub_dt = parsedate_to_datetime(pub_elem.text.strip())
+                            if not pub_dt.tzinfo:
+                                pub_dt = pub_dt.replace(tzinfo=timezone.utc)
+                            else:
+                                pub_dt = pub_dt.astimezone(timezone.utc)
+                        except Exception:
+                            pub_dt = None
+                    if pub_dt and pub_dt >= cutoff:
+                        headlines.append({
+                            "title": title,
+                            "published_utc": pub_dt.isoformat(),
+                            "source": source_name,
+                        })
+        except Exception as exc:
+            errors.append(f"{source_name}: {exc}")
+
+    headlines.sort(key=lambda x: str(x.get("published_utc", "")), reverse=True)
+    headlines = headlines[:max_items]
+
+    if not headlines and errors:
+        return {
+            "status": "UNAVAILABLE",
+            "headlines": [],
+            "error": "; ".join(errors),
+        }
+
+    return {
+        "status": "LIVE" if headlines else "OK_NO_HEADLINES",
+        "headlines": headlines,
+    }
+
+
 if __name__ == "__main__":
     mcp.run()
