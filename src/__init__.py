@@ -1,23 +1,14 @@
 """Mudra quantitative trading and machine learning framework package."""
-from .database import (
-    ApiTelemetry,
-    Base,
-    CouncilAudit,
-    HourlyPostmortem,
-    MarketTick,
-    ModelPrediction,
-    ModelRegistry,
-    PaperPortfolio,
-    Reconciliation,
-    SchemaDriftError,
-    SessionLocal,
-    engine,
-    get_db,
-    has_tick_id_column,
-    init_db,
-    test_connection,
-    verify_db_schema,
-)
+from typing import Any
+
+
+def __getattr__(name: str) -> Any:
+    # lazy-load database symbols on demand to avoid import-time coupling
+    from . import database
+    if hasattr(database, name):
+        return getattr(database, name)
+    raise AttributeError(f"module 'src' has no attribute '{name}'")
+
 
 __all__ = [
     "Base",
