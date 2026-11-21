@@ -15,7 +15,7 @@ The following table summarizes every model evaluated across identical chronologi
 | **Naive Persistence** | Rule Baseline | Benchmark ($\hat{P}_{t+1}=P_t$) | Raw Price ($P_t$) | 50.39% | 0.6931 | 0.2500 | 0.5000 | 0.0000 | 0.003198 | **$398.77** | Default benchmark; difficult for decision trees to beat in USD RMSE due to extrapolation limits. |
 | **[Model 1 (`xgb_onnx_v1.0.0`)](../models/model_1_xgb_v1.md)** | XGBoost GBDT | **ACTIVE PRODUCTION** | `v1_39features` (39 Clf / 26 Reg) | **53.26%** | **0.6914** | **0.2491** | **0.5394** | **+0.0149** | 0.003221 | $399.47 | Primary active signal generator; statistically significant directional edge but relies on raw price levels. |
 | **[Model 2 (`xgb_v2.0.0`)](../models/model_2_xgb_v2.md)** | XGBoost GBDT | **SHADOW CANDIDATE** | `v2_36stationary` (36 features) | 52.07% | 0.6926 | 0.2497 | 0.5342 | +0.0135 | 0.003222 | $401.12 | Removed raw prices, but 15 unnormalized volume/dollar features remained; failed promotion gate. |
-| **[Model 3 (`lgbm_v3.0.0`)](../models/model_3_lgbm_v3.md)** | LightGBM GBDT | **PROMOTED CANDIDATE** | `v3_29stationary` (29 features) | 52.89% | **0.6913** | **0.2491** | 0.5381 | **+0.0211** | **0.003220** | $400.22 | Passed all 5 promotion gates; achieved 100% scale invariance, highest Information Coefficient (+0.0211), and lowest log-loss. |
+| **[Model 3 (`lgbm_v3.0.0`)](../models/model_3_lgbm_v3.md)** | LightGBM GBDT | **SHADOW CANDIDATE** | `v3_29stationary` (29 features) | 52.89% | **0.6913** | **0.2491** | 0.5381 | **+0.0211** | **0.003220** | $400.22 | Evaluated in shadow consensus; achieved 100% scale invariance, highest rank correlation (+0.0211, p=0.0772 — not statistically significant at α=0.05), and lowest log-loss. |
 
 ---
 
@@ -43,8 +43,8 @@ The following table summarizes every model evaluated across identical chronologi
   3. Switching to regularized LightGBM (`num_leaves=15`, `min_child_samples=50`, `learning_rate=0.03`) prevents overfitting to high-frequency microstructural noise.
   4. Platt Sigmoid Calibration (`CalibratedClassifierCV`) on clean validation data aligns probability outputs with true empirical win rates.
   5. Huber loss regression bounds the impact of volatile crypto liquidation wicks, improving rank correlation.
-- **Outcome:** Model 3 achieved the highest Information Coefficient (+0.0211, p=0.0772, statistically significant at 10%), the lowest log-loss (0.6913), and tied for the best Brier score (0.2491) across all evaluated models.
-- **Status:** Officially evaluated, serialized (`artifacts/models/lgbm_v3_manifest.json`), and designated as a `PROMOTED CANDIDATE`.
+- **Outcome:** Model 3 achieved the highest rank correlation (+0.0211, p=0.0772 — not statistically significant at α=0.05), the lowest log-loss (0.6913), and tied for the best Brier score (0.2491) across all evaluated models.
+- **Status:** Officially evaluated, serialized (`artifacts/models/lgbm_v3_manifest.json`), and designated as a `SHADOW CANDIDATE`.
 
 ---
 
