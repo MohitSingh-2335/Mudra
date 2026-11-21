@@ -390,6 +390,333 @@ def fetch_live_btc_ticker_price(fallback_price: Optional[float] = None) -> float
     return float(fallback_price or 65000.0)
 
 
+def render_live_btc_websocket_ticker(fallback_price: float, fallback_24h_pct: Optional[float] = None) -> None:
+    # renders live self-updating WebSocket ticker bar for BTC/USDT with Binance and Coinbase fallback
+    init_price = max(1.0, float(fallback_price or 65000.0))
+    pct = float(fallback_24h_pct or 0.0)
+    pct_sign = "+" if pct >= 0 else ""
+    pct_str = f"{pct_sign}{pct:.2f}%"
+    badge_class = "badge-green" if pct >= 0 else "badge-red"
+    init_high = init_price * 1.015
+    init_low = init_price * 0.985
+
+    html_code = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <meta charset="utf-8">
+    <style>
+      * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }}
+      body {{ background: transparent; color: #E6EDF3; overflow: hidden; }}
+      .ticker-bar {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        background: linear-gradient(180deg, #161B22 0%, #0F141C 100%);
+        border: 1px solid #30363D;
+        border-radius: 8px;
+        padding: 10px 18px;
+        height: 88px;
+        gap: 16px;
+      }}
+      .ticker-section {{ display: flex; flex-direction: column; justify-content: center; }}
+      .top-label {{
+        font-size: 11px;
+        font-weight: 600;
+        color: #8B949E;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 2px;
+      }}
+      .live-dot {{
+        width: 7px;
+        height: 7px;
+        background-color: #00C087;
+        border-radius: 50%;
+        display: inline-block;
+        animation: livePulse 1.5s infinite ease-in-out;
+      }}
+      @keyframes livePulse {{
+        0% {{ transform: scale(0.95); opacity: 0.7; box-shadow: 0 0 0 0 rgba(0, 192, 135, 0.7); }}
+        70% {{ transform: scale(1.1); opacity: 1; box-shadow: 0 0 0 6px rgba(0, 192, 135, 0); }}
+        100% {{ transform: scale(0.95); opacity: 0.7; box-shadow: 0 0 0 0 rgba(0, 192, 135, 0); }}
+      }}
+      .price-row {{
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+      }}
+      .price-val {{
+        font-size: 24px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        color: #F0F6FC;
+        transition: color 0.25s ease;
+      }}
+      .tick-arrow {{
+        font-size: 16px;
+        font-weight: bold;
+        transition: color 0.25s ease;
+      }}
+      .stat-grid {{
+        display: flex;
+        align-items: center;
+        gap: 24px;
+      }}
+      .stat-item {{
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+      }}
+      .stat-val {{
+        font-size: 13px;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+        color: #C9D1D9;
+      }}
+      .badge-pct {{
+        font-size: 12px;
+        font-weight: 700;
+        padding: 2px 7px;
+        border-radius: 4px;
+        font-variant-numeric: tabular-nums;
+      }}
+      .badge-green {{ background: rgba(0, 192, 135, 0.15); color: #00C087; border: 1px solid rgba(0, 192, 135, 0.35); }}
+      .badge-red {{ background: rgba(255, 59, 105, 0.15); color: #FF3B69; border: 1px solid rgba(255, 59, 105, 0.35); }}
+      .clock-section {{
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        justify-content: center;
+      }}
+      .clock-val {{
+        font-size: 13px;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+        color: #58A6FF;
+        background: rgba(56, 139, 253, 0.12);
+        padding: 3px 8px;
+        border-radius: 4px;
+        border: 1px solid rgba(56, 139, 253, 0.25);
+      }}
+      .stream-tag {{
+        font-size: 10px;
+        color: #8B949E;
+        margin-top: 3px;
+      }}
+    </style>
+    </head>
+    <body>
+    <div class="ticker-bar">
+      <div class="ticker-section">
+        <div class="top-label">
+          <span class="live-dot" id="liveDot"></span>
+          <span>BTC/USDT SPOT</span>
+          <span id="feedStatus" style="color: #00C087; font-size: 10px;">LIVE</span>
+        </div>
+        <div class="price-row">
+          <span class="price-val" id="priceDisplay">${init_price:,.2f}</span>
+          <span class="tick-arrow" id="tickArrow" style="color: #8B949E;">▲</span>
+        </div>
+      </div>
+
+      <div class="stat-grid">
+        <div class="stat-item">
+          <span class="top-label">24h Change</span>
+          <span class="badge-pct {badge_class}" id="change24h">{pct_str}</span>
+        </div>
+        <div class="stat-item">
+          <span class="top-label">24h High</span>
+          <span class="stat-val" id="high24h">${init_high:,.2f}</span>
+        </div>
+        <div class="stat-item">
+          <span class="top-label">24h Low</span>
+          <span class="stat-val" id="low24h">${init_low:,.2f}</span>
+        </div>
+      </div>
+
+      <div class="clock-section">
+        <div class="top-label" style="justify-content: flex-end;">Synchronized Clock</div>
+        <div class="clock-val" id="liveClock">--:--:-- UTC</div>
+        <div class="stream-tag" id="streamSource">Connecting to Feed...</div>
+      </div>
+    </div>
+
+    <script>
+    (function() {{
+      let lastPrice = {init_price};
+      let activeWs = null;
+      let binanceConnected = false;
+      let fallbackTimer = null;
+      let retryTimer = null;
+
+      const priceEl = document.getElementById('priceDisplay');
+      const arrowEl = document.getElementById('tickArrow');
+      const changeEl = document.getElementById('change24h');
+      const highEl = document.getElementById('high24h');
+      const lowEl = document.getElementById('low24h');
+      const clockEl = document.getElementById('liveClock');
+      const streamEl = document.getElementById('streamSource');
+      const dotEl = document.getElementById('liveDot');
+      const statusEl = document.getElementById('feedStatus');
+
+      function updateClock() {{
+        const now = new Date();
+        const h = String(now.getUTCHours()).padStart(2, '0');
+        const m = String(now.getUTCMinutes()).padStart(2, '0');
+        const s = String(now.getUTCSeconds()).padStart(2, '0');
+        clockEl.textContent = h + ':' + m + ':' + s + ' UTC';
+      }}
+      setInterval(updateClock, 1000);
+      updateClock();
+
+      function formatPrice(p) {{
+        return '$' + Number(p).toLocaleString('en-US', {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }});
+      }}
+
+      function handleTick(newPrice, pctChange, high24, low24, sourceName) {{
+        if (newPrice > lastPrice) {{
+          arrowEl.textContent = '▲';
+          arrowEl.style.color = '#00C087';
+          priceEl.style.color = '#00C087';
+        }} else if (newPrice < lastPrice) {{
+          arrowEl.textContent = '▼';
+          arrowEl.style.color = '#FF3B69';
+          priceEl.style.color = '#FF3B69';
+        }}
+        setTimeout(function() {{ priceEl.style.color = '#F0F6FC'; }}, 400);
+
+        lastPrice = newPrice;
+        priceEl.textContent = formatPrice(newPrice);
+
+        if (pctChange !== null && !isNaN(pctChange)) {{
+          const sign = pctChange >= 0 ? '+' : '';
+          changeEl.textContent = sign + pctChange.toFixed(2) + '%';
+          changeEl.className = 'badge-pct ' + (pctChange >= 0 ? 'badge-green' : 'badge-red');
+        }}
+        if (high24 && !isNaN(high24) && high24 > 0) {{
+          highEl.textContent = formatPrice(high24);
+        }}
+        if (low24 && !isNaN(low24) && low24 > 0) {{
+          lowEl.textContent = formatPrice(low24);
+        }}
+        streamEl.textContent = sourceName;
+        dotEl.style.backgroundColor = '#00C087';
+        statusEl.textContent = 'LIVE';
+        statusEl.style.color = '#00C087';
+      }}
+
+      function connectCoinbase() {{
+        if (activeWs) {{
+          try {{ activeWs.close(); }} catch(e) {{}}
+        }}
+        streamEl.textContent = 'Connecting Coinbase...';
+        try {{
+          const cbWs = new WebSocket('wss://ws-feed.exchange.coinbase.com');
+          activeWs = cbWs;
+          cbWs.onopen = function() {{
+            cbWs.send(JSON.stringify({{
+              type: 'subscribe',
+              product_ids: ['BTC-USD'],
+              channels: ['ticker']
+            }}));
+            streamEl.textContent = 'Coinbase WebSocket (Fallback)';
+          }};
+          cbWs.onmessage = function(event) {{
+            try {{
+              const data = JSON.parse(event.data);
+              if (data.type === 'ticker' && data.price) {{
+                const p = parseFloat(data.price);
+                const open = parseFloat(data.open_24h);
+                const high = parseFloat(data.high_24h);
+                const low = parseFloat(data.low_24h);
+                const pct = (open > 0) ? ((p - open) / open) * 100 : null;
+                handleTick(p, pct, high, low, 'Coinbase WebSocket');
+              }}
+            }} catch(e) {{}}
+          }};
+          cbWs.onclose = function() {{
+            dotEl.style.backgroundColor = '#FF3B69';
+            statusEl.textContent = 'RECONNECTING';
+            statusEl.style.color = '#FF3B69';
+            clearTimeout(retryTimer);
+            retryTimer = setTimeout(connectBinance, 3000);
+          }};
+          cbWs.onerror = function() {{
+            try {{ cbWs.close(); }} catch(e) {{}}
+          }};
+        }} catch(err) {{
+          clearTimeout(retryTimer);
+          retryTimer = setTimeout(connectBinance, 3000);
+        }}
+      }}
+
+      function connectBinance() {{
+        if (activeWs) {{
+          try {{ activeWs.close(); }} catch(e) {{}}
+        }}
+        binanceConnected = false;
+        streamEl.textContent = 'Connecting Binance...';
+
+        fallbackTimer = setTimeout(function() {{
+          if (!binanceConnected) {{
+            connectCoinbase();
+          }}
+        }}, 4000);
+
+        try {{
+          const bWs = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@ticker');
+          activeWs = bWs;
+          bWs.onopen = function() {{
+            // Connected to Binance
+          }};
+          bWs.onmessage = function(event) {{
+            binanceConnected = true;
+            clearTimeout(fallbackTimer);
+            try {{
+              const d = JSON.parse(event.data);
+              if (d.c) {{
+                const p = parseFloat(d.c);
+                const pct = parseFloat(d.P);
+                const high = parseFloat(d.h);
+                const low = parseFloat(d.l);
+                handleTick(p, pct, high, low, 'Binance WebSocket (1s)');
+              }}
+            }} catch(e) {{}}
+          }};
+          bWs.onclose = function() {{
+            if (!binanceConnected) {{
+              connectCoinbase();
+            }} else {{
+              dotEl.style.backgroundColor = '#FF3B69';
+              statusEl.textContent = 'RECONNECTING';
+              statusEl.style.color = '#FF3B69';
+              clearTimeout(retryTimer);
+              retryTimer = setTimeout(connectBinance, 3000);
+            }}
+          }};
+          bWs.onerror = function() {{
+            if (!binanceConnected) {{
+              connectCoinbase();
+            }}
+          }};
+        }} catch(err) {{
+          connectCoinbase();
+        }}
+      }}
+
+      connectBinance();
+    }})();
+    </script>
+    </body>
+    </html>
+    """
+    components.html(html_code, height=96)
+
+
 def generate_m2_forecast(live_df: pd.DataFrame, m2_reg: Any, m2_clf: Any) -> Optional[Dict[str, Any]]:
     # generates live next-hour target and direction for Model 2 (Stationary)
     if live_df is None or live_df.empty or m2_reg is None or len(live_df) < 35:
@@ -734,42 +1061,10 @@ with st.container(border=True):
 
     forecast_result = generate_live_forecast(live_df=live_market_df, reg_model=reg_model, clf_model=clf_model, is_stale=is_stale_fallback)
 
-    # Live Bitcoin Strip (3 columns)
-    strip_c1, strip_c2, strip_c3 = st.columns(3)
-    with strip_c1:
-        st.metric(
-            "Live BTC/USDT Spot Price",
-            f"${live_spot_price:,.2f}" if live_spot_price and not is_stale_fallback else "Unavailable",
-            f"{format_signed_usd(spot_d_24h)} (24h)" if spot_d_24h and not is_stale_fallback else "Live Spot",
-            help="Live real-time spot price from Binance ticker endpoint."
-        )
+    fallback_24h_pct = ((spot_d_24h / p_24h) * 100.0) if (spot_d_24h is not None and p_24h and p_24h > 0) else None
 
-    with strip_c2:
-        if not live_market_df.empty:
-            last_c = live_market_df.iloc[-1]
-            c_high = float(last_c["high"])
-            c_low = float(last_c["low"])
-            c_range = c_high - c_low
-            st.metric(
-                "Last Closed 1H Candle",
-                f"${float(last_c['close']):,.2f}",
-                f"Range: ${c_range:,.2f} (${c_low:,.0f}–${c_high:,.0f})",
-                help="High–Low range and close of the most recently confirmed 1-hour candle."
-            )
-        else:
-            st.metric("Last Closed 1H Candle", "Awaiting Feed", "No Candle", help="Market feed is currently awaiting confirmed candle.")
-
-    with strip_c3:
-        now_utc = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-        st.metric(
-            "Last Updated (UTC)",
-            now_utc,
-            "Binance Spot API",
-            help="Timestamp of the latest telemetry check."
-        )
-        if st.button("Refresh Live Price", use_container_width=True, help="Refreshes live spot price and model predictions."):
-            st.cache_data.clear()
-            st.rerun()
+    # Live Real-Time WebSocket Ticker Box (Self-updating every second via browser-native WebSocket)
+    render_live_btc_websocket_ticker(fallback_price=live_spot_price, fallback_24h_pct=fallback_24h_pct)
 
     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
 
