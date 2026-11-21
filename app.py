@@ -1029,6 +1029,9 @@ def classify_ground_truth_result(row) -> str:
 
 def format_ground_truth_diagnosis(row) -> str:
     # formats human-readable economic explanation of why a prediction was accurate, noise, or a missed trade
+    diag = row.get("diagnosis_summary")
+    if pd.notna(diag) and str(diag).strip():
+        return str(diag).strip()
     pred_ret = float(row.get("predicted_return_pct", 0.0) or 0.0)
     act_ret = float(row.get("actual_return_pct", 0.0) or 0.0)
     diff = float(row.get("absolute_error_usd", 0.0) or 0.0)
@@ -1220,6 +1223,61 @@ with st.container(border=True):
                 else:
                     st.metric(card_title, "Standby", "Awaiting Data", help=f"{card_title} forecast is on standby.")
                 st.caption(bench_caption)
+
+        # table 1: current live predictions across all registered models
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+        t1_rows = []
+        rec_df_cache = db_state.get("rec_df", pd.DataFrame())
+        for m_ver, m_spec in sorted_models:
+            if (m_ver in ("xgb_onnx_v1.0.0", "xgb_v1") or m_spec.get("status") == "ACTIVE") and forecast_result:
+                f_res = forecast_result
+            elif m_ver == "xgb_v2.0.0" and m2_forecast_result:
+                f_res = m2_forecast_result
+            elif m_ver == "lgbm_v3.0.0" and m3_forecast_result:
+                f_res = m3_forecast_result
+            else:
+                f_res = generate_candidate_forecast(live_market_df, m_spec)
+
+            if m_spec.get("status") == "ACTIVE":
+                role = "Active Production"
+            elif "v2" in m_ver:
+                role = "Shadow Benchmark"
+            elif "v3" in m_ver:
+                role = "Candidate Evaluator"
+            else:
+                role = "Registered Model"
+
+            m_eval_count = 0
+            if not rec_df_cache.empty and "model_version" in rec_df_cache.columns:
+                m_eval_count = int((rec_df_cache["model_version"] == m_ver).sum())
+            if m_ver in ("xgb_onnx_v1.0.0", "xgb_v1") and m_eval_count == 0:
+                m_eval_count = len(rec_df_cache)
+
+            if m_eval_count >= 168:
+                track_str = f"{m_eval_count:,} hrs"
+            elif m_eval_count > 0:
+                track_str = f"{m_eval_count} hrs (Warming up)"
+            else:
+                track_str = "Warming up (0 hrs)"
+
+            target_val = f"${f_res['pred_target']:,.2f}" if f_res and "pred_target" in f_res else "—"
+            ret_val = f"{f_res['pred_ret_pct']:+.2f}%" if f_res and "pred_ret_pct" in f_res else "—"
+            dir_val = f_res.get("direction_label", "HOLD") if f_res else "STANDBY"
+            p_up_val = f"{f_res.get('prob_up', 50.0):.1f}%" if f_res else "—"
+
+            t1_rows.append({
+                "Model": format_model_display_name(m_ver),
+                "Role": role,
+                "BTC at Forecast": f"${live_spot_price:,.2f}" if live_spot_price else "—",
+                "Predicted Target ($)": target_val,
+                "Pred Return (%)": ret_val,
+                "Classifier Dir": dir_val,
+                "P(UP) %": p_up_val,
+                "Live Track Record": track_str,
+            })
+
+        if t1_rows:
+            st.dataframe(pd.DataFrame(t1_rows), use_container_width=True, hide_index=True)
     else:
         # Fallback to single Active Model 1 card
         with st.container():
@@ -1383,17 +1441,17 @@ with tab_ground_truth:
             if selected_model != "All Models":
                 table_df = table_df[table_df["Model"] == selected_model]
 
-            table_df["BTC Price at Prediction"] = table_df.get("close", table_df["predicted_price"]).apply(lambda x: f"${float(x or 0):,.2f}")
-            table_df["AI Forecast Target"] = table_df["predicted_price"].apply(lambda x: f"${float(x or 0):,.2f}")
-            table_df["Actual Next-Hour Close"] = table_df["actual_price_at_t_plus_1"].apply(lambda x: f"${float(x or 0):,.2f}")
-            table_df["Predicted Dir"] = table_df["predicted_return_pct"].apply(lambda r: "UP" if float(r or 0) >= 0 else "DOWN")
-            table_df["Actual Dir"] = table_df["actual_return_pct"].apply(lambda r: "UP" if float(r or 0) >= 0 else "DOWN")
-            table_df["Difference ($)"] = table_df["absolute_error_usd"].apply(lambda e: f"${float(e or 0):,.2f}")
+            table_df["Start Price"] = table_df.get("start_price", table_df.get("close", table_df["predicted_price"])).apply(lambda x: f"${float(x):,.2f}" if pd.notna(x) and float(x or 0) > 0 else "—")
+            table_df["Pred Target"] = table_df["predicted_price"].apply(lambda x: f"${float(x or 0):,.2f}")
+            table_df["Actual (T+1h)"] = table_df["actual_price_at_t_plus_1"].apply(lambda x: f"${float(x or 0):,.2f}")
+            table_df["Error ($)"] = table_df["absolute_error_usd"].apply(lambda e: f"${float(e or 0):,.2f}")
+            table_df["Pred Dir"] = table_df.get("direction_predicted", table_df["predicted_return_pct"].apply(lambda r: "UP" if float(r or 0) >= 0 else "DOWN"))
+            table_df["Actual Dir"] = table_df.get("direction_realized", table_df["actual_return_pct"].apply(lambda r: "UP" if float(r or 0) >= 0 else "DOWN"))
             table_df["Result"] = table_df.apply(classify_ground_truth_result, axis=1)
-            table_df["Diagnosis"] = table_df.apply(format_ground_truth_diagnosis, axis=1)
+            table_df["AI Diagnosis (1-Line)"] = table_df.apply(format_ground_truth_diagnosis, axis=1)
 
-            show_cols = ["Time (UTC)", "Model", "BTC Price at Prediction", "AI Forecast Target", "Actual Next-Hour Close", "Predicted Dir", "Actual Dir", "Difference ($)", "Result", "Diagnosis"]
-            st.dataframe(table_df[show_cols].head(24), use_container_width=True, hide_index=True)
+            show_cols = ["Time (UTC)", "Model", "Start Price", "Pred Target", "Actual (T+1h)", "Error ($)", "Pred Dir", "Actual Dir", "Result", "AI Diagnosis (1-Line)"]
+            st.dataframe(table_df[show_cols].head(50), use_container_width=True, hide_index=True)
 
             st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
             with st.expander("View Forecast Target vs. Realized Market Scatter Plot", expanded=True):
