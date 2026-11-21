@@ -6,7 +6,7 @@ and analytical queries for the quantitative trading engine and audit council.
 """
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 import math
 import os
@@ -654,6 +654,56 @@ def get_latest_council_audit() -> Optional[Dict[str, Any]]:
         return None
 
 
+def log_telemetry(
+    session: Optional[Session],
+    service: str,
+    endpoint: str,
+    latency_ms: float,
+    status_code: int,
+    error_msg: Optional[str] = None,
+) -> None:
+    # logs external service call latency and status code into api_telemetry table
+    if "PYTEST_CURRENT_TEST" in os.environ or session is None:
+        return
+    try:
+        with session.begin_nested():
+            session.add(ApiTelemetry(
+                timestamp=datetime.now(timezone.utc),
+                service_name=service,
+                endpoint=endpoint,
+                latency_ms=float(latency_ms),
+                status_code=int(status_code),
+                error_message=str(error_msg) if error_msg else None,
+            ))
+            session.flush()
+    except Exception:
+        pass
+
+
+def get_api_telemetry_summary(hours: int = 24) -> Dict[str, Any]:
+    # calculates api telemetry call counts, success rate, and average latency over rolling window
+    default_res = {"total_calls": 0, "success_rate_pct": 100.0, "avg_latency_ms": 0.0}
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        with get_db() as s:
+            rows = s.execute(
+                select(ApiTelemetry.status_code, ApiTelemetry.latency_ms)
+                .where(ApiTelemetry.timestamp >= cutoff)
+            ).all()
+            if not rows:
+                return default_res
+            total = len(rows)
+            successes = sum(1 for r in rows if 200 <= int(r[0] or 0) < 400)
+            avg_lat = sum(float(r[1] or 0.0) for r in rows) / total
+            return {
+                "total_calls": total,
+                "success_rate_pct": round((successes / total) * 100.0, 1),
+                "avg_latency_ms": round(avg_lat, 1),
+            }
+    except Exception:
+        return default_res
+
+
 # ---------------------------------------------------------------------------
 # 5. RETRO-COMPATIBILITY MAPPINGS
 # ---------------------------------------------------------------------------
@@ -676,5 +726,5 @@ __all__ = [
     "has_tick_id_column", "init_db", "test_connection", "_classify_column_type",
     "_TICK_ID_COLUMN_CACHE", "get_latest_market_ticks", "get_reconciliation_history",
     "get_reconciliation_kpis", "get_portfolio_history", "get_portfolio_kpis",
-    "get_latest_council_audit",
+    "get_latest_council_audit", "log_telemetry", "get_api_telemetry_summary",
 ]
