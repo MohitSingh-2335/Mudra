@@ -112,6 +112,7 @@ All metrics evaluated against the locked out-of-sample holdout test partition (6
 1. **Directional Accuracy Trade-Off (52.89% vs 53.26%):** Model 1 achieved slightly higher raw accuracy (53.26%) on this specific holdout set partly because its raw price levels memorized the persistent upward trend of late 2025. Model 3 sacrificed that regime-specific memorization in exchange for true scale invariance that will not fail during regime shifts.
 2. **Price RMSE Extrapolation Ceiling:** Like all gradient-boosted decision trees, Model 3 cannot beat the Naive Persistence Price RMSE ($398.77 vs $400.22) because decision trees predict step functions and cannot extrapolate beyond their leaf boundaries. This confirms that price RMSE is an uninformative metric for quantitative strategy performance and return ranking is the true objective.
 3. **OpenMP Environment Sensitivity on Windows:** LightGBM requires careful handling of DataFrame views and memory layout on Windows environments to prevent C-level pointer exceptions.
+4. **Training-Serving Window Parity Gap:** `models/model-3.ipynb` computed `sma_10_dist_pct` using a true 10-hour rolling mean (`rolling(10)`), while `src/feature_engineering.py` currently retains the 5-hour `Rolling_Mean_Close` (`rolling(5)`) for Model 2 backward compatibility (tracked as a training–serving parity fix for the next retrain).
 
 ---
 
