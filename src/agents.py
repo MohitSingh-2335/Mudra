@@ -76,7 +76,7 @@ from src.model_loader import load_verified_model
 
 load_dotenv(".env")
 ALLOWED_TRADE_ACTIONS = ("HOLD", "BUY", "SELL")
-GEMINI_MODEL_CANDIDATES = ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash")
+GEMINI_MODEL_CANDIDATES = ("gemini-2.5-flash", "gemini-3.5-flash", "gemini-3.8-flash", "gemini-flash-latest")
 
 # ---------------------------------------------------------------------------
 # 1. Episodic RAG Memory (ChromaDB)
