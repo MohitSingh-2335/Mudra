@@ -3,7 +3,7 @@
 
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://mudra-trading.streamlit.app)
 [![CI/CD Pipeline](https://github.com/MohitSingh-2335/Stock_Prediction_ML/actions/workflows/ci.yml/badge.svg)](https://github.com/MohitSingh-2335/Stock_Prediction_ML/actions/workflows/ci.yml)
-[![Tests Passing](https://img.shields.io/badge/pytest-88%20passed-00C087?logo=pytest&logoColor=white)](https://github.com/MohitSingh-2335/Stock_Prediction_ML)
+[![Tests Passing](https://img.shields.io/badge/pytest-91%20passed-00C087?logo=pytest&logoColor=white)](https://github.com/MohitSingh-2335/Stock_Prediction_ML)
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![XGBoost](https://img.shields.io/badge/XGBoost-2.0-EB5E28)](https://xgboost.readthedocs.io/)
 [![LangGraph](https://img.shields.io/badge/Orchestration-LangGraph-8A2BE2)](https://langchain-ai.github.io/langgraph/)
@@ -128,7 +128,7 @@ Return-Filtered Strategy (E[r] > 0.055% Hurdle):
 ```mermaid
 flowchart LR
     A["Binance API / Vision\n1-Hour BTC Candles"] --> B["Feature Pipeline\nsrc/feature_engineering.py\n(39 Causal Indicators)"]
-    B --> C["Dual XGBoost Inference\nModel 1: 53.26% Active\nModel 2: 52.49% Shadow"]
+    B --> C["Multi-Model Inference\nModel 1: 53.26% Active\nModel 2: 52.07% Shadow\nModel 3: 52.89% Shadow"]
     C --> D["LangGraph Council\n1. Strategist Node\n2. Risk Critic Gate\n3. ChromaDB Episodic RAG"]
     D --> E["Paper Trading Ledger\n0.14% Fee Deduction\n$10,000 Virtual Bankroll"]
     E --> F["Neon PostgreSQL\nContinuous Ground Truth\n6 Core Production Tables"]
@@ -164,12 +164,12 @@ The live production database on **Neon Serverless PostgreSQL** maintains continu
 | **`reconciliations`** | `rec_id` (PK), `outcome_tick_id` (FK) | Ground-truth delayed evaluations: pairs past predictions with realized T+1h outcomes. |
 | **`paper_portfolio`** | `ledger_id` (PK), `tick_id` (FK) | Autonomous $10,000 virtual paper trading ledger tracking cash, BTC balances, fees, and PnL. |
 | **`council_audits`** | `audit_id` (PK), `tick_id` (FK) | Multi-agent council deliberation records, conviction scores, and risk veto rationales. |
-| **`model_predictions`**| `pred_id` (PK), `tick_id` (FK) | Granular prediction logs comparing Model 1 (Active) and Model 2 (Shadow). |
+| **`model_predictions`**| `pred_id` (PK), `tick_id` (FK) | Granular prediction logs comparing Model 1 (Active) and Shadow Models 2 & 3. |
 | **`model_registry`** | `model_id` (PK, Unique) | Cryptographic model registry tracking SHA-256 hashes and feature schemas. |
 
 ---
 
-## 5. Dual Model Comparison: Model 1 vs. Model 2
+## 5. Multi-Model Comparison: Model 1 vs. Models 2 & 3
 
 A key machine learning lesson uncovered during empirical testing was the impact of feature stationarity:
 
@@ -180,7 +180,10 @@ A key machine learning lesson uncovered during empirical testing was the impact 
 - **Model 2 (`xgb_v2_stationary` — Shadow Consensus Candidate):**
   - Uses 36 strictly scale-invariant features: percentage returns, volatility ratios, cyclical time encodings (sine/cosine of hour/day), and volume flow.
   - Mathematically stationary and leak-free across all price regimes.
-  - Achieves **52.49%** directional accuracy on the holdout set, confirming the true statistical ceiling of 1-hour technical indicators.
+  - Achieves **52.07%** directional accuracy on the holdout set, confirming the true statistical ceiling of 1-hour technical indicators.
+- **Model 3 (`lgbm_v3.0.0` — Shadow Candidate):**
+  - Uses 29 stationary features, LightGBM GBDT architecture, and Platt scaling probability calibration.
+  - Achieves **52.89%** directional accuracy and **0.6913** log-loss on the holdout set.
 
 ---
 
