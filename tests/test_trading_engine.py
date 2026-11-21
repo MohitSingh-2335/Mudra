@@ -36,11 +36,15 @@ from src.agents import (
     strategist_node,
 )
 from src.backtesting import _simulate_from_signals
-from src.database import Base, CouncilAudit, MarketTick, PaperPortfolio, Reconciliation, init_db as real_init_db
+from src.database import (
+    Base, CouncilAudit, MarketTick, ModelPrediction, ModelRegistry,
+    PaperPortfolio, Reconciliation, init_db as real_init_db,
+)
 from src.engine import (
     MarketFeedExhaustedError,
     _parse_trade_count,
     build_plain_english_reconciliation_story,
+    ensure_model_registered,
     estimate_next_hour_price_range_usd,
     evaluate_futures_long_short_plan,
     evaluate_multi_angle_consensus,
@@ -605,3 +609,67 @@ def test_normalize_utc_timestamp():
     assert sync._normalize_utc_timestamp("2026-02-07T12:00:00Z") == expected
     with pytest.raises(ValueError):
         sync._normalize_utc_timestamp(None)
+
+
+def test_ensure_model_registered_idempotency_and_shadow_prediction(isolated_db):
+    # verifies idempotent auto-registration of candidate models and shadow prediction inserts
+    session = isolated_db[0]
+    cand_spec = {
+        "manifest_data": {
+            "regressor_artifact_path": "artifacts/models/lgbm_v3_regressor.pkl",
+            "regressor_sha256": "894f7637bca6c3481ea13ffa6df70233216b3264a743034944a4c2bfb6e9320f",
+            "classifier_artifact_path": "artifacts/models/lgbm_v3_classifier.pkl",
+            "classifier_sha256": "91acb8e0d7ded1b2aedcb3f0cefa9f3e3c2cc48f333fa2801bb46a4f7149a57d",
+            "feature_schema_version": "v3_29stationary",
+            "metrics": {"holdout_accuracy": 0.5289, "holdout_log_loss": 0.6913},
+        }
+    }
+
+    # 1. Calling ensure_model_registered inserts a valid ModelRegistry row with current_status == "CANDIDATE"
+    ensure_model_registered(session, "lgbm_v3.0.0", cand_spec)
+    reg = session.execute(
+        select(ModelRegistry).where(ModelRegistry.model_version == "lgbm_v3.0.0")
+    ).scalars().first()
+    assert reg is not None
+    assert reg.model_version == "lgbm_v3.0.0"
+    assert reg.current_status == "CANDIDATE"
+    assert reg.feature_schema_version == "v3_29stationary"
+    assert reg.regressor_sha256 == "894f7637bca6c3481ea13ffa6df70233216b3264a743034944a4c2bfb6e9320f"
+
+    # Calling it a second time is idempotent (no duplicate error)
+    ensure_model_registered(session, "lgbm_v3.0.0", cand_spec)
+    regs = session.execute(
+        select(ModelRegistry).where(ModelRegistry.model_version == "lgbm_v3.0.0")
+    ).scalars().all()
+    assert len(regs) == 1
+
+    # 2. Inserting a SHADOW ModelPrediction for lgbm_v3.0.0 immediately afterward succeeds
+    tick = MarketTick(
+        timestamp=datetime.now(timezone.utc),
+        open=65000.0, high=65500.0, low=64800.0, close=65200.0, volume=100.0,
+        model_version=config.ACTIVE_MODEL_VERSION,
+        feature_schema_version=config.FEATURE_SCHEMA_VERSION,
+        market_regime="STANDARD_SPOT",
+    )
+    session.add(tick)
+    session.flush()
+
+    pred = ModelPrediction(
+        tick_id=tick.id,
+        model_version="lgbm_v3.0.0",
+        run_mode="SHADOW",
+        is_canonical=True,
+        is_primary=False,
+        feature_schema_version="v3_29stationary",
+        predicted_return_pct=0.25,
+        predicted_price_1h=65363.0,
+        direction_predicted="UP",
+        direction_prob_up=0.54,
+        clears_hurdle=True,
+    )
+    session.add(pred)
+    session.flush()
+
+    assert pred.id is not None
+    assert pred.model_version == "lgbm_v3.0.0"
+    assert pred.run_mode == "SHADOW"
