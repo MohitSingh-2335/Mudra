@@ -88,9 +88,9 @@ def get_spot_and_futures_trade_plan(
     conviction_score: int = 5, volatility_range_pct: float = 1.0,
     risk_approved: bool = True, clears_hurdle: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    """Returns Spot Hold-Until-Net-Profit decision and 3x Isolated Margin Futures execution plan."""
+    # returns spot hold-until-net-profit decision and marks leveraged futures out of scope
     from config import MIN_HURDLE_PCT
-    from src.engine import evaluate_spot_hold_until_profit_decision, evaluate_futures_long_short_plan
+    from src.engine import evaluate_spot_hold_until_profit_decision
     from src.database import get_db
 
     clears = bool(clears_hurdle) if clears_hurdle is not None else (abs(float(expected_return_pct)) >= float(MIN_HURDLE_PCT))
@@ -103,11 +103,10 @@ def get_spot_and_futures_trade_plan(
     except Exception:
         spot_plan = {"final_spot_action": "HOLD", "position_state": "DATABASE_OFFLINE_FALLBACK", "reason": "Database connection offline; retaining cash safety floor."}
 
-    futures_plan = evaluate_futures_long_short_plan(
-        current_price=current_price, predicted_direction=predicted_direction, expected_return_pct=expected_return_pct,
-        clears_hurdle=clears, volatility_range_pct=volatility_range_pct, risk_approved=risk_approved,
-        conviction_score=conviction_score, leverage=3.0,
-    )
+    futures_plan = {
+        "status": "OUT_OF_SCOPE",
+        "summary": "Mudra is a spot BTC/USDT ML execution pipeline; leveraged futures trading is out of scope.",
+    }
     return {"spot_plan": spot_plan, "futures_plan": futures_plan, "spot_hold_until_profit_plan": spot_plan, "futures_3x_isolated_plan": futures_plan}
 
 
