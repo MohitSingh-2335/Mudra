@@ -69,7 +69,7 @@ CANDIDATE_MODEL_SPEC: Dict[str, Any] = {
 def _verify_new_tables_subset(conn: Any) -> None:
     inspector = inspect(conn)
     existing_tables = set(inspector.get_table_names())
-    for tbl_name in ("model_registry", "model_predictions"):
+    for tbl_name in ("model_registry", "model_predictions", "hourly_postmortems"):
         if tbl_name not in existing_tables:
             raise SchemaDriftError(f"Table '{tbl_name}' missing.")
         live_cols = {c["name"]: c for c in inspector.get_columns(tbl_name)}
