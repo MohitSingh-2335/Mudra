@@ -488,32 +488,37 @@ def get_latest_market_ticks(limit: int = 100) -> pd.DataFrame:
 def get_reconciliation_history(limit: int = 500, model_version: Optional[str] = None) -> pd.DataFrame:
     try:
         with get_db() as session:
-            stmt = select(Reconciliation, MarketTick.model_version).outerjoin(MarketTick, Reconciliation.tick_id == MarketTick.id)
-            if model_version and model_version != "All Models":
-                stmt = stmt.where(MarketTick.model_version == model_version)
-            rows = session.execute(stmt.order_by(desc(Reconciliation.timestamp)).limit(limit)).all()
-
             data = []
-            for r, m_ver in rows:
-                item = r.to_dict()
-                item["model_version"] = m_ver
-                data.append(item)
+            try:
+                stmt = select(Reconciliation, MarketTick.model_version).outerjoin(MarketTick, Reconciliation.tick_id == MarketTick.id)
+                if model_version and model_version != "All Models":
+                    stmt = stmt.where(MarketTick.model_version == model_version)
+                rows = session.execute(stmt.order_by(desc(Reconciliation.timestamp)).limit(limit)).all()
+                for r, m_ver in rows:
+                    item = r.to_dict()
+                    item["model_version"] = m_ver
+                    data.append(item)
+            except Exception as r_err:
+                logger.warning("Failed to query primary reconciliations: %s", r_err)
 
-            cand_stmt = select(ModelPrediction, MarketTick.timestamp.label("tick_ts")).join(MarketTick, ModelPrediction.tick_id == MarketTick.id).where(ModelPrediction.outcome_tick_id.isnot(None), ModelPrediction.is_primary.is_(False))
-            if model_version and model_version != "All Models":
-                cand_stmt = cand_stmt.where(ModelPrediction.model_version == model_version)
-            for cp, tick_ts in session.execute(cand_stmt.order_by(desc(ModelPrediction.reconciled_at)).limit(limit)).all():
-                ts = cp.reconciled_at or tick_ts
-                data.append({
-                    "id": cp.id, "timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
-                    "tick_id": cp.tick_id, "predicted_price": cp.predicted_price_1h,
-                    "actual_price_at_t_plus_1": cp.actual_price_at_t_plus_1, "predicted_return_pct": cp.predicted_return_pct,
-                    "actual_return_pct": cp.actual_return_pct, "residual_error": cp.residual_error,
-                    "absolute_error_usd": cp.absolute_error_usd, "percentage_error": cp.percentage_error,
-                    "direction_predicted": cp.direction_predicted, "direction_realized": cp.direction_realized,
-                    "direction_correct": cp.direction_correct, "is_black_swan": cp.is_black_swan,
-                    "error_attribution_tag": cp.error_attribution_tag, "model_version": cp.model_version,
-                })
+            try:
+                cand_stmt = select(ModelPrediction, MarketTick.timestamp.label("tick_ts")).join(MarketTick, ModelPrediction.tick_id == MarketTick.id).where(ModelPrediction.outcome_tick_id.isnot(None), ModelPrediction.is_primary.is_(False))
+                if model_version and model_version != "All Models":
+                    cand_stmt = cand_stmt.where(ModelPrediction.model_version == model_version)
+                for cp, tick_ts in session.execute(cand_stmt.order_by(desc(ModelPrediction.reconciled_at)).limit(limit)).all():
+                    ts = cp.reconciled_at or tick_ts
+                    data.append({
+                        "id": cp.id, "timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+                        "tick_id": cp.tick_id, "predicted_price": cp.predicted_price_1h,
+                        "actual_price_at_t_plus_1": cp.actual_price_at_t_plus_1, "predicted_return_pct": cp.predicted_return_pct,
+                        "actual_return_pct": cp.actual_return_pct, "residual_error": cp.residual_error,
+                        "absolute_error_usd": cp.absolute_error_usd, "percentage_error": cp.percentage_error,
+                        "direction_predicted": cp.direction_predicted, "direction_realized": cp.direction_realized,
+                        "direction_correct": cp.direction_correct, "is_black_swan": cp.is_black_swan,
+                        "error_attribution_tag": cp.error_attribution_tag, "model_version": cp.model_version,
+                    })
+            except Exception as c_err:
+                logger.warning("Failed to query candidate predictions: %s", c_err)
 
             if not data:
                 return pd.DataFrame()
@@ -521,7 +526,7 @@ def get_reconciliation_history(limit: int = 500, model_version: Optional[str] = 
             df["timestamp"] = pd.to_datetime(df["timestamp"])
             return df.sort_values("timestamp", ascending=False).reset_index(drop=True).head(limit)
     except Exception as exc:
-        logger.warning("Failed to fetch reconciliation history: %s", type(exc).__name__)
+        logger.warning("Failed to fetch reconciliation history: %s", exc)
         return pd.DataFrame()
 
 
