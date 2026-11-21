@@ -415,16 +415,19 @@ def get_database_url() -> str:
 
 
 def create_db_engine(db_url: Optional[str] = None) -> Engine:
-    url = db_url or get_database_url()
-    if "sqlite" in url:
-        return create_engine(url, connect_args={"check_same_thread": False}, echo=False)
+    fallback = ROOT_DIR / "data" / "mudra_operational.db"
     try:
+        url = db_url or get_database_url()
+        if "sqlite" in url:
+            return create_engine(url, connect_args={"check_same_thread": False}, echo=False)
         return create_engine(url, pool_pre_ping=True, pool_size=5, max_overflow=10, pool_recycle=300, connect_args={"connect_timeout": 10}, echo=False)
     except Exception as exc:
         logger.warning("Failed to create remote database engine, falling back to sqlite: %s", exc)
-        fallback = ROOT_DIR / "data" / "mudra_operational.db"
-        fallback.parent.mkdir(parents=True, exist_ok=True)
-        return create_engine(f"sqlite:///{fallback.as_posix()}", connect_args={"check_same_thread": False}, echo=False)
+        try:
+            fallback.parent.mkdir(parents=True, exist_ok=True)
+            return create_engine(f"sqlite:///{fallback.as_posix()}", connect_args={"check_same_thread": False}, echo=False)
+        except Exception:
+            return create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, echo=False)
 
 
 engine = create_db_engine()
@@ -707,15 +710,12 @@ def get_api_telemetry_summary(hours: int = 24) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # 5. RETRO-COMPATIBILITY MAPPINGS
 # ---------------------------------------------------------------------------
-# retro-compatibility mappings for callers referencing legacy submodules
+# internal module aliases for backward compatibility within this module
 this_mod = sys.modules.get(__name__)
 if this_mod is not None:
     connection = this_mod
     models = this_mod
     queries = this_mod
-    sys.modules.setdefault("src.database.models", this_mod)
-    sys.modules.setdefault("src.database.connection", this_mod)
-    sys.modules.setdefault("src.database.queries", this_mod)
 
 __all__ = [
     "Base", "MarketTick", "ApiTelemetry", "CouncilAudit", "Reconciliation",
