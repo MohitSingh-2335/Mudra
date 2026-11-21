@@ -49,11 +49,13 @@ from config import (
 )
 from src.agents import (
     calculate_technical_signals,
+    fetch_mcp_context,
+    generate_hourly_postmortem_with_gemini,
     get_model_return_forecast,
     run_trading_graph,
 )
 from src.database import (
-    CouncilAudit, MarketTick, ModelPrediction, ModelRegistry, PaperPortfolio, Reconciliation,
+    CouncilAudit, HourlyPostmortem, MarketTick, ModelPrediction, ModelRegistry, PaperPortfolio, Reconciliation,
     get_db, has_tick_id_column, test_connection,
 )
 
@@ -645,6 +647,36 @@ def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]
             session.add(current_tick)
             session.flush()
 
+        # record primary prediction for active model in model_predictions table
+        try:
+            with session.begin_nested():
+                ensure_model_registered(session, ACTIVE_MODEL_VERSION)
+                m1_pred = session.execute(
+                    select(ModelPrediction).where(
+                        ModelPrediction.tick_id == current_tick.id,
+                        ModelPrediction.model_version == ACTIVE_MODEL_VERSION,
+                    )
+                ).scalars().first()
+
+                if not m1_pred:
+                    m1_pred = ModelPrediction(
+                        tick_id=current_tick.id,
+                        model_version=ACTIVE_MODEL_VERSION,
+                        run_mode="PRIMARY",
+                        is_canonical=True,
+                        is_primary=True,
+                        feature_schema_version=FEATURE_SCHEMA_VERSION,
+                        predicted_return_pct=pred_return,
+                        predicted_price_1h=pred_price,
+                        direction_predicted=ml_output.get("direction", "UP" if pred_return >= 0 else "DOWN"),
+                        direction_prob_up=float(ml_output.get("direction_probability_up", 50.0)) / 100.0,
+                        clears_hurdle=bool(clears_hurdle),
+                    )
+                    session.add(m1_pred)
+                    session.flush()
+        except Exception as m1_err:
+            sync_logger.warning("Failed primary model prediction write: %s", type(m1_err).__name__)
+
         # evaluate and record shadow predictions for registered candidate models
         try:
             from src.model_loader import get_registered_models
@@ -665,7 +697,7 @@ def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]
                         close_f = float(candle["close"])
                         c_price = float(close_f * (1.0 + c_ret))
                         c_ret_pct = float(((c_price - close_f) / close_f) * 100.0)
-                        c_dir = "UP" if c_ret_pct >= 0.0 else "DOWN"
+                        c_dir = "UP" if c_prob_up >= 0.50 else "DOWN"
 
                         with session.begin_nested():
                             ensure_model_registered(session, cand_version, cand_spec)
@@ -890,6 +922,69 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
         except Exception as exc:
             logger.warning("Could not update model_predictions for tick %s: %s", prior.id, exc)
 
+        # collect model outcomes for grounded gemini post-mortem analysis
+        try:
+            preds_for_tick = session.execute(
+                select(ModelPrediction).where(ModelPrediction.tick_id == prior.id)
+            ).scalars().all()
+            model_outcomes = []
+            for p_row in preds_for_tick:
+                model_outcomes.append({
+                    "model_version": p_row.model_version,
+                    "predicted_price": float(p_row.predicted_price_1h or 0.0),
+                    "actual_price": float(p_row.actual_price_at_t_plus_1 or act_p),
+                    "predicted_return_pct": float(p_row.predicted_return_pct or 0.0),
+                    "actual_return_pct": float(p_row.actual_return_pct or act_ret),
+                    "direction_predicted": p_row.direction_predicted,
+                    "direction_realized": p_row.direction_realized or dir_real,
+                    "direction_correct": bool(p_row.direction_correct),
+                    "error_usd": float(p_row.absolute_error_usd or abs_err),
+                })
+            if not model_outcomes:
+                model_outcomes.append({
+                    "model_version": prior.model_version or ACTIVE_MODEL_VERSION,
+                    "predicted_price": pred_p,
+                    "actual_price": act_p,
+                    "predicted_return_pct": pred_ret,
+                    "actual_return_pct": act_ret,
+                    "direction_predicted": dir_pred,
+                    "direction_realized": dir_real,
+                    "direction_correct": (dir_pred == dir_real),
+                    "error_usd": abs_err,
+                })
+
+            mcp_ctx = fetch_mcp_context(limit=3)
+            prior_feats = dict(prior.features) if isinstance(prior.features, dict) else {}
+            prior_feats.setdefault("close", float(prior.close))
+            postmortem = generate_hourly_postmortem_with_gemini(prior_feats, mcp_ctx, model_outcomes)
+
+            with session.begin_nested():
+                existing_pm = session.execute(
+                    select(HourlyPostmortem).where(HourlyPostmortem.tick_id == prior.id)
+                ).scalars().first()
+                if not existing_pm:
+                    new_pm = HourlyPostmortem(
+                        tick_id=prior.id,
+                        news_headlines=mcp_ctx.get("news_headlines", []),
+                        feature_snapshot=prior_feats,
+                        gemini_full_analysis=postmortem,
+                        gemini_status=postmortem.get("gemini_status", "UNAVAILABLE"),
+                        error_detail=postmortem.get("error_detail"),
+                        created_at=datetime.now(timezone.utc),
+                    )
+                    session.add(new_pm)
+
+                per_model = postmortem.get("per_model", {})
+                for p_row in preds_for_tick:
+                    pm_diag = per_model.get(p_row.model_version, {}).get("diagnosis_summary")
+                    if pm_diag:
+                        p_row.diagnosis_summary = pm_diag
+                    elif not p_row.diagnosis_summary:
+                        p_row.diagnosis_summary = f"{p_row.direction_predicted} target ${float(p_row.predicted_price_1h or 0):,.2f} vs actual ${act_p:,.2f} (diff ${float(p_row.absolute_error_usd or 0):,.2f}, {p_row.error_attribution_tag})."
+                session.flush()
+        except Exception as pm_exc:
+            logger.warning("Could not record hourly postmortem for tick %s: %s", prior.id, pm_exc)
+
         audit = session.execute(select(CouncilAudit).where(CouncilAudit.tick_id == prior.id).order_by(CouncilAudit.id.desc())).scalars().first()
         if audit:
             if audit.risk_verdict == "VETOED":
@@ -958,6 +1053,8 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
                 pred_row.percentage_error = u_pct_err
                 pred_row.is_black_swan = u_is_swan
                 pred_row.error_attribution_tag = u_tag
+                if not pred_row.diagnosis_summary:
+                    pred_row.diagnosis_summary = f"{pred_row.direction_predicted} target ${u_pred_price:,.2f} vs actual ${act_p:,.2f} (diff ${u_abs_err:,.2f}, {u_tag})."
                 pred_row.reconciled_at = datetime.now(timezone.utc)
             session.flush()
     except Exception as orphan_exc:
