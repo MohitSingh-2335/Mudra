@@ -22,9 +22,9 @@ import pandas as pd
 from sqlalchemy import (
     Boolean, CheckConstraint, Column, DateTime, Engine, Float, ForeignKey,
     ForeignKeyConstraint, Index, Integer, JSON, String, Text, UniqueConstraint,
-    create_engine, desc, event, inspect, select, text,
+    create_engine, desc, inspect, select, text,
 )
-from sqlalchemy.orm import DeclarativeBase, Session, attributes, defer, relationship, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
 
 from config import ACTIVE_MODEL_VERSION, FEATURE_SCHEMA_VERSION
 
@@ -588,48 +588,14 @@ def get_db() -> Generator[Session, None, None]:
         session.close()
 
 
-_TICK_ID_COLUMN_CACHE: Dict[int, bool] = {}
-
-
-def has_tick_id_column(session: Session) -> bool:
-    try:
-        bind = session.get_bind()
-        bind_id = id(bind)
-        if bind_id in _TICK_ID_COLUMN_CACHE:
-            return _TICK_ID_COLUMN_CACHE[bind_id]
-        inspector = inspect(session.connection() if hasattr(session, "connection") else bind)
-        if inspector.has_table("paper_portfolio"):
-            present = "tick_id" in {c["name"] for c in inspector.get_columns("paper_portfolio")}
-            _TICK_ID_COLUMN_CACHE[bind_id] = present
-            return present
-    except Exception:
-        pass
-    return False
-
-
-def _defer_missing_tick_id_on_legacy_portfolio(orm_execute_state: Any) -> None:
-    if orm_execute_state.is_select and not orm_execute_state.is_column_load and not orm_execute_state.is_relationship_load:
-        try:
-            if any(m.class_ is PaperPortfolio for m in orm_execute_state.all_mappers):
-                if not has_tick_id_column(orm_execute_state.session):
-                    orm_execute_state.statement = orm_execute_state.statement.options(defer(PaperPortfolio.tick_id))
-        except Exception:
-            pass
-
-
-def _populate_deferred_tick_id_on_load(target: PaperPortfolio, context: Any) -> None:
-    if "tick_id" not in target.__dict__:
-        attributes.set_committed_value(target, "tick_id", None)
-
-
-event.listen(Session, "do_orm_execute", _defer_missing_tick_id_on_legacy_portfolio)
-event.listen(PaperPortfolio, "load", _populate_deferred_tick_id_on_load)
+def has_tick_id_column(session: Any = None) -> bool:
+    # returns True as paper_portfolio table includes the canonical tick_id column
+    return True
 
 
 def init_db(target_engine: Optional[Engine] = None) -> None:
     target = target_engine or engine
     Base.metadata.create_all(bind=target)
-    _TICK_ID_COLUMN_CACHE[id(target)] = True
 
 
 def test_connection() -> Tuple[bool, str, float]:
@@ -934,7 +900,7 @@ __all__ = [
     "normalize_pg_predicate", "ensure_canonical_function", "ensure_canonical_trigger",
     "verify_db_schema", "get_database_url", "create_db_engine", "engine",
     "SessionLocal", "get_db", "has_tick_id_column", "init_db",
-    "test_connection", "_classify_column_type", "_TICK_ID_COLUMN_CACHE",
+    "test_connection", "_classify_column_type",
     "get_latest_market_ticks", "get_reconciliation_history", "get_reconciliation_kpis",
     "get_portfolio_history", "get_portfolio_kpis", "get_latest_council_audit",
     "ALLOWED_VERIFICATION_STATUSES", "record_prediction_investigation", "get_prediction_investigations",
