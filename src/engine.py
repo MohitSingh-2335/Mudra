@@ -859,6 +859,31 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
         session.add(rec)
         reconciled_records.append(rec)
 
+        # indexes reconciled prediction outcome into ChromaDB episodic error memory
+        if not os.getenv("PYTEST_CURRENT_TEST"):
+            try:
+                from src.agents import index_reconciled_outcome_memory
+                story = build_plain_english_reconciliation_story(
+                    pred_tick=prior, outcome_tick=outcome, pred_price=pred_p, actual_price=act_p,
+                    pred_ret_pct=pred_ret, actual_ret_pct=act_ret, dir_pred=dir_pred, dir_real=dir_real,
+                    dir_correct=(dir_pred == dir_real), abs_err_usd=abs_err, tag=tag,
+                )
+                index_reconciled_outcome_memory(
+                    tick_id=prior.id,
+                    timestamp_iso=outcome.timestamp.isoformat() if hasattr(outcome.timestamp, "isoformat") else str(outcome.timestamp),
+                    market_regime=str(prior.market_regime or "STANDARD_SPOT"),
+                    direction_predicted=dir_pred,
+                    direction_realized=dir_real,
+                    direction_correct=(dir_pred == dir_real),
+                    predicted_dollar_move=pred_p - base_p,
+                    actual_dollar_move=act_p - base_p,
+                    absolute_error_usd=abs_err,
+                    error_attribution_tag=tag,
+                    plain_english_notes=story.get("hypothesis_notes", f"Error: ${abs_err:,.2f}"),
+                )
+            except Exception:
+                pass
+
         try:
             with session.begin_nested():
                 for u in session.execute(select(ModelPrediction).where(ModelPrediction.tick_id == prior.id, ModelPrediction.outcome_tick_id.is_(None))).scalars().all():
