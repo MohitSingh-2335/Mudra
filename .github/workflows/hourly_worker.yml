@@ -42,7 +42,7 @@ jobs:
         if: always()
         run: |
           STREAMLIT_URL="${{ secrets.STREAMLIT_APP_URL }}"
-          TARGET_URL="${STREAMLIT_URL:-https://mudra-quant-terminal.streamlit.app}"
+          TARGET_URL="${STREAMLIT_URL:-https://mudra-trading.streamlit.app}"
           echo "Pinging Streamlit Dashboard at $TARGET_URL to prevent hibernation..."
           STATUS=$(curl -s -L -m 25 -o /dev/null -w "%{http_code}" "$TARGET_URL" || echo "FAILED")
           echo "Dashboard ping completed with HTTP status: $STATUS"
