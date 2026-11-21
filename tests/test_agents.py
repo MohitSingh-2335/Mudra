@@ -87,3 +87,24 @@ def test_trading_graph_hold_preservation():
     assert state["risk_approved"] is True
     assert state["recommended_position_pct"] == 0.0
     assert "Capital preservation" in state["risk_critic_critique"]
+
+
+def test_mcp_server_tools_and_context_fetcher():
+    # verifies mcp server tool functions and agent context fetcher work cleanly
+    import src.mcp_server as mcp_srv
+    from src.agents import fetch_mcp_context
+
+    assert hasattr(mcp_srv, "get_live_btc_derivatives_pulse")
+    assert hasattr(mcp_srv, "get_live_btc_spot_and_range")
+    assert hasattr(mcp_srv, "get_recent_prediction_error_memories")
+    assert hasattr(mcp_srv, "get_spot_and_futures_trade_plan")
+
+    pulse = mcp_srv.get_live_btc_derivatives_pulse()
+    assert "funding_rate_8h_pct" in pulse
+    assert "derivatives_regime" in pulse
+
+    ctx = fetch_mcp_context(limit=2)
+    assert isinstance(ctx, dict)
+    assert "funding_rate_8h_pct" in ctx
+    assert "derivatives_regime" in ctx
+    assert isinstance(ctx["recent_error_memories"], list)
