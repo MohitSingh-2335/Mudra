@@ -685,7 +685,7 @@ st.sidebar.markdown(
 
 # Page Header
 st.title("Mudra — Bitcoin 1-Hour AI Forecasting & Ground Truth Evaluation")
-st.caption("Dual XGBoost Inference • Multi-Agent LangGraph Reasoning • Live Neon PostgreSQL Ground-Truth Verification")
+st.caption("Multi-Model Inference (XGBoost v1/v2 & LightGBM v3) • Multi-Agent LangGraph Reasoning • Live Neon PostgreSQL Ground-Truth Verification")
 
 m2_forecast_result = generate_m2_forecast(live_df=live_market_df, m2_reg=m2_reg_model, m2_clf=m2_clf_model)
 m3_forecast_result = generate_m3_forecast(live_df=live_market_df, m3_reg=m3_reg_model, m3_clf=m3_clf_model)
@@ -693,7 +693,7 @@ m3_forecast_result = generate_m3_forecast(live_df=live_market_df, m3_reg=m3_reg_
 # Section 1: Top Headline Metric Cards (Live Telemetry & Real-Time Targets)
 with st.container(border=True):
     st.markdown('<span class="section-badge">Section 1 · Live Telemetry</span>', unsafe_allow_html=True)
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
     p_24h = float(live_market_df["close"].iloc[-24]) if len(live_market_df) >= 24 else None
     d_24h = current_price - p_24h if current_price is not None and p_24h is not None else None
 
@@ -742,18 +742,26 @@ with st.container(border=True):
 
     with c5:
         st.metric(
+            "Model 1 Accuracy",
+            "53.26% Active",
+            "XGBoost v1 (39 Features)",
+            help="Walk-forward out-of-sample directional accuracy on 6,998 test hours."
+        )
+
+    with c6:
+        st.metric(
             "Model 2 Accuracy",
             "52.07% Shadow",
             "XGBoost v2 (Stationary)",
             help="Stationary return classifier out-of-sample directional accuracy."
         )
 
-    with c6:
+    with c7:
         st.metric(
             "Model 3 Accuracy",
             "52.89% Candidate",
             "LightGBM v3 (Stationary)",
-            help="Candidate LightGBM v3 out-of-sample directional accuracy (Optuna walk-forward, MAE $394.88 vs Model 1 $396.22)."
+            help="Candidate LightGBM v3 (29 stationary features + Platt calibration): 52.89% accuracy, 0.6913 log-loss, 0.2491 Brier, 0.5381 ROC-AUC, +0.0211 Spearman IC."
         )
 
 st.divider()
