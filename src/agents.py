@@ -5,10 +5,6 @@ Combines LangGraph Council (Analyst -> Strategist -> Risk Critic) with ChromaDB 
 """
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-try:
-    import onnxruntime
-except Exception:
-    pass
 
 import json
 import logging
@@ -83,7 +79,7 @@ ALLOWED_TRADE_ACTIONS = ("HOLD", "BUY", "SELL")
 GEMINI_MODEL_CANDIDATES = ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash")
 
 # ---------------------------------------------------------------------------
-# 1. EPISODIC RAG & CHROMADB MEMORY (IBM RAG & Agentic AI Certification)
+# 1. Episodic RAG Memory (ChromaDB)
 # ---------------------------------------------------------------------------
 
 def _read_raw_gemini_api_key() -> Optional[str]:
@@ -135,7 +131,7 @@ FOUNDATIONAL_KNOWLEDGE = [
     {"id": "taker_ratio", "doc": "High Taker Buy Ratio signals aggressive buying; low ratios indicate seller dominance.", "category": "microstructure"},
     {"id": "momentum_return", "doc": "Positive 6-hour mean return with expanding volatility confirms trend continuation.", "category": "trend"},
     {"id": "macro_liquidity", "doc": "Fed rate cuts and QE expand liquidity, serving as historical macro tailwinds for Bitcoin.", "category": "macro"},
-    {"id": "etf_flows", "doc": "Sustained net Spot Bitcoin ETF inflows absorb miner issuance, establishing support floors.", "category": "institutional"},
+    {"id": "etf_flows", "doc": "Sustained net Spot Bitcoin ETF inflows absorb miner issuance, establishing support floors.", "category": "liquidity"},
     {"id": "fear_greed", "doc": "Extreme Fear (<25) often marks local bottoms; Extreme Greed (>75) indicates euphoric liquidation risk.", "category": "sentiment"},
     {"id": "onchain_activity", "doc": "Surges in on-chain transaction volume and miner hashrate precede major volatility expansions.", "category": "onchain"},
     {"id": "rsi_reversion", "doc": "Hourly RSI >70 indicates overbought conditions with mean-reversion pullback risk.", "category": "technical"},
@@ -402,9 +398,58 @@ def query_macro_sentiment_rag(query: str = "Bitcoin macroeconomic market sentime
             parts.append(" | ".join(docs))
         if err_memories:
             parts.append("Recent Error Memory: " + " ; ".join(err_memories))
-        return " || ".join(parts) if parts else "Market regime: Standard institutional spot ETF liquidity."
+        return " || ".join(parts) if parts else "Market regime: Standard spot BTC liquidity."
     except Exception as e:
         return f"Macro context unavailable (ChromaDB offline): {str(e)}"
+
+
+def fetch_mcp_context(limit: int = 3) -> Dict[str, Any]:
+    # fetches live derivatives funding pulse and recent error memories from MCP tools
+    try:
+        from src.mcp_server import get_live_btc_derivatives_pulse, get_recent_prediction_error_memories
+        pulse = get_live_btc_derivatives_pulse()
+        errs = get_recent_prediction_error_memories(limit=limit)
+        return {
+            "status": "success",
+            "funding_rate_8h_pct": float(pulse.get("funding_rate_8h_pct", 0.01)),
+            "derivatives_regime": str(pulse.get("derivatives_regime", "Neutral Funding")),
+            "futures_basis_usd": float(pulse.get("futures_basis_usd", 0.0)),
+            "recent_error_memories": errs if isinstance(errs, list) else [],
+        }
+    except Exception:
+        return {
+            "status": "fallback",
+            "funding_rate_8h_pct": 0.0100,
+            "derivatives_regime": "Neutral Funding (Offline Fallback)",
+            "futures_basis_usd": 0.0,
+            "recent_error_memories": [],
+        }
+
+
+def get_multi_model_consensus(features: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    # computes direction consensus across loaded models without mutating forecast return
+    if not features or not isinstance(features, dict):
+        return {"summary": "Consensus unavailable", "up_count": 0, "down_count": 0, "total": 0}
+    try:
+        from src.model_loader import get_registered_models
+        models = get_registered_models()
+        votes: Dict[str, str] = {}
+        for ver, info in models.items():
+            req_f = info.get("features", [])
+            if req_f and all(k in features for k in req_f):
+                inp = pd.DataFrame([{k: features[k] for k in req_f}])
+                if info.get("regressor") is not None:
+                    pred_r = float(info["regressor"].predict(inp)[0])
+                    votes[ver] = "UP" if pred_r >= 0 else "DOWN"
+        if not votes:
+            return {"summary": "Model consensus unavailable", "up_count": 0, "down_count": 0, "total": 0}
+        up = sum(1 for v in votes.values() if v == "UP")
+        down = sum(1 for v in votes.values() if v == "DOWN")
+        detail_str = ", ".join(f"{v}: {d}" for v, d in sorted(votes.items()))
+        summary = f"{up}/{len(votes)} Models Bullish ({detail_str})"
+        return {"summary": summary, "up_count": up, "down_count": down, "total": len(votes), "votes": votes}
+    except Exception:
+        return {"summary": "Model consensus offline", "up_count": 0, "down_count": 0, "total": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -420,6 +465,8 @@ class AgentState(TypedDict, total=False):
     ml_forecast: Dict[str, Any]
     rag_context: str
     tools_called: List[str]
+    mcp_context: Optional[Dict[str, Any]]
+    model_consensus: Optional[str]
     strategist_thesis: Optional[str]
     trade_action: Optional[Literal["BUY", "SELL", "HOLD"]]
     conviction_score: Optional[int]
@@ -458,6 +505,8 @@ def create_initial_agent_state(
         "ml_forecast": ml_forecast or {},
         "rag_context": "",
         "tools_called": [],
+        "mcp_context": {},
+        "model_consensus": "",
         "strategist_thesis": None,
         "trade_action": None,
         "conviction_score": None,
@@ -618,7 +667,7 @@ def strategist_node(state: AgentState) -> AgentState:
         if vol_spread > 3.8:
             query = f"{symbol} extreme volatility liquidation flush cascade risk"
         elif clears_hurdle and taker_ratio >= 0.52:
-            query = f"{symbol} bullish momentum spot ETF inflows institutional accumulation"
+            query = f"{symbol} bullish momentum spot ETF inflows liquidity expansion"
         elif taker_ratio < 0.48:
             query = f"{symbol} distribution selling pressure retail fear capitulation"
         else:
@@ -626,6 +675,14 @@ def strategist_node(state: AgentState) -> AgentState:
 
         state["rag_context"] = query_macro_sentiment_rag.invoke({"query": query})
         state["tools_called"].append("query_macro_sentiment_rag")
+
+    if not state.get("mcp_context"):
+        state["mcp_context"] = fetch_mcp_context(limit=3)
+        state["tools_called"].append("fetch_mcp_context")
+
+    if not state.get("model_consensus"):
+        mc = get_multi_model_consensus(state.get("engineered_features", {}))
+        state["model_consensus"] = mc.get("summary", "Consensus unavailable")
 
     if not state.get("timestamp"):
         state["timestamp"] = datetime.now(timezone.utc).isoformat()
@@ -641,9 +698,15 @@ def strategist_node(state: AgentState) -> AgentState:
     api_key = _get_gemini_api_key()
     if api_key:
         try:
+            mcp_data = state.get("mcp_context") or {}
+            fund_rate = mcp_data.get("funding_rate_8h_pct", 0.01)
+            deriv_regime = mcp_data.get("derivatives_regime", "Neutral")
+            consensus = state.get("model_consensus", "N/A")
             prompt = f"""You are the Lead Quantitative Strategist at Mudra. Return strict JSON:
 - Symbol: {symbol} | Price: ${state['current_price']:,.2f}
 - XGBoost Return: {pred_return:+.4f}% (${pred_move:+,.2f}) | Direction: {direction} ({direction_badge}) | Up Prob: {prob_up:.1f}%
+- Multi-Model Consensus: {consensus}
+- Derivatives Pulse: Funding {fund_rate:.4f}% ({deriv_regime})
 - Fee Hurdle: {'CLEARED' if clears_hurdle else 'SUB-HURDLE'} | Taker Ratio: {taker_ratio:.4f}
 - Context: {state['rag_context'][:450]}
 JSON Keys: trade_action (BUY/SELL/HOLD), conviction_score (1-10), executive_summary, strategist_thesis"""
@@ -670,10 +733,12 @@ JSON Keys: trade_action (BUY/SELL/HOLD), conviction_score (1-10), executive_summ
         action, conviction = "HOLD", 4
         summary = f"Chop / sub-hurdle: Expected move ({pred_return:+.4f}%) does not justify {ROUND_TRIP_FRICTION_PCT:.2f}% friction ({TOTAL_FRICTION_PER_SIDE_PCT:.2f}% per side). Cash preserved."
 
+    consensus_txt = state.get("model_consensus", "N/A")
+    mcp_txt = state.get("mcp_context", {}).get("derivatives_regime", "Neutral")
     state["trade_action"] = action
     state["conviction_score"] = conviction
     state["executive_summary"] = summary
-    state["strategist_thesis"] = f"Strategist Rule Signal: {action} ({conviction}/10). XGBoost forecasts ${pred_move:+,.2f} ({pred_return:+.4f}%). Taker ratio: {taker_ratio:.4f}. Fee-hurdle: {clears_hurdle}."
+    state["strategist_thesis"] = f"Strategist Rule Signal: {action} ({conviction}/10). XGBoost: ${pred_move:+,.2f} ({pred_return:+.4f}%). Consensus: {consensus_txt}. Derivatives: {mcp_txt}. Taker: {taker_ratio:.4f}. Hurdle: {clears_hurdle}."
     return state
 
 
@@ -856,4 +921,8 @@ def run_trading_graph(
         or final_state.get("executive_summary")
         or "Thesis unavailable."
     )
+    if "mcp_context" not in final_state:
+        final_state["mcp_context"] = initial_state.get("mcp_context", {})
+    if "model_consensus" not in final_state:
+        final_state["model_consensus"] = initial_state.get("model_consensus", "")
     return final_state
