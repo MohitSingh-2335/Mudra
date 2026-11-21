@@ -8,7 +8,7 @@ from sqlalchemy.orm import sessionmaker
 import config
 from config import ACTIVE_MODEL_VERSION, FEATURE_SCHEMA_VERSION
 from src.database import (
-    CANONICAL_TABLE_COLUMNS, Base, MarketTick, ModelRegistry, init_db,
+    CANONICAL_TABLE_COLUMNS, Base, HourlyPostmortem, MarketTick, ModelPrediction, ModelRegistry, init_db,
 )
 from src.engine import execute_paper_order, get_portfolio_summary, reconcile_pending_ticks
 from scripts.migrate_db import BASELINE_MODEL_SPEC, run_migration
@@ -129,6 +129,71 @@ def test_migrate_db_seed_hashes():
         assert hashlib.sha256(reg_path.read_bytes()).hexdigest() == expected_reg_sha
     if clf_path.exists():
         assert hashlib.sha256(clf_path.read_bytes()).hexdigest() == expected_clf_sha
+
+
+def test_direction_and_return_independence(in_memory_db):
+    # verifies classifier direction and regressor return can diverge freely
+    session = in_memory_db[0]
+    tick = MarketTick(
+        timestamp=datetime.now(timezone.utc), open=65000.0, high=65500.0, low=64800.0, close=65100.0,
+        volume=100.0, model_version="xgb_candidate_v2.0.0", feature_schema_version="v2_36stationary",
+        market_regime="SIDEWAYS_RANGE",
+    )
+    session.add(tick)
+    session.flush()
+
+    pred = ModelPrediction(
+        tick_id=tick.id,
+        model_version="xgb_candidate_v2.0.0",
+        run_mode="SHADOW",
+        is_canonical=True,
+        is_primary=False,
+        feature_schema_version="v2_36stationary",
+        predicted_return_pct=-0.045,
+        predicted_price_1h=65070.0,
+        direction_predicted="UP",
+        direction_prob_up=0.523,
+        clears_hurdle=False,
+        diagnosis_summary="Classifier bullish but expected move sub-hurdle.",
+    )
+    session.add(pred)
+    session.commit()
+
+    saved = session.query(ModelPrediction).filter_by(tick_id=tick.id).first()
+    assert saved is not None
+    assert saved.direction_predicted == "UP"
+    assert saved.predicted_return_pct == -0.045
+    assert saved.diagnosis_summary == "Classifier bullish but expected move sub-hurdle."
+
+
+def test_hourly_postmortem_lifecycle(in_memory_db):
+    # verifies hourly postmortem table persistence and retrieval
+    session = in_memory_db[0]
+    tick = MarketTick(
+        timestamp=datetime.now(timezone.utc), open=65000.0, high=65500.0, low=64800.0, close=65100.0,
+        volume=100.0, model_version="xgb_onnx_v1.0.0", feature_schema_version="v1_39stationary",
+        market_regime="SIDEWAYS_RANGE",
+    )
+    session.add(tick)
+    session.flush()
+
+    pm = HourlyPostmortem(
+        tick_id=tick.id,
+        news_headlines=["Bitcoin holds support amid calm derivatives funding."],
+        feature_snapshot={"close": 65100.0, "volatility_range_pct": 1.05},
+        gemini_full_analysis={"market_summary": "Sideways chop with neutral funding."},
+        gemini_status="OK",
+        error_detail=None,
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(pm)
+    session.commit()
+
+    retrieved = session.query(HourlyPostmortem).filter_by(tick_id=tick.id).first()
+    assert retrieved is not None
+    assert retrieved.gemini_status == "OK"
+    assert len(retrieved.news_headlines) == 1
+    assert retrieved.feature_snapshot["close"] == 65100.0
 
 
 
