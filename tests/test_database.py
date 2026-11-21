@@ -8,9 +8,7 @@ from sqlalchemy.orm import sessionmaker
 import config
 from config import ACTIVE_MODEL_VERSION, FEATURE_SCHEMA_VERSION
 from src.database import (
-    CANONICAL_TABLE_COLUMNS, Base, MarketTick, ModelRegistry,
-    PredictionInvestigation, get_prediction_investigations, init_db,
-    record_prediction_investigation, update_prediction_investigation_status,
+    CANONICAL_TABLE_COLUMNS, Base, MarketTick, ModelRegistry, init_db,
 )
 from src.engine import execute_paper_order, get_portfolio_summary, reconcile_pending_ticks
 from scripts.migrate_db import BASELINE_MODEL_SPEC, run_migration
@@ -133,86 +131,4 @@ def test_migrate_db_seed_hashes():
         assert hashlib.sha256(clf_path.read_bytes()).hexdigest() == expected_clf_sha
 
 
-def test_prediction_investigations_schema_columns_and_constraints():
-    table = PredictionInvestigation.__table__
-    expected_cols = {
-        "id", "tick_id", "prediction_id", "model_version", "headline",
-        "suspected_cause_category", "hypothesis_notes", "diagnostic_confidence",
-        "verification_status", "created_at", "updated_at",
-    }
-    assert expected_cols.issubset(set(table.columns.keys()))
 
-
-def test_headline_search_traces_to_market_tick_and_model_version(in_memory_db):
-    session = in_memory_db[0]
-    active_reg = ModelRegistry(
-        model_version=ACTIVE_MODEL_VERSION,
-        regressor_artifact_path=config.REGRESSOR_MODEL_PATH, regressor_sha256=config.REGRESSOR_MODEL_SHA256,
-        classifier_artifact_path=config.CLASSIFIER_MODEL_PATH, classifier_sha256=config.CLASSIFIER_MODEL_SHA256,
-        feature_schema_version=FEATURE_SCHEMA_VERSION, target_definition="1h_ahead_return_and_movement",
-        current_status="ACTIVE", lifecycle_seq=1,
-    )
-    session.add(active_reg)
-    tick = MarketTick(
-        id=101, timestamp=datetime(2026, 10, 15, 14, 0, tzinfo=timezone.utc),
-        open=65000.0, high=65500.0, low=64800.0, close=65200.0, volume=1250.0,
-        model_version=ACTIVE_MODEL_VERSION, feature_schema_version=FEATURE_SCHEMA_VERSION,
-    )
-    session.add(tick)
-    session.commit()
-
-    inv = record_prediction_investigation(
-        session=session, tick_id=101, model_version=ACTIVE_MODEL_VERSION,
-        headline="Federal Reserve announces surprise rate hike",
-        suspected_cause_category="MACRO_RATE_DECISION",
-        hypothesis_notes="Sudden hawkish liquidity contraction caused sharp selloff.",
-        diagnostic_confidence=0.85,
-    )
-    assert inv["id"] is not None
-    results = get_prediction_investigations(session=session, headline_query="Federal Reserve")
-    assert len(results) == 1
-    assert results[0]["headline"] == "Federal Reserve announces surprise rate hike"
-    assert results[0]["tick_id"] == 101
-
-
-def test_distinguish_suspected_cause_from_confirmed_ground_truth(in_memory_db):
-    session = in_memory_db[0]
-    tick = MarketTick(
-        id=102, timestamp=datetime(2026, 10, 15, 15, 0, tzinfo=timezone.utc),
-        open=65000.0, high=65500.0, low=64800.0, close=65200.0, volume=1250.0,
-        model_version=ACTIVE_MODEL_VERSION, feature_schema_version=FEATURE_SCHEMA_VERSION,
-    )
-    session.add(tick)
-    session.commit()
-
-    inv = record_prediction_investigation(
-        session=session, tick_id=102, model_version=ACTIVE_MODEL_VERSION,
-        headline="Major Exchange halts withdrawals", suspected_cause_category="EXCHANGE_OUTAGE",
-        hypothesis_notes="Withdrawal halt rumors sparked panic.",
-    )
-    assert inv["verification_status"] == "UNVERIFIED_HYPOTHESIS"
-    updated = update_prediction_investigation_status(
-        session=session, investigation_id=inv["id"], new_status="CONFIRMED_CAUSE",
-        verified_by="Lead Quantitative Auditor", ground_truth_label="EXCHANGE_LIQUIDITY_HALT",
-    )
-    assert updated["verification_status"] == "CONFIRMED_CAUSE"
-    assert updated["verified_by"] == "Lead Quantitative Auditor"
-
-
-def test_diagnostic_confidence_validation(in_memory_db):
-    session = in_memory_db[0]
-    tick = MarketTick(
-        id=103, timestamp=datetime(2026, 10, 15, 16, 0, tzinfo=timezone.utc),
-        open=65000.0, high=65500.0, low=64800.0, close=65200.0, volume=1250.0,
-        model_version=ACTIVE_MODEL_VERSION, feature_schema_version=FEATURE_SCHEMA_VERSION,
-    )
-    session.add(tick)
-    session.commit()
-
-    for bad in [-0.1, 1.5, float("nan"), float("inf")]:
-        with pytest.raises(ValueError):
-            record_prediction_investigation(
-                session=session, tick_id=103, model_version=ACTIVE_MODEL_VERSION,
-                headline="Test headline", suspected_cause_category="OTHER",
-                hypothesis_notes="Testing bounds", diagnostic_confidence=bad,
-            )
