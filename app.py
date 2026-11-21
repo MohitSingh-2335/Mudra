@@ -13,7 +13,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 ROOT_DIR = Path(__file__).resolve().parent
 if str(ROOT_DIR) not in sys.path:
@@ -803,6 +803,122 @@ def generate_m3_forecast(live_df: pd.DataFrame, m3_reg: Any, m3_clf: Any) -> Opt
         return None
 
 
+def generate_candidate_forecast(live_df: pd.DataFrame, model_spec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    # generates live next-hour target and direction for any registered model spec
+    if live_df is None or live_df.empty or not model_spec or len(live_df) < 35:
+        return None
+    try:
+        from src.feature_engineering import extract_features_for_inference
+        reg_model = model_spec.get("regressor")
+        clf_model = model_spec.get("classifier")
+        if reg_model is None:
+            return None
+        c_feats = model_spec.get("features", [])
+        f_dict = extract_features_for_inference(live_df)
+        if not c_feats or not all(k in f_dict for k in c_feats):
+            return None
+        inp = pd.DataFrame([{k: f_dict[k] for k in c_feats}])
+        pred_ret = float(reg_model.predict(inp)[0])
+        curr_price = float(live_df["close"].iloc[-1])
+        pred_move = curr_price * pred_ret
+
+        prob_up, prob_down = 50.0, 50.0
+        pred_dir = "UP" if pred_ret >= 0.0 else "DOWN"
+        if clf_model is not None:
+            if hasattr(clf_model, "predict_proba"):
+                probs = clf_model.predict_proba(inp)[0]
+                prob_down, prob_up = float(probs[0]) * 100.0, float(probs[1]) * 100.0
+                pred_dir = "UP" if prob_up >= 50.0 else "DOWN"
+            elif hasattr(clf_model, "predict"):
+                pred_c = int(clf_model.predict(inp)[0])
+                pred_dir = "UP" if pred_c == 1 else "DOWN"
+                prob_up, prob_down = (60.0, 40.0) if pred_c == 1 else (40.0, 60.0)
+
+        return {
+            "pred_target": curr_price + pred_move,
+            "pred_dollar_move": pred_move,
+            "pred_ret_pct": pred_ret * 100.0,
+            "direction_label": pred_dir,
+            "prob_up": prob_up,
+            "prob_down": prob_down,
+        }
+    except Exception:
+        return None
+
+
+def format_model_display_name(model_version: str) -> str:
+    # formats model version string into friendly display name with dynamic fallback
+    m_str = str(model_version or "").strip()
+    mapping = {
+        "xgb_onnx_v1.0.0": "Model 1 (xgb_onnx_v1.0.0)",
+        "xgb_v1": "Model 1 (xgb_onnx_v1.0.0)",
+        "xgb_v2.0.0": "Model 2 (xgb_v2.0.0)",
+        "lgbm_v3.0.0": "Model 3 (lgbm_v3.0.0)",
+    }
+    if m_str in mapping:
+        return mapping[m_str]
+    if "v1" in m_str:
+        return f"Model 1 ({m_str})"
+    if "v2" in m_str:
+        return f"Model 2 ({m_str})"
+    if "v3" in m_str or "lgbm" in m_str:
+        return f"Model 3 ({m_str})"
+    return m_str
+
+
+def sort_models_for_display(registered_dict: Dict[str, Dict[str, Any]]) -> List[Tuple[str, Dict[str, Any]]]:
+    # sorts models so active model comes first, followed in numerical version order
+    def sort_key(item):
+        ver, spec = item
+        v = str(ver).lower()
+        if "v1" in v or spec.get("status") == "ACTIVE":
+            order = 1
+        elif "v2" in v:
+            order = 2
+        elif "v3" in v:
+            order = 3
+        elif "v4" in v:
+            order = 4
+        elif "v5" in v:
+            order = 5
+        else:
+            order = 99
+        return (order, ver)
+    return sorted(registered_dict.items(), key=sort_key)
+
+
+def get_model_card_title(model_version: str, spec: Dict[str, Any]) -> str:
+    # returns card header title for a given model version
+    ver = str(model_version).strip()
+    if ver in ("xgb_onnx_v1.0.0", "xgb_v1"):
+        return "Model 1 (Active XGBoost v1)"
+    if ver == "xgb_v2.0.0":
+        return "Model 2 (Shadow XGBoost v2)"
+    if ver == "lgbm_v3.0.0":
+        return "Model 3 (Candidate LightGBM v3)"
+    disp = format_model_display_name(ver)
+    tag = "Active" if spec.get("status") == "ACTIVE" else "Candidate"
+    return f"{disp} ({tag})"
+
+
+def get_model_benchmark_caption(model_version: str, spec: Dict[str, Any]) -> str:
+    # returns holdout benchmark caption line for a given model
+    ver = str(model_version).strip()
+    if ver in ("xgb_onnx_v1.0.0", "xgb_v1"):
+        return "Benchmark: **53.26%** Accuracy · 0.6914 Log-Loss · 39 Features"
+    if ver == "xgb_v2.0.0":
+        return "Benchmark: **52.07%** Accuracy · 0.6926 Log-Loss · 36 Stationary Features"
+    if ver == "lgbm_v3.0.0":
+        return "Benchmark: **52.89%** Accuracy · 0.6913 Log-Loss · 29 Stationary Features + Platt"
+    met = spec.get("metrics", {})
+    n_feats = len(spec.get("features", []))
+    acc = f"{met['holdout_accuracy']*100:.2f}%" if "holdout_accuracy" in met else None
+    ll = f"{met['holdout_log_loss']:.4f}" if "holdout_log_loss" in met else None
+    if acc and ll:
+        return f"Benchmark: **{acc}** Accuracy · {ll} Log-Loss · {n_feats} Features"
+    return f"Candidate Model · {n_feats} Features"
+
+
 def format_risk_levels(action: str, verdict: str, current_price: float, council_state: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
     c_state = council_state or {}
     act = str(action).upper().strip()
@@ -1068,53 +1184,58 @@ with st.container(border=True):
 
     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
 
-    # 3-Column Dual-Output Model Predictions Row (Model 1 · Model 2 · Model 3)
-    pred_c1, pred_c2, pred_c3 = st.columns(3)
+    # Dynamic Dual-Output Model Predictions Row (Discovered dynamically across all registered models)
+    try:
+        from src.model_loader import get_registered_models
+        registered_models = get_registered_models()
+    except Exception:
+        registered_models = {}
 
-    with pred_c1:
-        if forecast_result:
-            m1_dir = forecast_result.get("direction_label", "HOLD")
-            m1_p_up = forecast_result.get("prob_up", 50.0)
-            m1_ret = forecast_result.get("pred_ret_pct", 0.0)
-            st.metric(
-                "Model 1 (Active XGBoost v1)",
-                f"${forecast_result['pred_target']:,.2f}",
-                f"{m1_dir} ({m1_ret:+.2f}%) • P(UP): {m1_p_up:.1f}%",
-                help="Active XGBoost v1 model: Regressor next-hour target price and classifier direction probability."
-            )
-        else:
-            st.metric("Model 1 (Active XGBoost v1)", "Computing...", "Awaiting Candle", help="Model 1 forecast is calculating.")
-        st.caption("Benchmark: **53.26%** Accuracy · 0.6914 Log-Loss · 39 Features")
+    if registered_models:
+        sorted_models = sort_models_for_display(registered_models)
+        model_cols = st.columns(len(sorted_models))
+        for col, (m_ver, m_spec) in zip(model_cols, sorted_models):
+            with col:
+                card_title = get_model_card_title(m_ver, m_spec)
+                bench_caption = get_model_benchmark_caption(m_ver, m_spec)
+                if (m_ver in ("xgb_onnx_v1.0.0", "xgb_v1") or m_spec.get("status") == "ACTIVE") and forecast_result:
+                    f_res = forecast_result
+                elif m_ver == "xgb_v2.0.0" and m2_forecast_result:
+                    f_res = m2_forecast_result
+                elif m_ver == "lgbm_v3.0.0" and m3_forecast_result:
+                    f_res = m3_forecast_result
+                else:
+                    f_res = generate_candidate_forecast(live_market_df, m_spec)
 
-    with pred_c2:
-        if m2_forecast_result:
-            m2_dir = m2_forecast_result.get("direction_label", "HOLD")
-            m2_p_up = m2_forecast_result.get("prob_up", 50.0)
-            m2_ret = m2_forecast_result.get("pred_ret_pct", 0.0)
-            st.metric(
-                "Model 2 (Shadow XGBoost v2)",
-                f"${m2_forecast_result['pred_target']:,.2f}",
-                f"{m2_dir} ({m2_ret:+.2f}%) • P(UP): {m2_p_up:.1f}%",
-                help="Shadow XGBoost v2 (Stationary Return): Regressor next-hour target price and classifier direction probability."
-            )
-        else:
-            st.metric("Model 2 (Shadow XGBoost v2)", "Standby", "Stationary Model", help="Shadow Model 2 forecast is on standby.")
-        st.caption("Benchmark: **52.07%** Accuracy · 0.6926 Log-Loss · 36 Stationary Features")
-
-    with pred_c3:
-        if m3_forecast_result:
-            m3_dir = m3_forecast_result.get("direction_label", "HOLD")
-            m3_p_up = m3_forecast_result.get("prob_up", 50.0)
-            m3_ret = m3_forecast_result.get("pred_ret_pct", 0.0)
-            st.metric(
-                "Model 3 (Candidate LightGBM v3)",
-                f"${m3_forecast_result['pred_target']:,.2f}",
-                f"{m3_dir} ({m3_ret:+.2f}%) • P(UP): {m3_p_up:.1f}%",
-                help="Candidate LightGBM v3 (29 stationary features + Platt calibration): Regressor next-hour target and direction probability."
-            )
-        else:
-            st.metric("Model 3 (Candidate LightGBM v3)", "Standby", "LightGBM Model", help="Candidate Model 3 forecast is on standby.")
-        st.caption("Benchmark: **52.89%** Accuracy · 0.6913 Log-Loss · 29 Stationary Features + Platt")
+                if f_res:
+                    f_dir = f_res.get("direction_label", "HOLD")
+                    f_p_up = f_res.get("prob_up", 50.0)
+                    f_ret = f_res.get("pred_ret_pct", 0.0)
+                    st.metric(
+                        card_title,
+                        f"${f_res['pred_target']:,.2f}",
+                        f"{f_dir} ({f_ret:+.2f}%) • P(UP): {f_p_up:.1f}%",
+                        help=f"{card_title}: Regressor next-hour target price and classifier direction probability."
+                    )
+                else:
+                    st.metric(card_title, "Standby", "Awaiting Data", help=f"{card_title} forecast is on standby.")
+                st.caption(bench_caption)
+    else:
+        # Fallback to single Active Model 1 card
+        with st.container():
+            if forecast_result:
+                m1_dir = forecast_result.get("direction_label", "HOLD")
+                m1_p_up = forecast_result.get("prob_up", 50.0)
+                m1_ret = forecast_result.get("pred_ret_pct", 0.0)
+                st.metric(
+                    "Model 1 (Active XGBoost v1)",
+                    f"${forecast_result['pred_target']:,.2f}",
+                    f"{m1_dir} ({m1_ret:+.2f}%) • P(UP): {m1_p_up:.1f}%",
+                    help="Active XGBoost v1 model: Regressor next-hour target price and classifier direction probability."
+                )
+            else:
+                st.metric("Model 1 (Active XGBoost v1)", "Computing...", "Awaiting Candle", help="Model 1 forecast is calculating.")
+            st.caption("Benchmark: **53.26%** Accuracy · 0.6914 Log-Loss · 39 Features")
 
 st.divider()
 
@@ -1134,11 +1255,8 @@ with tab_models:
         st.caption("Empirical holdout validation metrics comparing Active Model 1 (53.26%) alongside Shadow Models 2 (52.07%) & 3 (52.89%).")
 
         manifest_rows = []
-        manifest_files = [
-            ROOT_DIR / "artifacts" / "models" / "model_manifest.json",
-            ROOT_DIR / "artifacts" / "models" / "xgb_v2_manifest.json",
-            ROOT_DIR / "artifacts" / "models" / "lgbm_v3_manifest.json",
-        ]
+        models_dir = ROOT_DIR / "artifacts" / "models"
+        manifest_files = sorted(models_dir.glob("*manifest*.json")) if models_dir.exists() else []
         for mf in manifest_files:
             if mf.exists():
                 try:
@@ -1249,20 +1367,17 @@ with tab_ground_truth:
 
             st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
 
+            # Format Display Table
+            table_df = rec_df.copy()
+            table_df["Time (UTC)"] = pd.to_datetime(table_df["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
+            table_df["Model"] = table_df["model_version"].fillna("xgb_onnx_v1.0.0").apply(format_model_display_name)
+
             mf1, mf2 = st.columns([3, 1])
             with mf1:
                 st.caption("Delayed T+1h ground-truth verification: Compares what each AI model predicted against the real Bitcoin closing price 1 hour later.")
             with mf2:
-                model_options = ["All Models", "Model 1 (39 Feat)", "Model 2 (Stationary)", "Model 3 (LightGBM)"]
+                model_options = ["All Models"] + sorted(table_df["Model"].dropna().unique().tolist())
                 selected_model = st.selectbox("Filter Table by Model:", model_options, index=0)
-
-            # Format Display Table
-            table_df = rec_df.copy()
-            table_df["Time (UTC)"] = pd.to_datetime(table_df["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
-            table_df["Model"] = table_df["model_version"].fillna("xgb_v1").apply(
-                lambda m: "Model 3 (LightGBM)" if ("v3" in str(m) or "lgbm" in str(m))
-                else ("Model 2 (Stationary)" if "v2" in str(m) else "Model 1 (39 Feat)")
-            )
 
             if selected_model != "All Models":
                 table_df = table_df[table_df["Model"] == selected_model]
