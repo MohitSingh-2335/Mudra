@@ -588,6 +588,9 @@ def get_db() -> Generator[Session, None, None]:
         session.close()
 
 
+_TICK_ID_COLUMN_CACHE: Dict[int, bool] = {}
+
+
 def has_tick_id_column(session: Any = None) -> bool:
     # returns True as paper_portfolio table includes the canonical tick_id column
     return True
@@ -900,7 +903,7 @@ __all__ = [
     "normalize_pg_predicate", "ensure_canonical_function", "ensure_canonical_trigger",
     "verify_db_schema", "get_database_url", "create_db_engine", "engine",
     "SessionLocal", "get_db", "has_tick_id_column", "init_db",
-    "test_connection", "_classify_column_type",
+    "test_connection", "_classify_column_type", "_TICK_ID_COLUMN_CACHE",
     "get_latest_market_ticks", "get_reconciliation_history", "get_reconciliation_kpis",
     "get_portfolio_history", "get_portfolio_kpis", "get_latest_council_audit",
     "ALLOWED_VERIFICATION_STATUSES", "record_prediction_investigation", "get_prediction_investigations",
