@@ -146,7 +146,7 @@ from config import (
 )
 from src.agents import fetch_historical_candles, run_trading_graph
 from src.database import (
-    get_db, get_latest_council_audit, get_latest_market_ticks,
+    get_api_telemetry_summary, get_db, get_latest_council_audit, get_latest_market_ticks,
     get_portfolio_history, get_portfolio_kpis,
     get_reconciliation_history, get_reconciliation_kpis,
     test_connection,
@@ -1179,6 +1179,7 @@ def fetch_cloud_database_state(current_price: Optional[float]):
         "db_ok": False, "db_ver": "Offline", "db_lat": 0.0, "db_error": "Database unavailable",
         "ticks_df": pd.DataFrame(), "rec_df": pd.DataFrame(), "rec_kpis": {}, "latest_audit": None,
         "port_df": pd.DataFrame(), "port_kpis": {},
+        "api_telemetry": {"total_calls": 0, "success_rate_pct": 100.0, "avg_latency_ms": 0.0},
     }
     try:
         db_ok, db_ver, db_lat = test_connection()
@@ -1192,6 +1193,7 @@ def fetch_cloud_database_state(current_price: Optional[float]):
             "latest_audit": get_latest_council_audit(),
             "port_df": get_portfolio_history(limit=500),
             "port_kpis": get_portfolio_kpis(current_price=current_price or 90000.0),
+            "api_telemetry": get_api_telemetry_summary(hours=24),
         }
     except Exception as exc:
         fallback["db_error"] = str(exc)
@@ -1245,6 +1247,13 @@ elif not live_market_df.empty:
     st.sidebar.success("Market Feed: Live Binance Vision (1h)")
 else:
     st.sidebar.error("Market Feed: Offline")
+
+# 24h api telemetry health badge in sidebar
+api_tel_summary = db_state.get("api_telemetry", {})
+if api_tel_summary.get("total_calls", 0) > 0:
+    st.sidebar.caption(f"24h API Health: {api_tel_summary['success_rate_pct']:.1f}% OK · Avg {api_tel_summary['avg_latency_ms']:.0f}ms")
+else:
+    st.sidebar.caption("24h API Health: Collecting...")
 
 st.sidebar.markdown(
     """
