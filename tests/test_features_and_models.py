@@ -237,3 +237,41 @@ def test_dashboard_tab3_helpers(rec_db, monkeypatch):
     df_display = app.prepare_reconciliation_table_display(filtered)
     assert not df_display.empty
     assert "Model Version" in df_display.columns
+
+
+def test_model_3_feature_parity_and_loader_sha256_verification(sample_historical_candles):
+    # verifies Model 3 feature extraction completeness and SHA-256 integrity loading
+    import json
+    from src.model_loader import get_registered_models
+
+    manifest_path = Path("artifacts/models/lgbm_v3_manifest.json")
+    assert manifest_path.is_file()
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    required_features = manifest["features"]
+    assert len(required_features) == 29
+
+    # 1. extract_features_for_inference produces all 29 features with zero NaNs or infs
+    df = sample_historical_candles.copy()
+    inferred_features = extract_features_for_inference(df)
+    for feat in required_features:
+        assert feat in inferred_features, f"Missing required feature: {feat}"
+        val = inferred_features[feat]
+        assert not np.isnan(val), f"Feature {feat} contains NaN"
+        assert not np.isinf(val), f"Feature {feat} contains inf"
+
+    # 2. get_registered_models successfully verifies SHA-256 and loads lgbm_v3.0.0
+    models_dict = get_registered_models()
+    assert "lgbm_v3.0.0" in models_dict
+    m3_entry = models_dict["lgbm_v3.0.0"]
+    assert m3_entry["status"] == "SHADOW_CANDIDATE"
+    assert m3_entry["classifier"] is not None
+    assert m3_entry["regressor"] is not None
+
+    # Verify model prediction inference executes cleanly
+    sample_df = pd.DataFrame([{f: inferred_features[f] for f in required_features}])
+    pred_proba = m3_entry["classifier"].predict_proba(sample_df)
+    pred_ret = m3_entry["regressor"].predict(sample_df)
+    assert pred_proba.shape == (1, 2)
+    assert np.isfinite(pred_ret[0])
