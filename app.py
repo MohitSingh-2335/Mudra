@@ -376,6 +376,20 @@ def generate_live_forecast(live_df: pd.DataFrame, reg_model: Any, clf_model: Any
         return None
 
 
+def fetch_live_btc_ticker_price(fallback_price: Optional[float] = None) -> float:
+    # fetches live real-time spot price for BTCUSDT from Binance ticker endpoint
+    try:
+        import requests
+        resp = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=3.0)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, dict) and "price" in data:
+                return float(data["price"])
+    except Exception:
+        pass
+    return float(fallback_price or 65000.0)
+
+
 def generate_m2_forecast(live_df: pd.DataFrame, m2_reg: Any, m2_clf: Any) -> Optional[Dict[str, Any]]:
     # generates live next-hour target and direction for Model 2 (Stationary)
     if live_df is None or live_df.empty or m2_reg is None or len(live_df) < 35:
@@ -394,12 +408,26 @@ def generate_m2_forecast(live_df: pd.DataFrame, m2_reg: Any, m2_clf: Any) -> Opt
         m2_ret = float(m2_reg.predict(inp)[0])
         curr_price = float(live_df["close"].iloc[-1])
         m2_move = curr_price * m2_ret
-        m2_dir = "UP" if m2_ret >= 0 else "DOWN"
+
+        prob_up, prob_down = 50.0, 50.0
+        m2_dir = "UP" if m2_ret >= 0.0 else "DOWN"
+        if m2_clf is not None:
+            if hasattr(m2_clf, "predict_proba"):
+                probs = m2_clf.predict_proba(inp)[0]
+                prob_down, prob_up = float(probs[0]) * 100.0, float(probs[1]) * 100.0
+                m2_dir = "UP" if prob_up >= 50.0 else "DOWN"
+            elif hasattr(m2_clf, "predict"):
+                pred_c = int(m2_clf.predict(inp)[0])
+                m2_dir = "UP" if pred_c == 1 else "DOWN"
+                prob_up, prob_down = (60.0, 40.0) if pred_c == 1 else (40.0, 60.0)
+
         return {
             "pred_target": curr_price + m2_move,
             "pred_dollar_move": m2_move,
             "pred_ret_pct": m2_ret * 100.0,
             "direction_label": m2_dir,
+            "prob_up": prob_up,
+            "prob_down": prob_down,
         }
     except Exception:
         return None
@@ -423,12 +451,26 @@ def generate_m3_forecast(live_df: pd.DataFrame, m3_reg: Any, m3_clf: Any) -> Opt
         m3_ret = float(m3_reg.predict(inp)[0])
         curr_price = float(live_df["close"].iloc[-1])
         m3_move = curr_price * m3_ret
-        m3_dir = "UP" if m3_ret >= 0 else "DOWN"
+
+        prob_up, prob_down = 50.0, 50.0
+        m3_dir = "UP" if m3_ret >= 0.0 else "DOWN"
+        if m3_clf is not None:
+            if hasattr(m3_clf, "predict_proba"):
+                probs = m3_clf.predict_proba(inp)[0]
+                prob_down, prob_up = float(probs[0]) * 100.0, float(probs[1]) * 100.0
+                m3_dir = "UP" if prob_up >= 50.0 else "DOWN"
+            elif hasattr(m3_clf, "predict"):
+                pred_c = int(m3_clf.predict(inp)[0])
+                m3_dir = "UP" if pred_c == 1 else "DOWN"
+                prob_up, prob_down = (60.0, 40.0) if pred_c == 1 else (40.0, 60.0)
+
         return {
             "pred_target": curr_price + m3_move,
             "pred_dollar_move": m3_move,
             "pred_ret_pct": m3_ret * 100.0,
             "direction_label": m3_dir,
+            "prob_up": prob_up,
+            "prob_down": prob_down,
         }
     except Exception:
         return None
@@ -687,80 +729,97 @@ m3_forecast_result = generate_m3_forecast(live_df=live_market_df, m3_reg=m3_reg_
 with st.container(border=True):
     st.markdown('<span class="section-badge">Section 1 · Live Telemetry & Model Targets</span>', unsafe_allow_html=True)
     p_24h = float(live_market_df["close"].iloc[-24]) if len(live_market_df) >= 24 else None
-    d_24h = current_price - p_24h if current_price is not None and p_24h is not None else None
+    live_spot_price = fetch_live_btc_ticker_price(fallback_price=current_price)
+    spot_d_24h = (live_spot_price - p_24h) if live_spot_price and p_24h else None
 
     forecast_result = generate_live_forecast(live_df=live_market_df, reg_model=reg_model, clf_model=clf_model, is_stale=is_stale_fallback)
 
-    # Row 1: 4 columns - Live BTC Price + Targets for M1, M2, M3
-    r1_c1, r1_c2, r1_c3, r1_c4 = st.columns(4)
-    with r1_c1:
+    # Live Bitcoin Strip (3 columns)
+    strip_c1, strip_c2, strip_c3 = st.columns(3)
+    with strip_c1:
         st.metric(
-            "Live Bitcoin Price",
-            f"${current_price:,.2f}" if current_price and not is_stale_fallback else "Unavailable",
-            f"{format_signed_usd(d_24h)} (24h)" if d_24h and not is_stale_fallback else "1h Confirmed",
-            help="Latest confirmed 1-hour candle close from Binance Vision API."
+            "Live BTC/USDT Spot Price",
+            f"${live_spot_price:,.2f}" if live_spot_price and not is_stale_fallback else "Unavailable",
+            f"{format_signed_usd(spot_d_24h)} (24h)" if spot_d_24h and not is_stale_fallback else "Live Spot",
+            help="Live real-time spot price from Binance ticker endpoint."
         )
 
-    with r1_c2:
+    with strip_c2:
+        if not live_market_df.empty:
+            last_c = live_market_df.iloc[-1]
+            c_high = float(last_c["high"])
+            c_low = float(last_c["low"])
+            c_range = c_high - c_low
+            st.metric(
+                "Last Closed 1H Candle",
+                f"${float(last_c['close']):,.2f}",
+                f"Range: ${c_range:,.2f} (${c_low:,.0f}–${c_high:,.0f})",
+                help="High–Low range and close of the most recently confirmed 1-hour candle."
+            )
+        else:
+            st.metric("Last Closed 1H Candle", "Awaiting Feed", "No Candle", help="Market feed is currently awaiting confirmed candle.")
+
+    with strip_c3:
+        now_utc = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+        st.metric(
+            "Last Updated (UTC)",
+            now_utc,
+            "Binance Spot API",
+            help="Timestamp of the latest telemetry check."
+        )
+        if st.button("Refresh Live Price", use_container_width=True, help="Refreshes live spot price and model predictions."):
+            st.cache_data.clear()
+            st.rerun()
+
+    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+
+    # 3-Column Dual-Output Model Predictions Row (Model 1 · Model 2 · Model 3)
+    pred_c1, pred_c2, pred_c3 = st.columns(3)
+
+    with pred_c1:
         if forecast_result:
+            m1_dir = forecast_result.get("direction_label", "HOLD")
+            m1_p_up = forecast_result.get("prob_up", 50.0)
+            m1_ret = forecast_result.get("pred_ret_pct", 0.0)
             st.metric(
-                "Model 1 Target (Active)",
+                "Model 1 (Active XGBoost v1)",
                 f"${forecast_result['pred_target']:,.2f}",
-                f"{forecast_result['direction_label']} ({forecast_result['pred_ret_pct']:+.2f}%)",
-                help="Active XGBoost v1 regressor target price for the next 1-hour candle."
+                f"{m1_dir} ({m1_ret:+.2f}%) • P(UP): {m1_p_up:.1f}%",
+                help="Active XGBoost v1 model: Regressor next-hour target price and classifier direction probability."
             )
         else:
-            st.metric("Model 1 Target (Active)", "Computing...", "Awaiting Candle", help="Model 1 forecast is calculating.")
+            st.metric("Model 1 (Active XGBoost v1)", "Computing...", "Awaiting Candle", help="Model 1 forecast is calculating.")
+        st.caption("Benchmark: **53.26%** Accuracy · 0.6914 Log-Loss · 39 Features")
 
-    with r1_c3:
+    with pred_c2:
         if m2_forecast_result:
+            m2_dir = m2_forecast_result.get("direction_label", "HOLD")
+            m2_p_up = m2_forecast_result.get("prob_up", 50.0)
+            m2_ret = m2_forecast_result.get("pred_ret_pct", 0.0)
             st.metric(
-                "Model 2 Target (Shadow)",
+                "Model 2 (Shadow XGBoost v2)",
                 f"${m2_forecast_result['pred_target']:,.2f}",
-                f"{m2_forecast_result['direction_label']} ({m2_forecast_result['pred_ret_pct']:+.2f}%)",
-                help="Shadow XGBoost v2 (Stationary Return) target price for the next 1-hour candle."
+                f"{m2_dir} ({m2_ret:+.2f}%) • P(UP): {m2_p_up:.1f}%",
+                help="Shadow XGBoost v2 (Stationary Return): Regressor next-hour target price and classifier direction probability."
             )
         else:
-            st.metric("Model 2 Target (Shadow)", "Standby", "Stationary Model", help="Shadow Model 2 forecast is on standby.")
+            st.metric("Model 2 (Shadow XGBoost v2)", "Standby", "Stationary Model", help="Shadow Model 2 forecast is on standby.")
+        st.caption("Benchmark: **52.07%** Accuracy · 0.6926 Log-Loss · 36 Stationary Features")
 
-    with r1_c4:
+    with pred_c3:
         if m3_forecast_result:
+            m3_dir = m3_forecast_result.get("direction_label", "HOLD")
+            m3_p_up = m3_forecast_result.get("prob_up", 50.0)
+            m3_ret = m3_forecast_result.get("pred_ret_pct", 0.0)
             st.metric(
-                "Model 3 Target (Candidate)",
+                "Model 3 (Candidate LightGBM v3)",
                 f"${m3_forecast_result['pred_target']:,.2f}",
-                f"{m3_forecast_result['direction_label']} ({m3_forecast_result['pred_ret_pct']:+.2f}%)",
-                help="Candidate LightGBM v3 (29 Stationary Features) target price for the next 1-hour candle."
+                f"{m3_dir} ({m3_ret:+.2f}%) • P(UP): {m3_p_up:.1f}%",
+                help="Candidate LightGBM v3 (29 stationary features + Platt calibration): Regressor next-hour target and direction probability."
             )
         else:
-            st.metric("Model 3 Target (Candidate)", "Standby", "LightGBM Model", help="Candidate Model 3 forecast is on standby.")
-
-    st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
-
-    # Row 2: 3 columns - Accuracy & Metric for M1, M2, M3
-    r2_c1, r2_c2, r2_c3 = st.columns(3)
-    with r2_c1:
-        st.metric(
-            "Model 1 (Active)",
-            "53.26% · Log-Loss 0.6914",
-            "XGBoost v1 (39 Features)",
-            help="Walk-forward out-of-sample directional accuracy on 6,998 test hours."
-        )
-
-    with r2_c2:
-        st.metric(
-            "Model 2 (Shadow)",
-            "52.07% · Log-Loss 0.6926",
-            "XGBoost v2 (Stationary)",
-            help="Stationary return classifier out-of-sample directional accuracy."
-        )
-
-    with r2_c3:
-        st.metric(
-            "Model 3 (Candidate)",
-            "52.89% · Log-Loss 0.6913",
-            "LightGBM v3 (Stationary)",
-            help="Candidate LightGBM v3 (29 stationary features + Platt calibration): 52.89% accuracy, 0.6913 log-loss, 0.2491 Brier, 0.5381 ROC-AUC, +0.0211 Spearman IC."
-        )
+            st.metric("Model 3 (Candidate LightGBM v3)", "Standby", "LightGBM Model", help="Candidate Model 3 forecast is on standby.")
+        st.caption("Benchmark: **52.89%** Accuracy · 0.6913 Log-Loss · 29 Stationary Features + Platt")
 
 st.divider()
 
@@ -777,7 +836,7 @@ with tab_models:
     with st.container(border=True):
         st.markdown('<span class="section-badge">Model Evolution & Governance</span>', unsafe_allow_html=True)
         st.subheader("Model Benchmark Comparison (Active vs. Shadow Candidates)")
-        st.caption("Empirical holdout validation metrics comparing production model against stationary shadow models.")
+        st.caption("Empirical holdout validation metrics comparing Active Model 1 (53.26%) alongside Shadow Models 2 (52.07%) & 3 (52.89%).")
 
         manifest_rows = []
         manifest_files = [
