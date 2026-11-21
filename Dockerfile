@@ -24,6 +24,7 @@ COPY app.py .
 COPY src/ ./src/
 COPY artifacts/ ./artifacts/
 COPY data/processed/ ./data/processed/
+COPY docs/images/ ./docs/images/
 
 # Run as non-root user
 RUN useradd -m -u 1000 mudrauser && \
@@ -39,5 +40,4 @@ CMD ["streamlit", "run", "app.py", \
      "--server.port=8501", \
      "--server.address=0.0.0.0", \
      "--server.headless=true", \
-     "--server.enableCORS=false", \
-     "--server.enableXsrfProtection=false"]
+     "--server.enableCORS=false"]
