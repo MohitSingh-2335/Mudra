@@ -1403,6 +1403,9 @@ with tab_ground_truth:
                 st.warning("Streamlit Cloud is currently reading from local fallback storage (0 records). To load all continuous ground-truth predictions from Neon PostgreSQL, add DATABASE_URL to your Streamlit Cloud Secrets.")
             else:
                 st.info("No historical reconciliation records found in database. Hourly worker logs will populate here continuously.")
+                if st.button("Reload Ground Truth Data", help="Clears local Streamlit cache and re-queries Neon PostgreSQL"):
+                    st.cache_data.clear()
+                    st.rerun()
 
 # Tab 3: Paper Portfolio & Charts
 with tab_portfolio:
