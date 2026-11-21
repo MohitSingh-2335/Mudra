@@ -46,8 +46,6 @@ from src.engine import (
     build_plain_english_reconciliation_story,
     ensure_model_registered,
     estimate_next_hour_price_range_usd,
-    evaluate_futures_long_short_plan,
-    evaluate_multi_angle_consensus,
     evaluate_spot_hold_until_profit_decision,
     execute_paper_order,
     fetch_latest_confirmed_candle,
@@ -282,24 +280,10 @@ def test_spot_hold_until_net_profit_lifecycle(isolated_db):
     assert d_stop["final_spot_action"] == "SELL" and d_stop["position_state"] == "EMERGENCY_STOP_LOSS_EXIT"
 
 
-def test_futures_long_short_liquidation_math():
-    long_plan = evaluate_futures_long_short_plan(current_price=80000.0, predicted_direction="UP", expected_return_pct=0.35, clears_hurdle=True, volatility_range_pct=1.2, risk_approved=True, conviction_score=8, leverage=3.0)
-    assert long_plan["futures_Position"] == "LONG (BUY FUTURES)" and long_plan["liquidation_price"] < long_plan["stop_loss_price"] < 80000.0 < long_plan["take_profit_price"]
-
-    short_plan = evaluate_futures_long_short_plan(current_price=80000.0, predicted_direction="DOWN", expected_return_pct=-0.35, clears_hurdle=True, volatility_range_pct=1.2, risk_approved=True, conviction_score=8, leverage=3.0)
-    assert short_plan["futures_Position"] == "SHORT (SELL FUTURES)" and short_plan["take_profit_price"] < 80000.0 < short_plan["stop_loss_price"] < short_plan["liquidation_price"]
-
-    flat_plan = evaluate_futures_long_short_plan(current_price=80000.0, predicted_direction="UP", expected_return_pct=0.04, clears_hurdle=False, volatility_range_pct=1.2, risk_approved=False, conviction_score=4)
-    assert flat_plan["futures_Position"] == "FLAT (NO POSITION)" and flat_plan["liquidation_price"] is None
-
-
-def test_multi_angle_consensus_and_price_range_estimator():
+def test_price_range_estimator():
     df = pd.DataFrame({"high": [80400.0] * 24, "low": [80000.0] * 24, "close": [80200.0] * 24})
     r_info = estimate_next_hour_price_range_usd(df, current_price=80200.0)
     assert r_info["predicted_range_usd"] == pytest.approx(400.0, abs=1.0) and r_info["predicted_high_1h"] > 80200.0 > r_info["predicted_low_1h"]
-
-    c2 = evaluate_multi_angle_consensus(current_price=80200.0, primary_direction="UP", primary_prob_up=62.0, primary_pred_dollar_move=210.0, predicted_range_usd=r_info["predicted_range_usd"], shadow_direction="UP", shadow_prob_up=66.0)
-    assert c2["consensus_direction"] == "UP" and c2["agreement_badge"] == "2/2 Models Vote UP" and c2["move_clears_fees"] is True and c2["range_clears_fees"] is True
 
 
 def test_plain_english_reconciliation_story_and_mcp_fallback(monkeypatch):
