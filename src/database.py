@@ -72,7 +72,6 @@ class MarketTick(Base):
     paper_portfolios = relationship("PaperPortfolio", back_populates="tick", foreign_keys="PaperPortfolio.tick_id", uselist=True)
     predictions = relationship("ModelPrediction", back_populates="tick", foreign_keys="ModelPrediction.tick_id", uselist=True)
     outcome_predictions = relationship("ModelPrediction", back_populates="outcome_tick", foreign_keys="ModelPrediction.outcome_tick_id", uselist=True)
-    investigations = relationship("PredictionInvestigation", back_populates="tick", foreign_keys="PredictionInvestigation.tick_id", uselist=True)
 
     @property
     def council_audit(self) -> Optional["CouncilAudit"]:
@@ -192,7 +191,6 @@ class ModelRegistry(Base):
 
     lifecycle_events = relationship("ModelLifecycleEvent", primaryjoin="ModelRegistry.model_version == ModelLifecycleEvent.model_version", foreign_keys="ModelLifecycleEvent.model_version", back_populates="model", order_by="ModelLifecycleEvent.lifecycle_seq.asc()")
     predictions = relationship("ModelPrediction", primaryjoin="ModelRegistry.model_version == ModelPrediction.model_version", foreign_keys="ModelPrediction.model_version", back_populates="model", order_by="ModelPrediction.id.asc()")
-    investigations = relationship("PredictionInvestigation", primaryjoin="ModelRegistry.model_version == PredictionInvestigation.model_version", foreign_keys="PredictionInvestigation.model_version", back_populates="model", order_by="PredictionInvestigation.id.asc()")
 
     __table_args__ = (
         UniqueConstraint("model_version", name="uq_model_registry_model_version"),
@@ -270,7 +268,6 @@ class ModelPrediction(Base):
     outcome_tick = relationship("MarketTick", foreign_keys=[outcome_tick_id], back_populates="outcome_predictions")
     model = relationship("ModelRegistry", primaryjoin="ModelPrediction.model_version == ModelRegistry.model_version", foreign_keys=[model_version], back_populates="predictions")
     parent_prediction = relationship("ModelPrediction", remote_side=[id], foreign_keys=[parent_prediction_id], backref="child_predictions")
-    investigations = relationship("PredictionInvestigation", foreign_keys="PredictionInvestigation.prediction_id", back_populates="prediction")
 
     __table_args__ = (
         ForeignKeyConstraint(["tick_id"], ["market_ticks.id"], name="fk_mp_tick_id"),
@@ -317,85 +314,12 @@ class ModelPrediction(Base):
     )
 
 
-class PredictionInvestigation(Base):
-    __tablename__ = "prediction_investigations"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    tick_id = Column(Integer, nullable=False)
-    prediction_id = Column(Integer, nullable=True)
-    model_version = Column(String(64), nullable=False)
-    headline = Column(String(512), nullable=False)
-    headline_source_url = Column(Text, nullable=True)
-    headline_published_at = Column(DateTime(timezone=True), nullable=True)
-    suspected_cause_category = Column(String(64), nullable=False)
-    hypothesis_notes = Column(Text, nullable=False)
-    supporting_evidence_json = Column(JSON, nullable=True)
-    diagnostic_confidence = Column(Float, nullable=True)
-    unresolved_questions = Column(Text, nullable=True)
-    verification_status = Column(String(32), nullable=False, default="UNVERIFIED_HYPOTHESIS")
-    verified_ground_truth_label = Column(String(64), nullable=True)
-    verified_by = Column(String(64), nullable=True)
-    verified_at = Column(DateTime(timezone=True), nullable=True)
-    revision_history_json = Column(JSON, nullable=False, default=list)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
-    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
-
-    tick = relationship("MarketTick", foreign_keys=[tick_id], back_populates="investigations")
-    prediction = relationship("ModelPrediction", foreign_keys=[prediction_id], back_populates="investigations")
-    model = relationship("ModelRegistry", primaryjoin="PredictionInvestigation.model_version == ModelRegistry.model_version", foreign_keys=[model_version], back_populates="investigations")
-
-    __table_args__ = (
-        ForeignKeyConstraint(["tick_id"], ["market_ticks.id"], name="fk_pi_tick_id"),
-        ForeignKeyConstraint(["prediction_id"], ["model_predictions.id"], name="fk_pi_prediction_id"),
-        ForeignKeyConstraint(["model_version"], ["model_registry.model_version"], name="fk_pi_model_version"),
-        CheckConstraint(
-            "verification_status IN ('UNVERIFIED_HYPOTHESIS', 'CONFIRMED_CAUSE', 'REFUTED', 'APPROVED_FOR_TRAINING') "
-            "AND (diagnostic_confidence IS NULL OR (diagnostic_confidence NOT IN ('NaN', 'Infinity', '-Infinity') "
-            "AND diagnostic_confidence >= 0.0 AND diagnostic_confidence <= 1.0))",
-            name="chk_pi_verification_status",
-        ),
-        Index("ix_prediction_investigations_tick_id", "tick_id"),
-        Index("ix_prediction_investigations_model_version", "model_version"),
-    )
-
-
 # ---------------------------------------------------------------------------
 # 2. SCHEMA DRIFT VERIFICATION & SPECS
 # ---------------------------------------------------------------------------
 
 class SchemaDriftError(RuntimeError):
     pass
-
-
-@dataclass(frozen=True)
-class FunctionSpec:
-    schema_name: str
-    name: str
-    expected_prosrc: str
-    create_sql: str
-
-
-@dataclass(frozen=True)
-class TriggerSpec:
-    name: str
-    table_name: str
-    func_name: str
-    expected_tgtype: int
-    deferrable: bool
-    initially_deferred: bool
-    expected_triggerdef: str
-    create_sql: str
-
-
-def normalize_sql(sql_str: Optional[str]) -> str:
-    if not sql_str:
-        return ""
-    no_comments = re.sub(r"--[^\r\n]*", " ", re.sub(r"/\*.*?\*/", " ", sql_str, flags=re.DOTALL))
-    return " ".join(no_comments.split()).lower()
-
-
-def normalize_pg_predicate(pred_str: Optional[str]) -> str:
-    return normalize_sql(pred_str)
 
 
 def _classify_column_type(raw_type: str) -> str:
@@ -423,7 +347,6 @@ CANONICAL_TABLE_COLUMNS: Dict[str, List[Tuple[str, str, bool]]] = {
     "model_registry": [("id", "integer", False), ("model_version", "varchar", False), ("regressor_artifact_path", "varchar", False), ("regressor_sha256", "varchar", False), ("classifier_artifact_path", "varchar", False), ("classifier_sha256", "varchar", False), ("feature_schema_version", "varchar", False), ("target_definition", "varchar", False), ("training_dataset_path", "varchar", True), ("training_dataset_sha256", "varchar", True), ("training_row_count", "integer", True), ("split_metadata", "json", True), ("evaluation_metrics", "json", True), ("code_revision_sha", "varchar", True), ("current_status", "varchar", False), ("lifecycle_seq", "integer", False), ("created_at", "timestamp", False)],
     "model_lifecycle_events": [("id", "integer", False), ("model_version", "varchar", False), ("lifecycle_seq", "integer", False), ("event_type", "varchar", False), ("from_status", "varchar", True), ("to_status", "varchar", False), ("related_model_version", "varchar", True), ("actor", "varchar", False), ("reason", "text", False), ("evidence_json", "json", True), ("created_at", "timestamp", False)],
     "model_predictions": [("id", "integer", False), ("tick_id", "integer", False), ("model_version", "varchar", False), ("run_mode", "varchar", False), ("is_canonical", "boolean", False), ("is_primary", "boolean", False), ("parent_prediction_id", "integer", True), ("feature_schema_version", "varchar", False), ("predicted_return_pct", "float", False), ("predicted_price_1h", "float", False), ("direction_predicted", "varchar", False), ("direction_prob_up", "float", False), ("clears_hurdle", "boolean", False), ("created_at", "timestamp", False), ("outcome_tick_id", "integer", True), ("evaluation_policy_version", "varchar", True), ("actual_price_at_t_plus_1", "float", True), ("actual_return_pct", "float", True), ("direction_realized", "varchar", True), ("direction_correct", "boolean", True), ("residual_error", "float", True), ("absolute_error_usd", "float", True), ("percentage_error", "float", True), ("is_black_swan", "boolean", True), ("error_attribution_tag", "varchar", True), ("reconciled_at", "timestamp", True)],
-    "prediction_investigations": [("id", "integer", False), ("tick_id", "integer", False), ("prediction_id", "integer", True), ("model_version", "varchar", False), ("headline", "varchar", False), ("headline_source_url", "text", True), ("headline_published_at", "timestamp", True), ("suspected_cause_category", "varchar", False), ("hypothesis_notes", "text", False), ("supporting_evidence_json", "json", True), ("diagnostic_confidence", "float", True), ("unresolved_questions", "text", True), ("verification_status", "varchar", False), ("verified_ground_truth_label", "varchar", True), ("verified_by", "varchar", True), ("verified_at", "timestamp", True), ("revision_history_json", "json", False), ("created_at", "timestamp", False), ("updated_at", "timestamp", False)],
 }
 
 CANONICAL_FOREIGN_KEYS = [
@@ -442,32 +365,6 @@ CANONICAL_INDEXES = [
     ("uq_model_registry_single_active", "model_registry", True, ["current_status"], "WHERE current_status = 'ACTIVE'"),
     ("uq_paper_portfolio_tick_id", "paper_portfolio", True, ["tick_id"], "WHERE tick_id IS NOT NULL"),
 ]
-
-CANONICAL_FUNCTIONS: List[FunctionSpec] = [
-    FunctionSpec("public", "mudra_prevent_mutation", "BEGIN RAISE EXCEPTION 'Table % is append-only.', TG_TABLE_NAME; END;", "CREATE OR REPLACE FUNCTION public.mudra_prevent_mutation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Table % is append-only.', TG_TABLE_NAME; END; $$;"),
-]
-
-CANONICAL_TRIGGERS: List[TriggerSpec] = [
-    TriggerSpec("trg_mr_no_delete", "model_registry", "mudra_prevent_mutation", 29, False, False, "", "CREATE TRIGGER trg_mr_no_delete BEFORE DELETE ON public.model_registry FOR EACH ROW EXECUTE FUNCTION public.mudra_prevent_mutation();"),
-]
-
-
-def ensure_canonical_function(conn: Any, spec: FunctionSpec) -> bool:
-    try:
-        conn.execute(text(spec.create_sql))
-        return True
-    except Exception as exc:
-        logger.warning("Failed to ensure canonical function %s: %s", spec.name, exc)
-        return False
-
-
-def ensure_canonical_trigger(conn: Any, spec: TriggerSpec) -> bool:
-    try:
-        conn.execute(text(spec.create_sql))
-        return True
-    except Exception as exc:
-        logger.warning("Failed to ensure canonical trigger %s: %s", spec.name, exc)
-        return False
 
 
 def verify_db_schema(target_engine_or_conn: Optional[Any] = None, require_seed_models: bool = False) -> Dict[str, Any]:
@@ -739,149 +636,6 @@ def get_latest_council_audit() -> Optional[Dict[str, Any]]:
         return None
 
 
-def _validate_status_and_conf(status: str, confidence: Optional[float] = None) -> None:
-    if not isinstance(status, str) or status.strip() not in ALLOWED_VERIFICATION_STATUSES:
-        raise ValueError(f"Invalid verification_status '{status}'.")
-    if confidence is not None:
-        try:
-            val = float(confidence)
-            if not math.isfinite(val) or val < 0.0 or val > 1.0:
-                raise ValueError
-        except Exception as err:
-            raise ValueError(f"Diagnostic confidence must be between 0.0 and 1.0, got {confidence}.") from err
-
-
-def _normalize_datetime(dt_val: Optional[Union[str, datetime]]) -> Optional[datetime]:
-    if dt_val is None or isinstance(dt_val, datetime):
-        return dt_val.replace(tzinfo=timezone.utc) if isinstance(dt_val, datetime) and not dt_val.tzinfo else dt_val
-    try:
-        parsed = datetime.fromisoformat(dt_val.replace("Z", "+00:00"))
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-    except Exception as err:
-        raise ValueError(f"Invalid ISO datetime string: {dt_val}") from err
-
-
-def record_prediction_investigation(
-    tick_id: int, model_version: str, headline: str, suspected_cause_category: str,
-    hypothesis_notes: str, supporting_evidence_json: Optional[Dict[str, Any]] = None,
-    diagnostic_confidence: Optional[float] = None, unresolved_questions: Optional[str] = None,
-    verification_status: str = "UNVERIFIED_HYPOTHESIS", headline_source_url: Optional[str] = None,
-    headline_published_at: Optional[Union[str, datetime]] = None, prediction_id: Optional[int] = None,
-    author: str = "SYSTEM", session: Optional[Session] = None,
-) -> Dict[str, Any]:
-    _validate_status_and_conf(verification_status, diagnostic_confidence)
-    for name, val in [("headline", headline), ("suspected_cause_category", suspected_cause_category), ("hypothesis_notes", hypothesis_notes), ("model_version", model_version)]:
-        if not val or not val.strip():
-            raise ValueError(f"{name} cannot be empty.")
-
-    pub_at = _normalize_datetime(headline_published_at)
-
-    def _execute(sess: Session) -> Dict[str, Any]:
-        if not sess.execute(select(MarketTick.id).where(MarketTick.id == tick_id)).scalar_one_or_none():
-            raise ValueError(f"MarketTick {tick_id} does not exist.")
-        if prediction_id is not None and not sess.execute(select(ModelPrediction.id).where(ModelPrediction.id == prediction_id)).scalar_one_or_none():
-            raise ValueError(f"ModelPrediction {prediction_id} does not exist.")
-
-        now_utc = datetime.now(timezone.utc)
-        inv = PredictionInvestigation(
-            tick_id=tick_id, prediction_id=prediction_id, model_version=model_version.strip(),
-            headline=headline.strip(), headline_source_url=headline_source_url.strip() if headline_source_url else None,
-            headline_published_at=pub_at, suspected_cause_category=suspected_cause_category.strip(),
-            hypothesis_notes=hypothesis_notes.strip(), supporting_evidence_json=supporting_evidence_json or {},
-            diagnostic_confidence=float(diagnostic_confidence) if diagnostic_confidence is not None else None,
-            unresolved_questions=unresolved_questions.strip() if unresolved_questions else None,
-            verification_status=verification_status, created_at=now_utc, updated_at=now_utc,
-            revision_history_json=[{
-                "timestamp": now_utc.isoformat(), "author": author, "action": "RECORDED",
-                "verification_status": verification_status, "diagnostic_confidence": diagnostic_confidence,
-                "suspected_cause_category": suspected_cause_category, "notes": hypothesis_notes[:250],
-            }],
-        )
-        sess.add(inv)
-        sess.flush()
-        return inv.to_dict()
-
-    if session:
-        return _execute(session)
-    with get_db() as new_session:
-        return _execute(new_session)
-
-
-def get_prediction_investigations(
-    limit: int = 50, model_version: Optional[str] = None, verification_status: Optional[str] = None,
-    headline_query: Optional[str] = None, tick_id: Optional[int] = None, session: Optional[Session] = None,
-) -> List[Dict[str, Any]]:
-    def _execute(sess: Session) -> List[Dict[str, Any]]:
-        stmt = select(PredictionInvestigation).order_by(desc(PredictionInvestigation.id))
-        if model_version and model_version != "All Models":
-            stmt = stmt.where(PredictionInvestigation.model_version == model_version)
-        if verification_status and verification_status != "ALL":
-            stmt = stmt.where(PredictionInvestigation.verification_status == verification_status)
-        if headline_query and headline_query.strip():
-            stmt = stmt.where(PredictionInvestigation.headline.ilike(f"%{headline_query.strip()}%"))
-        if tick_id is not None:
-            stmt = stmt.where(PredictionInvestigation.tick_id == tick_id)
-        return [row.to_dict() for row in sess.execute(stmt.limit(limit)).scalars().all()]
-
-    if session:
-        return _execute(session)
-    with get_db() as s:
-        return _execute(s)
-
-
-def get_prediction_investigation_details(investigation_id: int, session: Optional[Session] = None) -> Optional[Dict[str, Any]]:
-    def _execute(sess: Session) -> Optional[Dict[str, Any]]:
-        inv = sess.execute(select(PredictionInvestigation).where(PredictionInvestigation.id == investigation_id)).scalar_one_or_none()
-        return inv.to_dict() if inv is not None else None
-
-    if session:
-        return _execute(session)
-    with get_db() as s:
-        return _execute(s)
-
-
-def update_prediction_investigation_status(
-    investigation_id: int, new_status: str, verified_by: str, notes: Optional[str] = None,
-    ground_truth_label: Optional[str] = None, new_confidence: Optional[float] = None, session: Optional[Session] = None,
-) -> Dict[str, Any]:
-    _validate_status_and_conf(new_status, new_confidence)
-    if not verified_by or not verified_by.strip():
-        raise ValueError("verified_by cannot be empty.")
-
-    def _execute(sess: Session) -> Dict[str, Any]:
-        inv = sess.execute(select(PredictionInvestigation).where(PredictionInvestigation.id == investigation_id)).scalar_one_or_none()
-        if inv is None:
-            raise ValueError(f"Investigation {investigation_id} not found.")
-
-        now_utc = datetime.now(timezone.utc)
-        history = list(inv.revision_history_json or [])
-        history.append({
-            "timestamp": now_utc.isoformat(), "author": verified_by.strip(),
-            "action": f"STATUS_CHANGED_{new_status}", "from_status": inv.verification_status,
-            "to_status": new_status, "notes": notes[:250] if notes else None,
-        })
-        inv.verification_status = new_status
-        inv.verified_by = verified_by.strip()
-        inv.verified_at = now_utc
-        if ground_truth_label:
-            inv.verified_ground_truth_label = ground_truth_label.strip()
-        if new_confidence is not None:
-            inv.diagnostic_confidence = float(new_confidence)
-        inv.revision_history_json = history
-        inv.updated_at = now_utc
-        sess.flush()
-        return inv.to_dict()
-
-    if session:
-        return _execute(session)
-    with get_db() as s:
-        return _execute(s)
-
-
-def get_training_approved_investigations(limit: int = 100, session: Optional[Session] = None) -> List[Dict[str, Any]]:
-    return get_prediction_investigations(limit=limit, verification_status="APPROVED_FOR_TRAINING", session=session)
-
-
 # ---------------------------------------------------------------------------
 # 5. RETRO-COMPATIBILITY MAPPINGS
 # ---------------------------------------------------------------------------
@@ -897,16 +651,11 @@ sys.modules["src.database.queries"] = sys.modules[__name__]
 __all__ = [
     "Base", "MarketTick", "ApiTelemetry", "CouncilAudit", "Reconciliation",
     "PaperPortfolio", "ModelRegistry", "ModelLifecycleEvent", "ModelPrediction",
-    "PredictionInvestigation", "SchemaDriftError", "FunctionSpec", "TriggerSpec",
-    "CANONICAL_TABLE_COLUMNS", "CANONICAL_FOREIGN_KEYS", "CANONICAL_CONSTRAINTS",
-    "CANONICAL_INDEXES", "CANONICAL_FUNCTIONS", "CANONICAL_TRIGGERS", "normalize_sql",
-    "normalize_pg_predicate", "ensure_canonical_function", "ensure_canonical_trigger",
-    "verify_db_schema", "get_database_url", "create_db_engine", "engine",
-    "SessionLocal", "get_db", "has_tick_id_column", "init_db",
-    "test_connection", "_classify_column_type", "_TICK_ID_COLUMN_CACHE",
-    "get_latest_market_ticks", "get_reconciliation_history", "get_reconciliation_kpis",
-    "get_portfolio_history", "get_portfolio_kpis", "get_latest_council_audit",
-    "ALLOWED_VERIFICATION_STATUSES", "record_prediction_investigation", "get_prediction_investigations",
-    "get_prediction_investigation_details", "update_prediction_investigation_status",
-    "get_training_approved_investigations",
+    "SchemaDriftError", "CANONICAL_TABLE_COLUMNS", "CANONICAL_FOREIGN_KEYS",
+    "CANONICAL_CONSTRAINTS", "CANONICAL_INDEXES", "verify_db_schema",
+    "get_database_url", "create_db_engine", "engine", "SessionLocal", "get_db",
+    "has_tick_id_column", "init_db", "test_connection", "_classify_column_type",
+    "_TICK_ID_COLUMN_CACHE", "get_latest_market_ticks", "get_reconciliation_history",
+    "get_reconciliation_kpis", "get_portfolio_history", "get_portfolio_kpis",
+    "get_latest_council_audit",
 ]
