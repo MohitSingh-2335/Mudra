@@ -1091,7 +1091,7 @@ def fetch_cloud_database_state(current_price: Optional[float]):
         return {
             "db_ok": True, "db_ver": db_ver, "db_lat": db_lat, "db_error": None,
             "ticks_df": get_latest_market_ticks(limit=500),
-            "rec_df": get_reconciliation_history(limit=2000),
+            "rec_df": get_reconciliation_history(limit=100),
             "rec_kpis": get_reconciliation_kpis(lookback_hours=168),
             "latest_audit": get_latest_council_audit(),
             "port_df": get_portfolio_history(limit=500),
@@ -1375,7 +1375,7 @@ with tab_ground_truth:
 
             mf1, mf2 = st.columns([3, 1])
             with mf1:
-                st.caption("Delayed T+1h ground-truth verification: Compares what each AI model predicted against the real Bitcoin closing price 1 hour later.")
+                st.caption("Delayed T+1h ground-truth verification (Latest 24 Hours): Compares what each AI model predicted against the real Bitcoin closing price 1 hour later.")
             with mf2:
                 model_options = ["All Models"] + sorted(table_df["Model"].dropna().unique().tolist())
                 selected_model = st.selectbox("Filter Table by Model:", model_options, index=0)
