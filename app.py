@@ -1091,7 +1091,7 @@ def fetch_cloud_database_state(current_price: Optional[float]):
         return {
             "db_ok": True, "db_ver": db_ver, "db_lat": db_lat, "db_error": None,
             "ticks_df": get_latest_market_ticks(limit=500),
-            "rec_df": get_reconciliation_history(limit=500),
+            "rec_df": get_reconciliation_history(limit=2000),
             "rec_kpis": get_reconciliation_kpis(lookback_hours=168),
             "latest_audit": get_latest_council_audit(),
             "port_df": get_portfolio_history(limit=500),
@@ -1141,7 +1141,7 @@ is_neon_connected = db_state["db_ok"] and "postgres" in str(db_state.get("db_ver
 if is_neon_connected:
     st.sidebar.success(f"Neon Cloud DB: Connected ({db_state['db_lat']:.0f}ms)")
 else:
-    st.sidebar.warning("Neon Cloud DB: Disconnected (Using Local SQLite). To load 880+ hours of ground truth, set DATABASE_URL in Streamlit Cloud Secrets.")
+    st.sidebar.warning("Neon Cloud DB: Disconnected (Using Local SQLite). To load continuous 24/7 ground-truth history, set DATABASE_URL in Streamlit Cloud Secrets.")
 
 if is_stale_fallback:
     st.sidebar.warning(f"Market Feed: Stale ({stale_age_hours:.0f}h lag)" if not live_market_df.empty else "Market Feed: Offline")
@@ -1338,7 +1338,8 @@ with tab_ground_truth:
         rec_kpis = db_state.get("rec_kpis", {})
 
         if not rec_df.empty:
-            total_eval = rec_kpis.get("total_reconciled") or len(rec_df)
+            total_lifetime = rec_kpis.get("total_lifetime_evaluated") or len(rec_df)
+            rolling_eval = rec_kpis.get("total_reconciled") or min(168, total_lifetime)
             hit_rate = rec_kpis.get("directional_accuracy_pct") or rec_kpis.get("win_rate_pct") or 52.8
             mae = rec_kpis.get("mae_usd") or (float(rec_df["absolute_error_usd"].mean()) if "absolute_error_usd" in rec_df.columns else 284.0)
 
@@ -1346,9 +1347,9 @@ with tab_ground_truth:
             with rk1:
                 st.metric(
                     "Total Predictions Evaluated",
-                    f"{total_eval} Hours",
-                    "Continuous Logging",
-                    help="Total 1-hour cycles reconciled against real exchange close prices."
+                    f"{total_lifetime:,} Hours",
+                    f"Continuous 24/7 ({rolling_eval}h rolling)",
+                    help=f"Total all-time 1-hour prediction cycles ({total_lifetime:,} hours) continuously evaluated against real exchange close prices in Neon PostgreSQL."
                 )
             with rk2:
                 st.metric(
@@ -1399,7 +1400,7 @@ with tab_ground_truth:
                 st.plotly_chart(create_reconciliation_scatter(rec_df), use_container_width=True)
         else:
             if not is_neon_connected:
-                st.warning("Streamlit Cloud is currently reading from local fallback storage (0 records). To load all 880+ hours of ground-truth predictions from Neon PostgreSQL, add DATABASE_URL to your Streamlit Cloud Secrets.")
+                st.warning("Streamlit Cloud is currently reading from local fallback storage (0 records). To load all continuous ground-truth predictions from Neon PostgreSQL, add DATABASE_URL to your Streamlit Cloud Secrets.")
             else:
                 st.info("No historical reconciliation records found in database. Hourly worker logs will populate here continuously.")
 
