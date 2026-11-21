@@ -189,6 +189,21 @@ class ModelRegistry(Base):
     )
 
 
+class HourlyPostmortem(Base):
+    __tablename__ = "hourly_postmortems"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tick_id = Column(Integer, ForeignKey("market_ticks.id"), nullable=False, unique=True, index=True)
+    news_headlines = Column(JSON, nullable=True)
+    feature_snapshot = Column(JSON, nullable=True)
+    gemini_full_analysis = Column(JSON, nullable=True)
+    gemini_status = Column(String(32), nullable=False, default="UNAVAILABLE")
+    error_detail = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    tick = relationship("MarketTick", foreign_keys=[tick_id])
+
+
 class ModelPrediction(Base):
     __tablename__ = "model_predictions"
 
@@ -199,10 +214,10 @@ class ModelPrediction(Base):
     is_canonical = Column(Boolean, nullable=False, default=True)
     is_primary = Column(Boolean, nullable=False, default=False)
     feature_schema_version = Column(String(32), nullable=False, default=FEATURE_SCHEMA_VERSION)
-    predicted_return_pct = Column(Float, nullable=False)
-    predicted_price_1h = Column(Float, nullable=False)
-    direction_predicted = Column(String(16), nullable=False)
-    direction_prob_up = Column(Float, nullable=False)
+    predicted_return_pct = Column(Float, nullable=True)
+    predicted_price_1h = Column(Float, nullable=True)
+    direction_predicted = Column(String(16), nullable=True)
+    direction_prob_up = Column(Float, nullable=True)
     clears_hurdle = Column(Boolean, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
@@ -217,6 +232,7 @@ class ModelPrediction(Base):
     percentage_error = Column(Float, nullable=True)
     is_black_swan = Column(Boolean, nullable=True)
     error_attribution_tag = Column(String(64), nullable=True)
+    diagnosis_summary = Column(Text, nullable=True)
     reconciled_at = Column(DateTime(timezone=True), nullable=True)
 
     tick = relationship("MarketTick", foreign_keys=[tick_id], back_populates="predictions")
@@ -228,15 +244,12 @@ class ModelPrediction(Base):
         ForeignKeyConstraint(["model_version"], ["model_registry.model_version"], name="fk_mp_model_version"),
         ForeignKeyConstraint(["outcome_tick_id"], ["market_ticks.id"], name="fk_mp_outcome_tick_id"),
         CheckConstraint(
-            "((run_mode = 'PRIMARY' AND is_primary IS TRUE AND is_canonical IS TRUE) "
-            "OR (run_mode = 'SHADOW' AND is_primary IS FALSE AND is_canonical IS TRUE)) "
-            "AND predicted_return_pct NOT IN ('NaN', 'Infinity', '-Infinity') "
-            "AND predicted_price_1h NOT IN ('NaN', 'Infinity', '-Infinity') "
-            "AND direction_prob_up NOT IN ('NaN', 'Infinity', '-Infinity') "
-            "AND predicted_price_1h >= 1.0 "
-            "AND direction_prob_up >= 0.0 AND direction_prob_up <= 1.0 "
-            "AND direction_predicted IN ('UP', 'DOWN') "
-            "AND direction_predicted = (CASE WHEN predicted_return_pct >= 0.0 THEN 'UP' ELSE 'DOWN' END)",
+            "(((run_mode = 'PRIMARY' AND is_primary IS TRUE AND is_canonical IS TRUE) "
+            "OR (run_mode = 'SHADOW' AND is_primary IS FALSE AND is_canonical IS TRUE))) "
+            "AND (predicted_return_pct IS NULL OR predicted_return_pct NOT IN ('NaN', 'Infinity', '-Infinity')) "
+            "AND (predicted_price_1h IS NULL OR (predicted_price_1h NOT IN ('NaN', 'Infinity', '-Infinity') AND predicted_price_1h >= 1.0)) "
+            "AND (direction_prob_up IS NULL OR (direction_prob_up NOT IN ('NaN', 'Infinity', '-Infinity') AND direction_prob_up >= 0.0 AND direction_prob_up <= 1.0)) "
+            "AND (direction_predicted IS NULL OR direction_predicted IN ('UP', 'DOWN'))",
             name="chk_prediction_mode_invariants",
         ),
         CheckConstraint(
@@ -297,13 +310,15 @@ CANONICAL_TABLE_COLUMNS: Dict[str, List[Tuple[str, str, bool]]] = {
     "reconciliations": [("id", "integer", False), ("timestamp", "timestamp", False), ("tick_id", "integer", False), ("predicted_price", "float", False), ("actual_price_at_t_plus_1", "float", False), ("predicted_return_pct", "float", False), ("actual_return_pct", "float", False), ("residual_error", "float", False), ("absolute_error_usd", "float", False), ("percentage_error", "float", False), ("direction_predicted", "varchar", False), ("direction_realized", "varchar", False), ("direction_correct", "boolean", False), ("error_attribution_tag", "varchar", False), ("is_black_swan", "boolean", False)],
     "paper_portfolio": [("id", "integer", False), ("tick_id", "integer", True), ("timestamp", "timestamp", False), ("action", "varchar", False), ("btc_amount", "float", False), ("execution_price", "float", False), ("fee_deducted_usd", "float", False), ("slippage_usd", "float", False), ("cash_balance", "float", False), ("btc_balance", "float", False), ("total_equity_usd", "float", False), ("realized_pnl_usd", "float", False), ("unrealized_pnl_usd", "float", False), ("drawdown_pct", "float", False), ("cumulative_return_pct", "float", False), ("benchmark_btc_equity", "float", False), ("alpha_usd", "float", False), ("alpha_pct", "float", False), ("notes", "text", True)],
     "model_registry": [("id", "integer", False), ("model_version", "varchar", False), ("regressor_artifact_path", "varchar", False), ("regressor_sha256", "varchar", False), ("classifier_artifact_path", "varchar", False), ("classifier_sha256", "varchar", False), ("feature_schema_version", "varchar", False), ("target_definition", "varchar", False), ("evaluation_metrics", "json", True), ("current_status", "varchar", False), ("lifecycle_seq", "integer", False), ("created_at", "timestamp", False)],
-    "model_predictions": [("id", "integer", False), ("tick_id", "integer", False), ("model_version", "varchar", False), ("run_mode", "varchar", False), ("is_canonical", "boolean", False), ("is_primary", "boolean", False), ("feature_schema_version", "varchar", False), ("predicted_return_pct", "float", False), ("predicted_price_1h", "float", False), ("direction_predicted", "varchar", False), ("direction_prob_up", "float", False), ("clears_hurdle", "boolean", False), ("created_at", "timestamp", False), ("outcome_tick_id", "integer", True), ("evaluation_policy_version", "varchar", True), ("actual_price_at_t_plus_1", "float", True), ("actual_return_pct", "float", True), ("direction_realized", "varchar", True), ("direction_correct", "boolean", True), ("residual_error", "float", True), ("absolute_error_usd", "float", True), ("percentage_error", "float", True), ("is_black_swan", "boolean", True), ("error_attribution_tag", "varchar", True), ("reconciled_at", "timestamp", True)],
+    "model_predictions": [("id", "integer", False), ("tick_id", "integer", False), ("model_version", "varchar", False), ("run_mode", "varchar", False), ("is_canonical", "boolean", False), ("is_primary", "boolean", False), ("feature_schema_version", "varchar", False), ("predicted_return_pct", "float", True), ("predicted_price_1h", "float", True), ("direction_predicted", "varchar", True), ("direction_prob_up", "float", True), ("clears_hurdle", "boolean", False), ("created_at", "timestamp", False), ("outcome_tick_id", "integer", True), ("evaluation_policy_version", "varchar", True), ("actual_price_at_t_plus_1", "float", True), ("actual_return_pct", "float", True), ("direction_realized", "varchar", True), ("direction_correct", "boolean", True), ("residual_error", "float", True), ("absolute_error_usd", "float", True), ("percentage_error", "float", True), ("is_black_swan", "boolean", True), ("error_attribution_tag", "varchar", True), ("diagnosis_summary", "text", True), ("reconciled_at", "timestamp", True)],
+    "hourly_postmortems": [("id", "integer", False), ("tick_id", "integer", False), ("news_headlines", "json", True), ("feature_snapshot", "json", True), ("gemini_full_analysis", "json", True), ("gemini_status", "varchar", False), ("error_detail", "text", True), ("created_at", "timestamp", False)],
 }
 
 CANONICAL_FOREIGN_KEYS = [
     ("fk_council_audits_tick_id", "council_audits", "tick_id", "market_ticks", "id"),
     ("fk_reconciliations_tick_id", "reconciliations", "tick_id", "market_ticks", "id"),
     ("fk_paper_portfolio_tick_id", "paper_portfolio", "tick_id", "market_ticks", "id"),
+    ("fk_hourly_postmortems_tick_id", "hourly_postmortems", "tick_id", "market_ticks", "id"),
 ]
 
 CANONICAL_CONSTRAINTS = [
@@ -606,7 +621,7 @@ sys.modules["src.database.queries"] = sys.modules[__name__]
 
 __all__ = [
     "Base", "MarketTick", "ApiTelemetry", "CouncilAudit", "Reconciliation",
-    "PaperPortfolio", "ModelRegistry", "ModelPrediction",
+    "PaperPortfolio", "ModelRegistry", "ModelPrediction", "HourlyPostmortem",
     "SchemaDriftError", "CANONICAL_TABLE_COLUMNS", "CANONICAL_FOREIGN_KEYS",
     "CANONICAL_CONSTRAINTS", "CANONICAL_INDEXES", "verify_db_schema",
     "get_database_url", "create_db_engine", "engine", "SessionLocal", "get_db",
