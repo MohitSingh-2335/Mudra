@@ -3,7 +3,7 @@
 
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://mudra-trading.streamlit.app)
 [![CI/CD Pipeline](https://github.com/MohitSingh-2335/Stock_Prediction_ML/actions/workflows/ci.yml/badge.svg)](https://github.com/MohitSingh-2335/Stock_Prediction_ML/actions/workflows/ci.yml)
-[![Tests Passing](https://img.shields.io/badge/pytest-91%20passed-00C087?logo=pytest&logoColor=white)](https://github.com/MohitSingh-2335/Stock_Prediction_ML)
+[![Tests Passing](https://img.shields.io/badge/pytest-90%20passed-00C087?logo=pytest&logoColor=white)](https://github.com/MohitSingh-2335/Stock_Prediction_ML)
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![XGBoost](https://img.shields.io/badge/XGBoost-2.0-EB5E28)](https://xgboost.readthedocs.io/)
 [![LangGraph](https://img.shields.io/badge/Orchestration-LangGraph-8A2BE2)](https://langchain-ai.github.io/langgraph/)
