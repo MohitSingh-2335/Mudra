@@ -9,7 +9,6 @@ scikit-learn==1.5.0
 xgboost==2.0.3
 lightgbm>=4.3.0
 joblib==1.4.2
-onnxruntime>=1.18.0
 
 # Technical Indicators
 ta==0.11.0
@@ -24,6 +23,7 @@ google-generativeai==0.7.2
 langchain-core==1.6.9
 langgraph==1.2.14
 langsmith==0.14.7
+mcp>=1.2.0
 
 # Web App
 streamlit==1.35.0
