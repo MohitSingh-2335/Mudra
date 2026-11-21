@@ -69,7 +69,7 @@ CANDIDATE_MODEL_SPEC: Dict[str, Any] = {
 def _verify_new_tables_subset(conn: Any) -> None:
     inspector = inspect(conn)
     existing_tables = set(inspector.get_table_names())
-    for tbl_name in ("model_registry", "model_lifecycle_events", "model_predictions"):
+    for tbl_name in ("model_registry", "model_predictions"):
         if tbl_name not in existing_tables:
             raise SchemaDriftError(f"Table '{tbl_name}' missing.")
         live_cols = {c["name"]: c for c in inspector.get_columns(tbl_name)}
@@ -103,31 +103,14 @@ def run_tx1b(target_engine: Engine) -> Dict[str, Any]:
                     INSERT INTO public.model_registry (
                         model_version, regressor_artifact_path, regressor_sha256,
                         classifier_artifact_path, classifier_sha256, feature_schema_version,
-                        target_definition, training_dataset_path, training_dataset_sha256,
-                        training_row_count, split_metadata, evaluation_metrics,
-                        code_revision_sha, current_status
+                        target_definition, evaluation_metrics, current_status
                     ) VALUES (
                         :model_version, :regressor_artifact_path, :regressor_sha256,
                         :classifier_artifact_path, :classifier_sha256, :feature_schema_version,
-                        :target_definition, :training_dataset_path, :training_dataset_sha256,
-                        :training_row_count, CAST(:split_metadata AS json), CAST(:evaluation_metrics AS json),
-                        :code_revision_sha, :current_status
+                        :target_definition, CAST(:evaluation_metrics AS json), :current_status
                     )
                 """),
-                {**BASELINE_MODEL_SPEC, "split_metadata": json.dumps(BASELINE_MODEL_SPEC["split_metadata"]), "evaluation_metrics": json.dumps(BASELINE_MODEL_SPEC["evaluation_metrics"])},
-            )
-            conn.execute(
-                text("""
-                    INSERT INTO public.model_lifecycle_events (
-                        model_version, lifecycle_seq, event_type, from_status, to_status,
-                        actor, reason, evidence_json
-                    ) VALUES (
-                        :mv, 1, 'REGISTERED', NULL, 'ACTIVE',
-                        'scripts/migrate_db.py', 'Historical production baseline model registered.',
-                        CAST(:ev_json AS json)
-                    )
-                """),
-                {"mv": BASELINE_MODEL_SPEC["model_version"], "ev_json": json.dumps(BASELINE_MODEL_SPEC["evaluation_metrics"])},
+                {**BASELINE_MODEL_SPEC, "evaluation_metrics": json.dumps(BASELINE_MODEL_SPEC["evaluation_metrics"])},
             )
             seeded.append(BASELINE_MODEL_SPEC["model_version"])
 
@@ -137,18 +120,14 @@ def run_tx1b(target_engine: Engine) -> Dict[str, Any]:
                     INSERT INTO public.model_registry (
                         model_version, regressor_artifact_path, regressor_sha256,
                         classifier_artifact_path, classifier_sha256, feature_schema_version,
-                        target_definition, training_dataset_path, training_dataset_sha256,
-                        training_row_count, split_metadata, evaluation_metrics,
-                        code_revision_sha, current_status
+                        target_definition, evaluation_metrics, current_status
                     ) VALUES (
                         :model_version, :regressor_artifact_path, :regressor_sha256,
                         :classifier_artifact_path, :classifier_sha256, :feature_schema_version,
-                        :target_definition, :training_dataset_path, :training_dataset_sha256,
-                        :training_row_count, CAST(:split_metadata AS json), CAST(:eval_json AS json),
-                        :code_revision_sha, 'REJECTED'
+                        :target_definition, CAST(:eval_json AS json), 'REJECTED'
                     )
                 """),
-                {**CANDIDATE_MODEL_SPEC, "split_metadata": json.dumps(CANDIDATE_MODEL_SPEC["split_metadata"]), "eval_json": json.dumps(CANDIDATE_MODEL_SPEC["evaluation_metrics"])},
+                {**CANDIDATE_MODEL_SPEC, "eval_json": json.dumps(CANDIDATE_MODEL_SPEC["evaluation_metrics"])},
             )
             seeded.append(CANDIDATE_MODEL_SPEC["model_version"])
 
@@ -163,11 +142,11 @@ def run_tx1c(target_engine: Engine) -> Dict[str, Any]:
             text("""
                 INSERT INTO public.model_predictions (
                     tick_id, model_version, run_mode, is_canonical, is_primary,
-                    parent_prediction_id, feature_schema_version, predicted_return_pct,
+                    feature_schema_version, predicted_return_pct,
                     predicted_price_1h, direction_predicted, direction_prob_up, clears_hurdle, created_at
                 )
                 SELECT
-                    mt.id AS tick_id, mt.model_version, 'PRIMARY', TRUE, TRUE, NULL,
+                    mt.id AS tick_id, mt.model_version, 'PRIMARY', TRUE, TRUE,
                     mt.feature_schema_version,
                     ((mt.predicted_price_1h - mt.close) / mt.close) * 100.0,
                     mt.predicted_price_1h,
