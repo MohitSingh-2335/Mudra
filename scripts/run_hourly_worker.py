@@ -17,24 +17,12 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 import src.database as db_conn
-from src.database import ApiTelemetry, MarketTick, get_db
+from src.database import ApiTelemetry, MarketTick, get_db, log_telemetry
 from src.engine import sync_hourly_quant_cycle, fetch_latest_confirmed_candle
 
 OUTBOX_FILE = ROOT_DIR / "data" / "sync_outbox.json"
 fetch_latest_candle = fetch_latest_confirmed_candle
 __all__ = ["run_worker", "flush_outbox", "log_telemetry", "fetch_latest_candle"]
-
-
-def log_telemetry(session, service: str, endpoint: str, latency_ms: float, status_code: int, error_msg: Optional[str] = None) -> None:
-    # logs external api call latency and status code
-    try:
-        session.add(ApiTelemetry(
-            timestamp=datetime.now(timezone.utc), service_name=service, endpoint=endpoint,
-            latency_ms=latency_ms, status_code=status_code, error_message=error_msg,
-        ))
-        session.flush()
-    except Exception:
-        pass
 
 
 def flush_outbox(session: Optional[Any] = None) -> int:
