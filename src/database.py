@@ -87,10 +87,6 @@ class ApiTelemetry(Base):
     endpoint = Column(String(256), nullable=False)
     latency_ms = Column(Float, nullable=False)
     status_code = Column(Integer, nullable=False)
-    retry_count = Column(Integer, nullable=False, default=0)
-    rate_limit_remaining = Column(Integer, nullable=True)
-    tokens_used = Column(Integer, nullable=True, default=0)
-    cost_estimate_usd = Column(Float, nullable=True, default=0.0)
     error_message = Column(Text, nullable=True)
 
 
@@ -179,57 +175,17 @@ class ModelRegistry(Base):
     classifier_sha256 = Column(String(64), nullable=False)
     feature_schema_version = Column(String(32), nullable=False)
     target_definition = Column(String(128), nullable=False)
-    training_dataset_path = Column(String(256), nullable=True)
-    training_dataset_sha256 = Column(String(64), nullable=True)
-    training_row_count = Column(Integer, nullable=True)
-    split_metadata = Column(JSON, nullable=True)
     evaluation_metrics = Column(JSON, nullable=True)
-    code_revision_sha = Column(String(64), nullable=True)
     current_status = Column(String(24), nullable=False)
     lifecycle_seq = Column(Integer, nullable=False, default=1)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
-    lifecycle_events = relationship("ModelLifecycleEvent", primaryjoin="ModelRegistry.model_version == ModelLifecycleEvent.model_version", foreign_keys="ModelLifecycleEvent.model_version", back_populates="model", order_by="ModelLifecycleEvent.lifecycle_seq.asc()")
     predictions = relationship("ModelPrediction", primaryjoin="ModelRegistry.model_version == ModelPrediction.model_version", foreign_keys="ModelPrediction.model_version", back_populates="model", order_by="ModelPrediction.id.asc()")
 
     __table_args__ = (
         UniqueConstraint("model_version", name="uq_model_registry_model_version"),
         CheckConstraint("current_status IN ('ACTIVE', 'CANDIDATE', 'REJECTED', 'ARCHIVED', 'ROLLED_BACK') AND lifecycle_seq >= 1", name="chk_model_registry_status"),
         Index("uq_model_registry_single_active", "current_status", unique=True, postgresql_where=text("current_status = 'ACTIVE'"), sqlite_where=text("current_status = 'ACTIVE'")),
-    )
-
-
-class ModelLifecycleEvent(Base):
-    __tablename__ = "model_lifecycle_events"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    model_version = Column(String(64), nullable=False)
-    lifecycle_seq = Column(Integer, nullable=False)
-    event_type = Column(String(32), nullable=False)
-    from_status = Column(String(24), nullable=True)
-    to_status = Column(String(24), nullable=False)
-    related_model_version = Column(String(64), nullable=True)
-    actor = Column(String(64), nullable=False)
-    reason = Column(Text, nullable=False)
-    evidence_json = Column(JSON, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
-
-    model = relationship("ModelRegistry", primaryjoin="ModelLifecycleEvent.model_version == ModelRegistry.model_version", foreign_keys=[model_version], back_populates="lifecycle_events")
-    related_model = relationship("ModelRegistry", primaryjoin="ModelLifecycleEvent.related_model_version == ModelRegistry.model_version", foreign_keys=[related_model_version])
-
-    __table_args__ = (
-        ForeignKeyConstraint(["model_version"], ["model_registry.model_version"], name="fk_mle_model_version"),
-        ForeignKeyConstraint(["related_model_version"], ["model_registry.model_version"], name="fk_mle_related_model_version"),
-        UniqueConstraint("model_version", "lifecycle_seq", name="uq_mle_model_version_seq"),
-        CheckConstraint(
-            "lifecycle_seq >= 1 AND event_type IN ('REGISTERED', 'EVALUATED', 'REJECTED', 'PROMOTED', 'SUPERSEDED', 'ROLLED_BACK', 'ARCHIVED') "
-            "AND to_status IN ('ACTIVE', 'CANDIDATE', 'REJECTED', 'ARCHIVED', 'ROLLED_BACK') "
-            "AND (from_status IS NULL OR from_status IN ('ACTIVE', 'CANDIDATE', 'REJECTED', 'ARCHIVED', 'ROLLED_BACK'))",
-            name="chk_lifecycle_event_vocabulary",
-        ),
-        Index("ix_model_lifecycle_events_model_version", "model_version"),
-        Index("uq_mle_single_registered_per_model", "model_version", unique=True, postgresql_where=text("event_type = 'REGISTERED'"), sqlite_where=text("event_type = 'REGISTERED'")),
-        Index("uq_mle_single_evaluated_per_model", "model_version", unique=True, postgresql_where=text("event_type = 'EVALUATED'"), sqlite_where=text("event_type = 'EVALUATED'")),
     )
 
 
@@ -242,7 +198,6 @@ class ModelPrediction(Base):
     run_mode = Column(String(24), nullable=False)
     is_canonical = Column(Boolean, nullable=False, default=True)
     is_primary = Column(Boolean, nullable=False, default=False)
-    parent_prediction_id = Column(Integer, nullable=True)
     feature_schema_version = Column(String(32), nullable=False, default=FEATURE_SCHEMA_VERSION)
     predicted_return_pct = Column(Float, nullable=False)
     predicted_price_1h = Column(Float, nullable=False)
@@ -267,17 +222,14 @@ class ModelPrediction(Base):
     tick = relationship("MarketTick", foreign_keys=[tick_id], back_populates="predictions")
     outcome_tick = relationship("MarketTick", foreign_keys=[outcome_tick_id], back_populates="outcome_predictions")
     model = relationship("ModelRegistry", primaryjoin="ModelPrediction.model_version == ModelRegistry.model_version", foreign_keys=[model_version], back_populates="predictions")
-    parent_prediction = relationship("ModelPrediction", remote_side=[id], foreign_keys=[parent_prediction_id], backref="child_predictions")
 
     __table_args__ = (
         ForeignKeyConstraint(["tick_id"], ["market_ticks.id"], name="fk_mp_tick_id"),
         ForeignKeyConstraint(["model_version"], ["model_registry.model_version"], name="fk_mp_model_version"),
-        ForeignKeyConstraint(["parent_prediction_id"], ["model_predictions.id"], name="fk_mp_parent_prediction_id"),
         ForeignKeyConstraint(["outcome_tick_id"], ["market_ticks.id"], name="fk_mp_outcome_tick_id"),
         CheckConstraint(
-            "((run_mode = 'PRIMARY' AND is_primary IS TRUE AND is_canonical IS TRUE AND parent_prediction_id IS NULL) "
-            "OR (run_mode = 'SHADOW' AND is_primary IS FALSE AND is_canonical IS TRUE AND parent_prediction_id IS NULL) "
-            "OR (run_mode = 'FORCED_REANALYSIS' AND is_primary IS FALSE AND is_canonical IS FALSE AND parent_prediction_id IS NOT NULL)) "
+            "((run_mode = 'PRIMARY' AND is_primary IS TRUE AND is_canonical IS TRUE) "
+            "OR (run_mode = 'SHADOW' AND is_primary IS FALSE AND is_canonical IS TRUE)) "
             "AND predicted_return_pct NOT IN ('NaN', 'Infinity', '-Infinity') "
             "AND predicted_price_1h NOT IN ('NaN', 'Infinity', '-Infinity') "
             "AND direction_prob_up NOT IN ('NaN', 'Infinity', '-Infinity') "
@@ -340,13 +292,12 @@ def _classify_column_type(raw_type: str) -> str:
 
 CANONICAL_TABLE_COLUMNS: Dict[str, List[Tuple[str, str, bool]]] = {
     "market_ticks": [("id", "integer", False), ("timestamp", "timestamp", False), ("open", "float", False), ("high", "float", False), ("low", "float", False), ("close", "float", False), ("volume", "float", False), ("model_version", "varchar", False), ("feature_schema_version", "varchar", False), ("market_regime", "varchar", True), ("predicted_return_1h", "float", True), ("predicted_price_1h", "float", True), ("model_confidence", "float", True), ("features", "json", True)],
-    "api_telemetry": [("id", "integer", False), ("timestamp", "timestamp", False), ("service_name", "varchar", False), ("endpoint", "varchar", False), ("latency_ms", "float", False), ("status_code", "integer", False), ("retry_count", "integer", False), ("rate_limit_remaining", "integer", True), ("tokens_used", "integer", True), ("cost_estimate_usd", "float", True), ("error_message", "text", True)],
+    "api_telemetry": [("id", "integer", False), ("timestamp", "timestamp", False), ("service_name", "varchar", False), ("endpoint", "varchar", False), ("latency_ms", "float", False), ("status_code", "integer", False), ("error_message", "text", True)],
     "council_audits": [("id", "integer", False), ("timestamp", "timestamp", False), ("tick_id", "integer", True), ("deliberation_latency_ms", "float", True), ("strategist_action", "varchar", False), ("strategist_conviction", "integer", False), ("rag_context_summary", "text", True), ("risk_verdict", "varchar", False), ("veto_reasons", "json", True), ("kelly_fraction", "float", False), ("final_decision", "varchar", False), ("veto_attribution", "varchar", True), ("execution_notes", "text", True)],
     "reconciliations": [("id", "integer", False), ("timestamp", "timestamp", False), ("tick_id", "integer", False), ("predicted_price", "float", False), ("actual_price_at_t_plus_1", "float", False), ("predicted_return_pct", "float", False), ("actual_return_pct", "float", False), ("residual_error", "float", False), ("absolute_error_usd", "float", False), ("percentage_error", "float", False), ("direction_predicted", "varchar", False), ("direction_realized", "varchar", False), ("direction_correct", "boolean", False), ("error_attribution_tag", "varchar", False), ("is_black_swan", "boolean", False)],
     "paper_portfolio": [("id", "integer", False), ("tick_id", "integer", True), ("timestamp", "timestamp", False), ("action", "varchar", False), ("btc_amount", "float", False), ("execution_price", "float", False), ("fee_deducted_usd", "float", False), ("slippage_usd", "float", False), ("cash_balance", "float", False), ("btc_balance", "float", False), ("total_equity_usd", "float", False), ("realized_pnl_usd", "float", False), ("unrealized_pnl_usd", "float", False), ("drawdown_pct", "float", False), ("cumulative_return_pct", "float", False), ("benchmark_btc_equity", "float", False), ("alpha_usd", "float", False), ("alpha_pct", "float", False), ("notes", "text", True)],
-    "model_registry": [("id", "integer", False), ("model_version", "varchar", False), ("regressor_artifact_path", "varchar", False), ("regressor_sha256", "varchar", False), ("classifier_artifact_path", "varchar", False), ("classifier_sha256", "varchar", False), ("feature_schema_version", "varchar", False), ("target_definition", "varchar", False), ("training_dataset_path", "varchar", True), ("training_dataset_sha256", "varchar", True), ("training_row_count", "integer", True), ("split_metadata", "json", True), ("evaluation_metrics", "json", True), ("code_revision_sha", "varchar", True), ("current_status", "varchar", False), ("lifecycle_seq", "integer", False), ("created_at", "timestamp", False)],
-    "model_lifecycle_events": [("id", "integer", False), ("model_version", "varchar", False), ("lifecycle_seq", "integer", False), ("event_type", "varchar", False), ("from_status", "varchar", True), ("to_status", "varchar", False), ("related_model_version", "varchar", True), ("actor", "varchar", False), ("reason", "text", False), ("evidence_json", "json", True), ("created_at", "timestamp", False)],
-    "model_predictions": [("id", "integer", False), ("tick_id", "integer", False), ("model_version", "varchar", False), ("run_mode", "varchar", False), ("is_canonical", "boolean", False), ("is_primary", "boolean", False), ("parent_prediction_id", "integer", True), ("feature_schema_version", "varchar", False), ("predicted_return_pct", "float", False), ("predicted_price_1h", "float", False), ("direction_predicted", "varchar", False), ("direction_prob_up", "float", False), ("clears_hurdle", "boolean", False), ("created_at", "timestamp", False), ("outcome_tick_id", "integer", True), ("evaluation_policy_version", "varchar", True), ("actual_price_at_t_plus_1", "float", True), ("actual_return_pct", "float", True), ("direction_realized", "varchar", True), ("direction_correct", "boolean", True), ("residual_error", "float", True), ("absolute_error_usd", "float", True), ("percentage_error", "float", True), ("is_black_swan", "boolean", True), ("error_attribution_tag", "varchar", True), ("reconciled_at", "timestamp", True)],
+    "model_registry": [("id", "integer", False), ("model_version", "varchar", False), ("regressor_artifact_path", "varchar", False), ("regressor_sha256", "varchar", False), ("classifier_artifact_path", "varchar", False), ("classifier_sha256", "varchar", False), ("feature_schema_version", "varchar", False), ("target_definition", "varchar", False), ("evaluation_metrics", "json", True), ("current_status", "varchar", False), ("lifecycle_seq", "integer", False), ("created_at", "timestamp", False)],
+    "model_predictions": [("id", "integer", False), ("tick_id", "integer", False), ("model_version", "varchar", False), ("run_mode", "varchar", False), ("is_canonical", "boolean", False), ("is_primary", "boolean", False), ("feature_schema_version", "varchar", False), ("predicted_return_pct", "float", False), ("predicted_price_1h", "float", False), ("direction_predicted", "varchar", False), ("direction_prob_up", "float", False), ("clears_hurdle", "boolean", False), ("created_at", "timestamp", False), ("outcome_tick_id", "integer", True), ("evaluation_policy_version", "varchar", True), ("actual_price_at_t_plus_1", "float", True), ("actual_return_pct", "float", True), ("direction_realized", "varchar", True), ("direction_correct", "boolean", True), ("residual_error", "float", True), ("absolute_error_usd", "float", True), ("percentage_error", "float", True), ("is_black_swan", "boolean", True), ("error_attribution_tag", "varchar", True), ("reconciled_at", "timestamp", True)],
 }
 
 CANONICAL_FOREIGN_KEYS = [
@@ -650,7 +601,7 @@ sys.modules["src.database.queries"] = sys.modules[__name__]
 
 __all__ = [
     "Base", "MarketTick", "ApiTelemetry", "CouncilAudit", "Reconciliation",
-    "PaperPortfolio", "ModelRegistry", "ModelLifecycleEvent", "ModelPrediction",
+    "PaperPortfolio", "ModelRegistry", "ModelPrediction",
     "SchemaDriftError", "CANONICAL_TABLE_COLUMNS", "CANONICAL_FOREIGN_KEYS",
     "CANONICAL_CONSTRAINTS", "CANONICAL_INDEXES", "verify_db_schema",
     "get_database_url", "create_db_engine", "engine", "SessionLocal", "get_db",
