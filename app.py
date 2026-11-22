@@ -1028,6 +1028,24 @@ def classify_ground_truth_result(row) -> str:
     return "MATCH (CHOP)"
 
 
+def format_economic_result(row, friction_pct: float = ROUND_TRIP_FRICTION_PCT) -> str:
+    # returns fee-adjusted economic proof accounting for round-trip friction
+    pred_ret = float(row.get("predicted_return_pct") or 0.0)
+    act_ret = float(row.get("actual_return_pct") or 0.0)
+    pred_dir = str(row.get("direction_predicted") or "").upper().strip()
+    if not pred_dir:
+        pred_dir = "UP" if pred_ret >= 0 else "DOWN"
+
+    if abs(pred_ret) < friction_pct:
+        if abs(act_ret) >= friction_pct * 2:
+            return f"CASH (0.00% · missed {act_ret:+.2f}%)"
+        return "HELD CASH (0.00%)"
+
+    gross_ret = act_ret if pred_dir == "UP" else -act_ret
+    net_ret = gross_ret - friction_pct
+    return f"WIN ({net_ret:+.2f}% net)" if net_ret > 0 else f"LOSS ({net_ret:+.2f}% net)"
+
+
 def format_ground_truth_diagnosis(row) -> str:
     # formats human-readable economic explanation of why a prediction was accurate, noise, or a missed trade
     diag = row.get("diagnosis_summary")
@@ -1105,7 +1123,13 @@ def render_ground_truth_html_table(df_subset: pd.DataFrame) -> None:
 
         # outcome result badges
         esc_res = html.escape(result_val)
-        if "Correct" in result_val or "MATCH" in result_val:
+        if "WIN" in result_val:
+            res_badge = f'<span style="background: rgba(46, 160, 67, 0.15); color: #3FB950; border: 1px solid rgba(46, 160, 67, 0.3); padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.72rem; white-space: nowrap;">{esc_res}</span>'
+        elif "LOSS" in result_val:
+            res_badge = f'<span style="background: rgba(248, 81, 73, 0.15); color: #F85149; border: 1px solid rgba(248, 81, 73, 0.3); padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.72rem; white-space: nowrap;">{esc_res}</span>'
+        elif "CASH" in result_val:
+            res_badge = f'<span style="background: rgba(139, 148, 158, 0.15); color: #8B949E; border: 1px solid rgba(139, 148, 158, 0.3); padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.72rem; white-space: nowrap;">{esc_res}</span>'
+        elif "Correct" in result_val or "MATCH" in result_val:
             res_badge = f'<span style="background: rgba(46, 160, 67, 0.15); color: #3FB950; border: 1px solid rgba(46, 160, 67, 0.3); padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.72rem; white-space: nowrap;">{esc_res}</span>'
         elif "Wrong" in result_val or "MISMATCH" in result_val:
             res_badge = f'<span style="background: rgba(248, 81, 73, 0.15); color: #F85149; border: 1px solid rgba(248, 81, 73, 0.3); padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.72rem; white-space: nowrap;">{esc_res}</span>'
@@ -1549,10 +1573,7 @@ with tab_ground_truth:
             table_df["Error ($)"] = table_df["absolute_error_usd"].apply(lambda e: f"${float(e or 0):,.2f}")
             table_df["Pred Dir"] = table_df.get("direction_predicted", table_df["predicted_return_pct"].apply(lambda r: "UP" if float(r or 0) >= 0 else "DOWN"))
             table_df["Actual Dir"] = table_df.get("direction_realized", table_df["actual_return_pct"].apply(lambda r: "UP" if float(r or 0) >= 0 else "DOWN"))
-            table_df["Result"] = table_df.apply(
-                lambda r: "Correct" if (pd.notna(r.get("direction_correct")) and bool(r.get("direction_correct"))) or (r.get("Pred Dir") == r.get("Actual Dir") and r.get("Pred Dir") in ("UP", "DOWN")) else "Wrong",
-                axis=1,
-            )
+            table_df["Result"] = table_df.apply(format_economic_result, axis=1)
             table_df["AI Diagnosis (1-Line)"] = table_df.apply(format_ground_truth_diagnosis, axis=1)
 
             show_cols = ["Time (UTC)", "Model", "Start Price", "Pred Target", "Actual (T+1h)", "Error ($)", "Pred Dir", "Actual Dir", "Result", "AI Diagnosis (1-Line)"]
