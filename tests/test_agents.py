@@ -145,3 +145,58 @@ def test_gemini_postmortem_offline_handling():
     assert "xgb_onnx_v1.0.0" in res["per_model"]
     diag = res["per_model"]["xgb_onnx_v1.0.0"]["diagnosis_summary"]
     assert "unavailable" in diag.lower() or "manual review" in diag.lower()
+
+
+def test_gemini_postmortem_raw_control_character_parsing(monkeypatch):
+    # verifies postmortem parser tolerates unescaped control characters such as raw newlines
+    import json
+    from src import agents
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setattr(agents, "_get_gemini_api_key", lambda: "mock_api_key")
+
+    raw_json_with_control_chars = (
+        '{\n'
+        '  "market_summary": "First line summary.\nSecond line summary with unescaped newline.",\n'
+        '  "per_model": {\n'
+        '    "xgb_onnx_v1.0.0": {\n'
+        '      "root_cause_driver": "VOLATILITY",\n'
+        '      "diagnosis_summary": "Line one diagnosis.\nLine two diagnosis with raw newline."\n'
+        '    }\n'
+        '  }\n'
+        '}'
+    )
+
+    # ensure standard strict json.loads fails on this string
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(raw_json_with_control_chars)
+
+    # mock fallback generator returning raw unescaped json
+    monkeypatch.setattr(
+        agents,
+        "generate_with_gemini_fallback",
+        lambda api_key, prompt, **kwargs: (raw_json_with_control_chars, "gemini-3.1-flash-lite") if kwargs.get("return_model") else raw_json_with_control_chars,
+    )
+
+    tick_features = {"close": 65000.0, "volatility_range_pct": 1.2, "taker_buy_ratio": 0.52}
+    mcp_context = {"news_headlines": ["ETF inflows continue."]}
+    model_outcomes = [
+        {
+            "model_version": "xgb_onnx_v1.0.0",
+            "predicted_price": 65150.0,
+            "actual_price": 65200.0,
+            "predicted_return_pct": 0.23,
+            "actual_return_pct": 0.31,
+            "direction_predicted": "UP",
+            "direction_realized": "UP",
+            "direction_correct": True,
+            "error_usd": 50.0,
+        }
+    ]
+
+    res = agents.generate_hourly_postmortem_with_gemini(tick_features, mcp_context, model_outcomes)
+    assert res["gemini_status"] == "OK"
+    assert res["model_used"] == "gemini-3.1-flash-lite"
+    assert res["market_summary"] == "First line summary.\nSecond line summary with unescaped newline."
+    diag = res["per_model"]["xgb_onnx_v1.0.0"]["diagnosis_summary"]
+    assert diag == "Line one diagnosis.\nLine two diagnosis with raw newline."
+
