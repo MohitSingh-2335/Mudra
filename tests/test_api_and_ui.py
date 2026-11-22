@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app
-from app import format_risk_levels
+from app import format_economic_result, format_risk_levels
 from config import CLASSIFIER_FEATURES, FEATURED_BTC_DATA_PATH, REGRESSOR_FEATURES
 from src.api import (
     ACTIVE_MODEL_VERSION,
@@ -162,3 +162,37 @@ def test_app_source_contains_governance_and_disclaimers():
     assert "Forecast Error Investigations & Root-Cause Audit Log" in content
     assert "investigation_headline_search" in content
     assert "investigation_status_filter" in content
+
+
+def test_format_economic_result_fee_hurdle():
+    # verifies fee friction turns small directional wins into economic losses and filters sub-hurdle moves
+    # 1. Traded move (+0.20% predicted UP, clears 0.14% hurdle), actual move was only +0.05%
+    # gross = +0.05%, net = 0.05% - 0.14% = -0.09% -> LOSS
+    row_traded = {
+        "predicted_return_pct": 0.20,
+        "actual_return_pct": 0.05,
+        "direction_predicted": "UP",
+    }
+    res_traded = format_economic_result(row_traded, friction_pct=0.14)
+    assert "LOSS" in res_traded
+    assert "-0.09% net" in res_traded
+
+    # 2. Sub-hurdle move (+0.05% predicted, below 0.14% hurdle), actual was +0.05% -> HELD CASH
+    row_below_hurdle = {
+        "predicted_return_pct": 0.05,
+        "actual_return_pct": 0.05,
+        "direction_predicted": "UP",
+    }
+    res_cash = format_economic_result(row_below_hurdle, friction_pct=0.14)
+    assert res_cash == "HELD CASH (0.00%)"
+
+    # 3. Traded winning move (+0.40% predicted UP, actual +0.70%) -> WIN (+0.56% net)
+    row_win = {
+        "predicted_return_pct": 0.40,
+        "actual_return_pct": 0.70,
+        "direction_predicted": "UP",
+    }
+    res_win = format_economic_result(row_win, friction_pct=0.14)
+    assert "WIN" in res_win
+    assert "+0.56% net" in res_win
+
