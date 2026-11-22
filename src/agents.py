@@ -601,8 +601,10 @@ Respond with strictly valid JSON matching this schema:
   }}
 }}"""
 
-        raw_resp, model_used = generate_with_gemini_fallback(api_key, prompt, return_model=True)
-        parsed = json.loads(_clean_json_response(raw_resp))
+        raw_resp, model_used = generate_with_gemini_fallback(
+            api_key, prompt, return_model=True, response_mime_type="application/json"
+        )
+        parsed = json.loads(_clean_json_response(raw_resp), strict=False)
 
         per_model = {}
         raw_per_model = parsed.get("per_model", {})
@@ -759,6 +761,7 @@ def generate_with_gemini_fallback(
     timeout_sec: float = 12.0,
     total_deadline_sec: float = 25.0,
     return_model: bool = False,
+    response_mime_type: Optional[str] = None,
 ) -> Union[str, Tuple[str, str]]:
     # generates response using gemini with per-request timeout and candidate fallbacks
     import google.generativeai as genai
@@ -773,17 +776,35 @@ def generate_with_gemini_fallback(
         if (time.perf_counter() - t0) >= total_deadline_sec:
             break
         try:
+            model_kwargs = {}
             if system_instruction and idx == 0:
+                model_kwargs["system_instruction"] = system_instruction
+            if response_mime_type:
+                model_kwargs["generation_config"] = {"response_mime_type": response_mime_type}
+
+            try:
+                model = genai.GenerativeModel(model_name=model_name, **model_kwargs)
+            except TypeError:
                 try:
-                    model = genai.GenerativeModel(model_name=model_name, system_instruction=system_instruction)
+                    model = genai.GenerativeModel(model_name=model_name)
                 except TypeError:
                     model = genai.GenerativeModel(model_name)
-            else:
-                model = genai.GenerativeModel(model_name)
+
+            gen_kwargs = {}
+            if response_mime_type:
+                gen_kwargs["generation_config"] = {"response_mime_type": response_mime_type}
+
             try:
-                resp = model.generate_content(prompt, request_options={"timeout": float(timeout_sec)})
+                resp = model.generate_content(
+                    prompt,
+                    request_options={"timeout": float(timeout_sec)},
+                    **gen_kwargs,
+                )
             except TypeError:
-                resp = model.generate_content(prompt)
+                try:
+                    resp = model.generate_content(prompt, **gen_kwargs)
+                except TypeError:
+                    resp = model.generate_content(prompt)
             text_out = getattr(resp, "text", None)
             if text_out and str(text_out).strip():
                 clean_text = str(text_out).strip()
@@ -843,10 +864,10 @@ def generate_market_commentary(
             f"Bullish drivers: {pos_str}\nBearish drivers: {neg_str}\nRAG context: {rag_context_str}\n"
             f"Return strictly JSON with keys: trade_thesis, conviction_score, executive_summary, quantitative_driver_analysis, macro_market_context, key_risks."
         )
-        raw_text = generate_with_gemini_fallback(api_key, prompt)
+        raw_text = generate_with_gemini_fallback(api_key, prompt, response_mime_type="application/json")
         clean_text = raw_text.strip()
         match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", clean_text)
-        report_data = json.loads(match.group(1).strip() if match else clean_text)
+        report_data = json.loads(match.group(1).strip() if match else clean_text, strict=False)
 
         valid_theses = {"STRONG BULLISH", "MODERATE BULLISH", "NEUTRAL", "MODERATE BEARISH", "STRONG BEARISH"}
         raw_thesis = str(report_data.get("trade_thesis", "NEUTRAL")).upper().strip()
@@ -937,7 +958,10 @@ def strategist_node(state: AgentState) -> AgentState:
 - Context: {state['rag_context'][:450]}
 JSON Keys: trade_action (BUY/SELL/HOLD), conviction_score (1-10), executive_summary, strategist_thesis"""
 
-            parsed = json.loads(_clean_json_response(generate_with_gemini_fallback(api_key, prompt)))
+            parsed = json.loads(
+                _clean_json_response(generate_with_gemini_fallback(api_key, prompt, response_mime_type="application/json")),
+                strict=False,
+            )
             action = str(parsed.get("trade_action", "HOLD")).strip().upper()
             state["trade_action"] = action if action in ("BUY", "SELL", "HOLD") else "HOLD"
             state["conviction_score"] = max(1, min(10, int(parsed.get("conviction_score", 5))))
