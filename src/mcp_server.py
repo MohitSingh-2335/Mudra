@@ -20,30 +20,95 @@ except ImportError:
     mcp = _FallbackMCP("Mudra-Quant-Intelligence-MCP")
 
 from config import EXCHANGE_CONNECT_TIMEOUT, EXCHANGE_READ_TIMEOUT
-BINANCE_FUTURES_PREMIUM_URL = "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT"
+
+DERIBIT_TICKER_URL = "https://www.deribit.com/api/v2/public/ticker?instrument_name=BTC-PERPETUAL"
+KRAKEN_FUTURES_TICKERS_URL = "https://futures.kraken.com/derivatives/api/v3/tickers"
+CRYPTOCOMPARE_NEWS_URL = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN&categories=BTC"
+BROWSER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 
 @mcp.tool()
 def get_live_btc_derivatives_pulse() -> Dict[str, Any]:
-    """Fetches real-time BTC/USDT perpetual futures Mark Price, Index Price, and Funding Rate."""
+    # fetches real-time btc perpetual futures mark price, index price, and funding rate using dual us-friendly free apis
+    errors: List[str] = []
+
+    # 1. Primary: Deribit Public Ticker (no API key required)
     try:
-        resp = requests.get(BINANCE_FUTURES_PREMIUM_URL, timeout=(EXCHANGE_CONNECT_TIMEOUT, EXCHANGE_READ_TIMEOUT))
+        resp = requests.get(
+            DERIBIT_TICKER_URL,
+            timeout=(EXCHANGE_CONNECT_TIMEOUT, EXCHANGE_READ_TIMEOUT),
+            headers={"User-Agent": BROWSER_USER_AGENT},
+        )
         if resp.status_code == 200:
-            data = resp.json()
-            mark, idx, funding = float(data.get("markPrice", 0.0)), float(data.get("indexPrice", 0.0)), float(data.get("lastFundingRate", 0.0)) * 100.0
+            data = resp.json().get("result", {})
+            mark = float(data.get("mark_price", 0.0))
+            idx = float(data.get("index_price", 0.0))
+            funding_raw = float(data.get("funding_8h", 0.0))
+            funding = funding_raw * 100.0
             sentiment = "Crowded Longs (Positive Funding)" if funding > 0.015 else ("Crowded Shorts (Negative Funding)" if funding < -0.005 else "Neutral Funding")
-            return {
-                "status": "LIVE", "symbol": "BTCUSDT-PERP", "mark_price_usd": round(mark, 2),
-                "spot_index_price_usd": round(idx, 2), "futures_basis_usd": round(mark - idx, 2),
-                "funding_rate_8h_pct": round(funding, 4), "derivatives_regime": sentiment,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-    except Exception:
-        pass
+            if mark > 0 and idx > 0:
+                return {
+                    "status": "LIVE",
+                    "source": "deribit",
+                    "symbol": "BTC-PERPETUAL",
+                    "mark_price_usd": round(mark, 2),
+                    "spot_index_price_usd": round(idx, 2),
+                    "futures_basis_usd": round(mark - idx, 2),
+                    "funding_rate_8h_pct": round(funding, 6),
+                    "derivatives_regime": sentiment,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+        else:
+            errors.append(f"deribit: HTTP {resp.status_code}")
+    except Exception as exc:
+        errors.append(f"deribit: {exc}")
+
+    # 2. Fallback: Kraken Futures Public Tickers (no API key required)
+    try:
+        resp = requests.get(
+            KRAKEN_FUTURES_TICKERS_URL,
+            timeout=(EXCHANGE_CONNECT_TIMEOUT, EXCHANGE_READ_TIMEOUT),
+            headers={"User-Agent": BROWSER_USER_AGENT},
+        )
+        if resp.status_code == 200:
+            tickers = resp.json().get("tickers", [])
+            xbt = next((t for t in tickers if t.get("symbol") == "PF_XBTUSD"), None)
+            if xbt:
+                mark = float(xbt.get("markPrice", 0.0))
+                idx = float(xbt.get("indexPrice", 0.0))
+                funding_raw = float(xbt.get("fundingRate", 0.0))
+                funding = funding_raw * 100.0
+                sentiment = "Crowded Longs (Positive Funding)" if funding > 0.015 else ("Crowded Shorts (Negative Funding)" if funding < -0.005 else "Neutral Funding")
+                if mark > 0 and idx > 0:
+                    return {
+                        "status": "LIVE",
+                        "source": "kraken_futures",
+                        "symbol": "PF_XBTUSD",
+                        "mark_price_usd": round(mark, 2),
+                        "spot_index_price_usd": round(idx, 2),
+                        "futures_basis_usd": round(mark - idx, 2),
+                        "funding_rate_8h_pct": round(funding, 6),
+                        "derivatives_regime": sentiment,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+            else:
+                errors.append("kraken_futures: PF_XBTUSD ticker not found")
+        else:
+            errors.append(f"kraken_futures: HTTP {resp.status_code}")
+    except Exception as exc:
+        errors.append(f"kraken_futures: {exc}")
+
     return {
-        "status": "OFFLINE_FALLBACK", "symbol": "BTCUSDT-PERP", "mark_price_usd": 0.0,
-        "spot_index_price_usd": 0.0, "futures_basis_usd": 0.0, "funding_rate_8h_pct": 0.0100,
-        "derivatives_regime": "Neutral Funding (Offline Fallback)", "timestamp": datetime.now(timezone.utc).isoformat(),
+        "status": "OFFLINE_FALLBACK",
+        "source": "none",
+        "symbol": "BTC-PERPETUAL",
+        "mark_price_usd": 0.0,
+        "spot_index_price_usd": 0.0,
+        "futures_basis_usd": 0.0,
+        "funding_rate_8h_pct": 0.0100,
+        "derivatives_regime": "Neutral Funding (Offline Fallback)",
+        "error": " ; ".join(errors) if errors else "DERIVATIVES_FEEDS_UNAVAILABLE",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -112,62 +177,98 @@ def get_spot_and_futures_trade_plan(
 
 @mcp.tool()
 def get_recent_btc_news_headlines(hours_back: int = 2, max_items: int = 5) -> Dict[str, Any]:
-    # fetches recent public bitcoin rss news headlines from coindesk and cointelegraph
+    # fetches recent public bitcoin news from cryptocompare json with coindesk and cointelegraph rss fallback
     import xml.etree.ElementTree as ET
     from datetime import timedelta
     from email.utils import parsedate_to_datetime
 
-    feeds = [
-        ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
-        ("Cointelegraph", "https://cointelegraph.com/rss/tag/bitcoin"),
-    ]
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, int(hours_back)))
+    cutoff_ts = cutoff.timestamp()
     headlines: List[Dict[str, Any]] = []
     errors: List[str] = []
 
-    for source_name, url in feeds:
-        try:
-            resp = requests.get(url, timeout=(3.0, 5.0), headers={"User-Agent": "Mudra-Quant/1.0"})
-            if resp.status_code == 200:
-                root = ET.fromstring(resp.content)
-                for item in root.findall(".//item"):
-                    title_elem = item.find("title")
-                    pub_elem = item.find("pubDate")
-                    title = title_elem.text.strip() if title_elem is not None and title_elem.text else ""
-                    if not title:
-                        continue
-                    pub_dt = None
-                    if pub_elem is not None and pub_elem.text:
-                        try:
-                            pub_dt = parsedate_to_datetime(pub_elem.text.strip())
-                            if not pub_dt.tzinfo:
-                                pub_dt = pub_dt.replace(tzinfo=timezone.utc)
-                            else:
-                                pub_dt = pub_dt.astimezone(timezone.utc)
-                        except Exception:
-                            pub_dt = None
-                    if pub_dt and pub_dt >= cutoff:
-                        headlines.append({
-                            "title": title,
-                            "published_utc": pub_dt.isoformat(),
-                            "source": source_name,
-                        })
-        except Exception as exc:
-            errors.append(f"{source_name}: {exc}")
+    # 1. Primary: CryptoCompare BTC News JSON
+    try:
+        resp = requests.get(
+            CRYPTOCOMPARE_NEWS_URL,
+            timeout=(3.0, 5.0),
+            headers={"User-Agent": BROWSER_USER_AGENT},
+        )
+        if resp.status_code == 200:
+            data = resp.json().get("Data", [])
+            for item in data:
+                title = str(item.get("title", "")).strip()
+                pub_on = float(item.get("published_on", 0))
+                source_name = str(item.get("source", "CryptoCompare")).strip()
+                if title and pub_on >= cutoff_ts:
+                    pub_dt = datetime.fromtimestamp(pub_on, tz=timezone.utc)
+                    headlines.append({
+                        "title": title,
+                        "published_utc": pub_dt.isoformat(),
+                        "source": source_name,
+                    })
+        else:
+            errors.append(f"CryptoCompare: HTTP {resp.status_code}")
+    except Exception as exc:
+        errors.append(f"CryptoCompare: {exc}")
+
+    # 2. Fallback: CoinDesk and Cointelegraph RSS feeds
+    if not headlines:
+        feeds = [
+            ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+            ("Cointelegraph", "https://cointelegraph.com/rss/tag/bitcoin"),
+        ]
+        for source_name, url in feeds:
+            try:
+                resp = requests.get(url, timeout=(3.0, 5.0), headers={"User-Agent": BROWSER_USER_AGENT})
+                if resp.status_code == 200:
+                    root = ET.fromstring(resp.content)
+                    for item in root.findall(".//item"):
+                        title_elem = item.find("title")
+                        pub_elem = item.find("pubDate")
+                        title = title_elem.text.strip() if title_elem is not None and title_elem.text else ""
+                        if not title:
+                            continue
+                        pub_dt = None
+                        if pub_elem is not None and pub_elem.text:
+                            try:
+                                pub_dt = parsedate_to_datetime(pub_elem.text.strip())
+                                if not pub_dt.tzinfo:
+                                    pub_dt = pub_dt.replace(tzinfo=timezone.utc)
+                                else:
+                                    pub_dt = pub_dt.astimezone(timezone.utc)
+                            except Exception:
+                                pub_dt = None
+                        if pub_dt and pub_dt >= cutoff:
+                            headlines.append({
+                                "title": title,
+                                "published_utc": pub_dt.isoformat(),
+                                "source": source_name,
+                            })
+                else:
+                    errors.append(f"{source_name}: HTTP {resp.status_code}")
+            except Exception as exc:
+                errors.append(f"{source_name}: {exc}")
 
     headlines.sort(key=lambda x: str(x.get("published_utc", "")), reverse=True)
     headlines = headlines[:max_items]
+    titles_only = [h["title"] for h in headlines]
 
-    if not headlines and errors:
-        return {
-            "status": "UNAVAILABLE",
-            "headlines": [],
-            "error": "; ".join(errors),
-        }
+    if headlines:
+        status = "LIVE"
+    elif any("HTTP 200" in e for e in errors) or not errors:
+        status = "OK_NO_HEADLINES"
+    else:
+        status = "UNAVAILABLE"
 
     return {
-        "status": "LIVE" if headlines else "OK_NO_HEADLINES",
-        "headlines": headlines,
+        "status": status,
+        "hours_back": int(hours_back),
+        "count": len(titles_only),
+        "headlines": titles_only,
+        "articles": headlines,
+        "error": " ; ".join(errors) if (status == "UNAVAILABLE" and errors) else None,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
