@@ -308,9 +308,9 @@ def test_gemini_model_fallback_and_mcp_trade_plan(monkeypatch):
             self.m = model_name or kwargs.get("model_name")
             called_models.append(self.m)
 
-        def generate_content(self, prompt):
-            if "2.5" in str(self.m):
-                raise RuntimeError("Rate limit 429 on 2.5")
+        def generate_content(self, prompt, **kwargs):
+            if len(called_models) == 1:
+                raise RuntimeError("Rate limit 429 on primary model candidate")
             res = MagicMock()
             res.text = "```json\n{\"trade_thesis\": \"MODERATE BULLISH\", \"conviction_score\": 7, \"executive_summary\": \"OK\", \"quantitative_driver_analysis\": \"SHAP OK\", \"macro_market_context\": \"RAG OK\", \"key_risks\": [\"Risk 1\"]}\n```"
             return res
