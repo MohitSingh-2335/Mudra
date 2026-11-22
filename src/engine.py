@@ -1002,7 +1002,8 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
                     pulse_status = 503
                     pulse_err = str(mcp_err)
                     pulse = {"status": "fallback", "funding_rate_8h_pct": 0.01, "derivatives_regime": "Neutral Funding", "futures_basis_usd": 0.0}
-                log_telemetry(session, "mcp_derivatives", "/fapi/v1/premiumIndex", pulse_lat, pulse_status, pulse_err)
+                pulse_endpoint = "/api/v2/public/ticker" if pulse.get("source") == "deribit" else ("/derivatives/api/v3/tickers" if pulse.get("source") == "kraken_futures" else "/derivatives/pulse")
+                log_telemetry(session, "mcp_derivatives", pulse_endpoint, pulse_lat, pulse_status, pulse_err)
 
                 # log mcp btc news headlines telemetry
                 t0_news = time.perf_counter()
@@ -1010,14 +1011,14 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
                     from src.mcp_server import get_recent_btc_news_headlines
                     news = get_recent_btc_news_headlines(hours_back=6, max_items=5)
                     news_lat = (time.perf_counter() - t0_news) * 1000.0
-                    news_status = 200 if news.get("status") == "LIVE" else 503
+                    news_status = 200 if news.get("status") in ("LIVE", "OK_NO_HEADLINES") else 503
                     news_err = None if news_status == 200 else str(news.get("error") or "FEED_OFFLINE")
                 except Exception as news_err_exc:
                     news_lat = (time.perf_counter() - t0_news) * 1000.0
                     news_status = 503
                     news_err = str(news_err_exc)
                     news = {"status": "UNAVAILABLE", "headlines": []}
-                log_telemetry(session, "mcp_rss_news", "coindesk+cointelegraph_rss", news_lat, news_status, news_err)
+                log_telemetry(session, "mcp_rss_news", "cryptocompare+rss_news", news_lat, news_status, news_err)
 
                 mcp_ctx = fetch_mcp_context(limit=3)
                 if pulse.get("status") == "LIVE":
