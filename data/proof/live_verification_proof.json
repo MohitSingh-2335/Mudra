@@ -1,0 +1,190 @@
+{
+  "verified_at_utc": "2026-11-22T15:47:42.061279+00:00",
+  "environment": {
+    "python_version": "3.11.17",
+    "active_gemini_status": {
+      "configured": true,
+      "masked_key": "AQ.A...SfVQ",
+      "preferred_model": "gemini-3.1-flash-lite",
+      "fallback_models": [
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash-lite",
+        "gemini-3.8-flash",
+        "gemini-3.6-flash",
+        "gemini-flash-latest"
+      ],
+      "label": "Gemini AI: Active (gemini-3.1-flash-lite)"
+    }
+  },
+  "mcp_derivatives": {
+    "status": "LIVE",
+    "source": "deribit",
+    "symbol": "BTC-PERPETUAL",
+    "mark_price_usd": 60717.35,
+    "spot_index_price_usd": 60722.48,
+    "futures_basis_usd": -5.13,
+    "funding_rate_8h_pct": 4e-06,
+    "derivatives_regime": "Neutral Funding",
+    "timestamp": "2026-11-22T15:47:42.347187+00:00"
+  },
+  "mcp_news": {
+    "status": "LIVE",
+    "hours_back": 6,
+    "count": 1,
+    "headlines": [
+      "Bitcoin's quantum security challenge extends to bridges, custodians and millions of coins"
+    ],
+    "articles": [
+      {
+        "title": "Bitcoin's quantum security challenge extends to bridges, custodians and millions of coins",
+        "published_utc": "2026-11-22T14:00:00+00:00",
+        "source": "CoinDesk"
+      }
+    ],
+    "error": null,
+    "timestamp": "2026-11-22T15:47:43.891543+00:00"
+  },
+  "gemini_postmortem": {
+    "gemini_status": "OK",
+    "model_used": "gemini-3.1-flash-lite",
+    "error_detail": null,
+    "market_summary": "Bitcoin remained relatively stagnant with a closing price identical to the start price of $60,717.35, despite a 1.45% volatility spread and news regarding quantum security risks. Order flow showed a slight bullish bias with a 54.00% Taker Buy Ratio.",
+    "per_model": {
+      "lgbm_v3.0.0": {
+        "root_cause_driver": "BULLISH_BIAS_MISALIGNMENT",
+        "diagnosis_summary": "The model incorrectly forecasted a 0.25% increase, resulting in a $150.00 deviation from the actual flat performance."
+      },
+      "xgb_v2.0.0": {
+        "root_cause_driver": "DIRECTIONAL_REGIME_ADHERENCE",
+        "diagnosis_summary": "The model correctly predicted a downward movement, maintaining a tight error margin of only $30.00 against the realized price."
+      }
+    }
+  },
+  "rag_hydration": {
+    "hydrated_count": 50,
+    "chromadb_total_docs": 60,
+    "sample_retrieved_documents": [
+      "Model: xgb_onnx_v1.0.0 | Pred: UP ($58,951.91) | Actual: UP ($59,160.01) | Correct: True | Tag: MOMENTUM_UNDERESTIMATED | Notes: The model correctly predicted an upward move of +0.05% to $58,951.91 but underestimated the actual +0.40% move to $59,160.01, resulting in a $208.10 error.",
+      "Model: xgb_v2.0.0 | Pred: UP ($59,316.60) | Actual: DOWN ($58,924.26) | Correct: False | Tag: DIRECTION_MISALIGNED | Notes: The model incorrectly projected a slight rise to $59,316.60 (+0.01%) while actual price dropped to $58,924.26 (-0.66%), incurring an error of $392.34."
+    ]
+  },
+  "neon_snapshot": {
+    "latest_hourly_postmortems": [
+      {
+        "id": 23,
+        "tick_id": 1065,
+        "status": "OK",
+        "news_count": 1,
+        "created_at": "2026-11-22 12:02:41.892432+00:00"
+      },
+      {
+        "id": 22,
+        "tick_id": 1064,
+        "status": "OK",
+        "news_count": 1,
+        "created_at": "2026-11-22 11:02:54.629145+00:00"
+      },
+      {
+        "id": 21,
+        "tick_id": 1063,
+        "status": "OK",
+        "news_count": 1,
+        "created_at": "2026-11-22 10:02:51.825435+00:00"
+      }
+    ],
+    "latest_model_predictions": [
+      {
+        "id": 1161,
+        "tick_id": 1066,
+        "model_version": "xgb_v2.0.0",
+        "direction_predicted": "DOWN",
+        "direction_realized": null,
+        "direction_correct": null,
+        "diagnosis_summary": null
+      },
+      {
+        "id": 1160,
+        "tick_id": 1066,
+        "model_version": "lgbm_v3.0.0",
+        "direction_predicted": "DOWN",
+        "direction_realized": null,
+        "direction_correct": null,
+        "diagnosis_summary": null
+      },
+      {
+        "id": 1159,
+        "tick_id": 1066,
+        "model_version": "xgb_onnx_v1.0.0",
+        "direction_predicted": "DOWN",
+        "direction_realized": null,
+        "direction_correct": null,
+        "diagnosis_summary": null
+      },
+      {
+        "id": 1158,
+        "tick_id": 1065,
+        "model_version": "xgb_v2.0.0",
+        "direction_predicted": "UP",
+        "direction_realized": "UP",
+        "direction_correct": true,
+        "diagnosis_summary": "Achieved the lowest forecast error of $153.99 by correctly predicting UP to $60,908.75 (+0.05%) against the actual outcome of $61,062.74 (+0.31%)."
+      },
+      {
+        "id": 1157,
+        "tick_id": 1065,
+        "model_version": "lgbm_v3.0.0",
+        "direction_predicted": "UP",
+        "direction_realized": "UP",
+        "direction_correct": true,
+        "diagnosis_summary": "Correctly predicted UP movement to $60,897.14 (+0.03%), yielding a $165.60 error relative to the actual price of $61,062.74 (+0.31%)."
+      },
+      {
+        "id": 1156,
+        "tick_id": 1065,
+        "model_version": "xgb_onnx_v1.0.0",
+        "direction_predicted": "UP",
+        "direction_realized": "UP",
+        "direction_correct": true,
+        "diagnosis_summary": "Correctly forecasted UP direction to $60,884.78 (+0.01%) but underestimated the actual $61,062.74 (+0.31%) move, resulting in an error of $177.96."
+      }
+    ],
+    "latest_api_telemetry": [
+      {
+        "id": 238,
+        "service_name": "gemini_api",
+        "endpoint": "hourly_postmortem",
+        "latency_ms": 22104.7,
+        "status_code": 200,
+        "error_message": null,
+        "timestamp": "2026-11-22 12:02:41.731843+00:00"
+      },
+      {
+        "id": 237,
+        "service_name": "mcp_rss_news",
+        "endpoint": "coindesk+cointelegraph_rss",
+        "latency_ms": 481.0,
+        "status_code": 200,
+        "error_message": null,
+        "timestamp": "2026-11-22 12:02:18.851053+00:00"
+      },
+      {
+        "id": 236,
+        "service_name": "mcp_derivatives",
+        "endpoint": "/fapi/v1/premiumIndex",
+        "latency_ms": 576.4,
+        "status_code": 503,
+        "error_message": "OFFLINE_FALLBACK",
+        "timestamp": "2026-11-22 12:02:18.277833+00:00"
+      },
+      {
+        "id": 235,
+        "service_name": "binance_vision",
+        "endpoint": "/api/v3/klines",
+        "latency_ms": 593.5,
+        "status_code": 200,
+        "error_message": null,
+        "timestamp": "2026-11-22 12:02:14.609674+00:00"
+      }
+    ]
+  }
+}
