@@ -77,7 +77,13 @@ from src.model_loader import load_verified_model
 
 load_dotenv(".env")
 ALLOWED_TRADE_ACTIONS = ("HOLD", "BUY", "SELL")
-GEMINI_MODEL_CANDIDATES = ("gemini-2.5-flash", "gemini-3.5-flash", "gemini-3.8-flash", "gemini-flash-latest")
+GEMINI_MODEL_CANDIDATES = (
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-flash-latest",
+)
 
 # ---------------------------------------------------------------------------
 # 1. Episodic RAG Memory (ChromaDB)
@@ -101,6 +107,33 @@ def _read_raw_gemini_api_key() -> Optional[str]:
                     return str(st.secrets[var]).strip()
     except Exception:
         pass
+    # check .streamlit/secrets.toml when running outside streamlit
+    secrets_path = Path(__file__).resolve().parent.parent / ".streamlit" / "secrets.toml"
+    if secrets_path.exists():
+        try:
+            import tomllib
+            sec_data = tomllib.loads(secrets_path.read_text(encoding="utf-8"))
+            for var in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+                if var in sec_data and str(sec_data[var]).strip() != "your_gemini_api_key_here":
+                    return str(sec_data[var]).strip()
+            for sec in ("Google", "google", "gemini", "Gemini"):
+                if sec in sec_data and isinstance(sec_data[sec], dict) and "api_key" in sec_data[sec]:
+                    v = str(sec_data[sec]["api_key"]).strip()
+                    if v and v != "your_gemini_api_key_here":
+                        return v
+        except Exception:
+            pass
+    # check C:\Users\2335m\.env if running locally
+    home_env = Path(r"C:\Users\2335m\.env")
+    if home_env.exists():
+        try:
+            for line in home_env.read_text(encoding="utf-8").splitlines():
+                if line.startswith(("GEMINI_API_KEY=", "GOOGLE_API_KEY=")):
+                    v = line.split("=", 1)[1].strip().strip('"\'')
+                    if v and v != "your_gemini_api_key_here":
+                        return v
+        except Exception:
+            pass
     return None
 
 
@@ -192,6 +225,11 @@ def get_rag_agent() -> MarketKnowledgeRAG:
     global _rag_instance
     if _rag_instance is None:
         _rag_instance = MarketKnowledgeRAG()
+        if not os.getenv("PYTEST_CURRENT_TEST"):
+            try:
+                hydrate_rag_from_neon(limit=50)
+            except Exception as e:
+                logging.getLogger("mudra.agents").debug("Auto-hydration of RAG from Neon skipped: %s", e)
     return _rag_instance
 
 
@@ -208,6 +246,64 @@ def initialize_knowledge_base() -> MarketKnowledgeRAG:
 
 def retrieve_rag_context(query: str, n_results: int = 3) -> List[str]:
     return get_rag_agent().retrieve_market_context(query=query, n_results=n_results)
+
+
+def hydrate_rag_from_neon(limit: int = 50) -> int:
+    # queries reconciled model predictions from neon postgresql and seeds chromadb episodic memory
+    rag = get_rag_agent()
+    col = getattr(rag, "collection", None)
+    if col is None:
+        return 0
+    try:
+        from src.database import ModelPrediction, get_db
+        from sqlalchemy import or_, select
+        with get_db() as s:
+            rows = s.execute(
+                select(ModelPrediction)
+                .where(
+                    or_(
+                        ModelPrediction.diagnosis_summary.isnot(None),
+                        ModelPrediction.error_attribution_tag.isnot(None),
+                    )
+                )
+                .order_by(ModelPrediction.id.desc())
+                .limit(max(1, min(int(limit), 200)))
+            ).scalars().all()
+            if not rows:
+                return 0
+
+            ids: List[str] = []
+            docs: List[str] = []
+            metas: List[Dict[str, Any]] = []
+            for r in rows:
+                doc_id = f"neon_pred_{r.id}"
+                notes = r.diagnosis_summary or f"Error: ${float(r.absolute_error_usd or 0.0):,.2f}"
+                doc_text = (
+                    f"Model: {r.model_version} | Pred: {r.direction_predicted} (${float(r.predicted_price_1h or 0.0):,.2f}) | "
+                    f"Actual: {r.direction_realized or 'N/A'} (${float(r.actual_price_at_t_plus_1 or 0.0):,.2f}) | "
+                    f"Correct: {bool(r.direction_correct)} | Tag: {r.error_attribution_tag or 'NONE'} | "
+                    f"Notes: {notes}"
+                )
+                meta = {
+                    "type": "episodic_outcome",
+                    "tick_id": int(r.tick_id or 0),
+                    "model_version": str(r.model_version or "unknown"),
+                    "direction_predicted": str(r.direction_predicted or "UP"),
+                    "direction_realized": str(r.direction_realized or "UP"),
+                    "direction_correct": bool(r.direction_correct),
+                    "error_attribution_tag": str(r.error_attribution_tag or "ACCURATE"),
+                    "absolute_error_usd": float(r.absolute_error_usd or 0.0),
+                }
+                ids.append(doc_id)
+                docs.append(doc_text)
+                metas.append(meta)
+
+            if ids:
+                col.upsert(ids=ids, documents=docs, metadatas=metas)
+            return len(ids)
+    except Exception as exc:
+        logging.getLogger("mudra.agents").debug("Could not hydrate RAG from Neon: %s", exc)
+        return 0
 
 
 def index_reconciled_outcome_memory(
@@ -451,6 +547,7 @@ def generate_hourly_postmortem_with_gemini(
     if not api_key or os.getenv("PYTEST_CURRENT_TEST"):
         return {
             "gemini_status": "UNAVAILABLE",
+            "model_used": None,
             "error_detail": "Gemini API key missing or test mode active",
             "market_summary": "Gemini unavailable (offline or missing key)",
             "per_model": {
@@ -500,7 +597,7 @@ Respond with strictly valid JSON matching this schema:
   }}
 }}"""
 
-        raw_resp = generate_with_gemini_fallback(api_key, prompt)
+        raw_resp, model_used = generate_with_gemini_fallback(api_key, prompt, return_model=True)
         parsed = json.loads(_clean_json_response(raw_resp))
 
         per_model = {}
@@ -514,6 +611,7 @@ Respond with strictly valid JSON matching this schema:
 
         return {
             "gemini_status": "OK",
+            "model_used": model_used,
             "error_detail": None,
             "market_summary": str(parsed.get("market_summary", "Hourly reconciliation completed.")),
             "per_model": per_model,
@@ -521,6 +619,7 @@ Respond with strictly valid JSON matching this schema:
     except Exception as exc:
         return {
             "gemini_status": "UNAVAILABLE",
+            "model_used": None,
             "error_detail": str(exc),
             "market_summary": "Gemini post-mortem generation failed.",
             "per_model": {
@@ -655,7 +754,8 @@ def generate_with_gemini_fallback(
     system_instruction: Optional[str] = None,
     timeout_sec: float = 12.0,
     total_deadline_sec: float = 25.0,
-) -> str:
+    return_model: bool = False,
+) -> Union[str, Tuple[str, str]]:
     # generates response using gemini with per-request timeout and candidate fallbacks
     import google.generativeai as genai
     genai.configure(api_key=api_key)
@@ -682,7 +782,8 @@ def generate_with_gemini_fallback(
                 resp = model.generate_content(prompt)
             text_out = getattr(resp, "text", None)
             if text_out and str(text_out).strip():
-                return str(text_out).strip()
+                clean_text = str(text_out).strip()
+                return (clean_text, model_name) if return_model else clean_text
         except AssertionError:
             raise
         except Exception as exc:
