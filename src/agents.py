@@ -5,6 +5,10 @@ Combines LangGraph Council (Analyst -> Strategist -> Risk Critic) with ChromaDB 
 """
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+try:
+    import onnxruntime
+except ImportError:
+    pass
 
 import json
 import logging
