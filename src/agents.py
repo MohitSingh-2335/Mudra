@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple, TypedDict, Union
@@ -122,7 +123,11 @@ class GeminiEmbeddingFunction(EmbeddingFunction):
             return [[0.0] * 768 for _ in input]
         try:
             import google.generativeai as genai
-            return genai.embed_content(model="models/text-embedding-004", content=input, output_dimensionality=768)["embedding"]
+            try:
+                res = genai.embed_content(model="models/text-embedding-004", content=input, output_dimensionality=768, request_options={"timeout": 10.0})
+            except TypeError:
+                res = genai.embed_content(model="models/text-embedding-004", content=input, output_dimensionality=768)
+            return res["embedding"]
         except Exception:
             return [[0.0] * 768 for _ in input]
 
@@ -644,14 +649,25 @@ def get_gemini_status() -> Dict[str, Any]:
     }
 
 
-def generate_with_gemini_fallback(api_key: str, prompt: str, system_instruction: Optional[str] = None) -> str:
+def generate_with_gemini_fallback(
+    api_key: str,
+    prompt: str,
+    system_instruction: Optional[str] = None,
+    timeout_sec: float = 12.0,
+    total_deadline_sec: float = 25.0,
+) -> str:
+    # generates response using gemini with per-request timeout and candidate fallbacks
     import google.generativeai as genai
     genai.configure(api_key=api_key)
     custom_model = os.getenv("GEMINI_MODEL_NAME")
     candidates = (custom_model,) + tuple(m for m in GEMINI_MODEL_CANDIDATES if m != custom_model) if custom_model else GEMINI_MODEL_CANDIDATES
 
+    t0 = time.perf_counter()
     last_exc: Optional[Exception] = None
     for idx, model_name in enumerate(candidates):
+        # abort early if total time across candidate models exceeds deadline
+        if (time.perf_counter() - t0) >= total_deadline_sec:
+            break
         try:
             if system_instruction and idx == 0:
                 try:
@@ -660,7 +676,10 @@ def generate_with_gemini_fallback(api_key: str, prompt: str, system_instruction:
                     model = genai.GenerativeModel(model_name)
             else:
                 model = genai.GenerativeModel(model_name)
-            resp = model.generate_content(prompt)
+            try:
+                resp = model.generate_content(prompt, request_options={"timeout": float(timeout_sec)})
+            except TypeError:
+                resp = model.generate_content(prompt)
             text_out = getattr(resp, "text", None)
             if text_out and str(text_out).strip():
                 return str(text_out).strip()
@@ -668,7 +687,7 @@ def generate_with_gemini_fallback(api_key: str, prompt: str, system_instruction:
             raise
         except Exception as exc:
             last_exc = exc
-    raise RuntimeError(f"All Gemini model candidates failed. Last error: {last_exc}")
+    raise RuntimeError(f"All Gemini model candidates failed or timed out. Last error: {last_exc}")
 
 
 def _clean_json_response(raw_text: str) -> str:
