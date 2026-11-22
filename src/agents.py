@@ -539,6 +539,33 @@ def fetch_mcp_context(limit: int = 3) -> Dict[str, Any]:
         }
 
 
+POSTMORTEM_PROMPT_TEMPLATE = """### ROLE
+You are Mudra AI's Quantitative ML Error-Analysis Specialist. Your mission is to diagnose why tabular BTC/USDT forecasting models succeeded or failed on a completed 1-hour candle by attributing outcomes directly to market micro-structure, technical indicators, and feature telemetry.
+
+### INPUT EVIDENCE (Grounded JSON)
+```json
+{evidence_json}
+```
+
+### STRICT RULES
+1. Grounding: Never invent or hallucinate any price, indicator value, or news headline not present in the JSON evidence above.
+2. No Outcome Restatement: Never write a diagnosis_summary that only restates the dollar error or UP/DOWN outcome (e.g., do NOT say "Predicted UP but actual price fell by $120").
+3. Feature Attribution: Every diagnosis_summary MUST cite AT LEAST 2 SPECIFIC feature or market drivers from the input JSON (e.g., RSI, taker_buy_ratio, vol_log_z24, hl_range_pct, return_4h, return_24h, funding_rate_8h_pct, or a specific news headline) explaining WHY that model succeeded or missed (e.g., "Called DOWN as taker_buy_ratio fell to 0.43 and RSI cooled from 68, catching the -0.69% drop.").
+4. Root Cause Driver: root_cause_driver must be a concise 2-4 word snake_case/CAPS label describing the market/feature mechanism (e.g., TAKER_SELL_CONFIRMATION, OVERBOUGHT_RSI_REVERSAL, LOW_VOL_CHOP_NOISE, REG_CLF_SIGNAL_CONFLICT, NEWS_VOLATILITY_SPIKE).
+
+### OUTPUT JSON SCHEMA
+Respond with strictly valid JSON matching this schema:
+{{
+  "market_summary": "1-2 sentence factual recap of price move and relevant news or order flow",
+  "per_model": {{
+    "<model_version>": {{
+      "root_cause_driver": "CONCISE_2_4_WORD_LABEL",
+      "diagnosis_summary": "1 concise sentence citing at least 2 specific features/drivers explaining why the model succeeded or failed"
+    }}
+  }}
+}}"""
+
+
 def generate_hourly_postmortem_with_gemini(
     tick_features: Dict[str, Any],
     mcp_context: Dict[str, Any],
@@ -564,42 +591,49 @@ def generate_hourly_postmortem_with_gemini(
         }
 
     try:
-        headlines = mcp_context.get("news_headlines", []) if isinstance(mcp_context, dict) else []
-        news_str = "\n".join(f"- {h}" for h in headlines) if headlines else "No breaking news reported in last 2 hours."
+        # build verified feature payload ensuring all required keys are present
+        evidence_features = {
+            "close": float(tick_features.get("close", 0.0) or 0.0),
+            "rsi": float(tick_features.get("rsi", tick_features.get("rsi_14", tick_features.get("rsi_estimate", 50.0))) or 50.0),
+            "taker_buy_ratio": float(tick_features.get("taker_buy_ratio", 0.50) or 0.50),
+            "vol_log_z24": float(tick_features.get("vol_log_z24", 0.0) or 0.0),
+            "hl_range_pct": float(tick_features.get("hl_range_pct", tick_features.get("volatility_range_pct", 0.0)) or 0.0),
+            "return_4h": float(tick_features.get("return_4h", 0.0) or 0.0),
+            "return_24h": float(tick_features.get("return_24h", 0.0) or 0.0),
+            "fng_value": float(tick_features.get("fng_value", 50.0) or 50.0),
+        }
+        for k, v in tick_features.items():
+            if k not in evidence_features and isinstance(v, (int, float, str, bool)):
+                evidence_features[k] = v
 
-        models_str = "\n".join([
-            f"- Model {m.get('model_version')}: Predicted ${float(m.get('predicted_price', 0)):,.2f} ({m.get('direction_predicted')}, {float(m.get('predicted_return_pct', 0)):+.2f}%) | "
-            f"Actual ${float(m.get('actual_price', 0)):,.2f} ({m.get('direction_realized')}, {float(m.get('actual_return_pct', 0)):+.2f}%) | "
-            f"Result: {'CORRECT' if m.get('direction_correct') else 'WRONG'} | Error: ${float(m.get('error_usd', 0)):,.2f}"
-            for m in model_outcomes
-        ])
+        evidence_mcp = {
+            "funding_rate_8h_pct": float(mcp_context.get("funding_rate_8h_pct", 0.01) or 0.01) if isinstance(mcp_context, dict) else 0.01,
+            "derivatives_regime": str(mcp_context.get("derivatives_regime", "Neutral")) if isinstance(mcp_context, dict) else "Neutral",
+            "news_headlines": (mcp_context.get("news_headlines", []) if isinstance(mcp_context, dict) else [])[:5],
+        }
 
-        prompt = f"""You are Mudra's Lead Quantitative Post-Mortem Analyst.
-Analyze the hourly Bitcoin forecast outcome across registered models.
-Ground all statements strictly in the provided data. Do not hallucinate external events, prices, or numbers.
+        evidence_outcomes = []
+        for idx, m in enumerate(model_outcomes, start=1):
+            evidence_outcomes.append({
+                "model_id": f"M{idx}",
+                "model_version": str(m.get("model_version", "unknown")),
+                "predicted_price": float(m.get("predicted_price", 0.0) or 0.0),
+                "actual_price": float(m.get("actual_price", 0.0) or 0.0),
+                "predicted_return_pct": float(m.get("predicted_return_pct", 0.0) or 0.0),
+                "actual_return_pct": float(m.get("actual_return_pct", 0.0) or 0.0),
+                "direction_predicted": str(m.get("direction_predicted", "HOLD")),
+                "direction_realized": str(m.get("direction_realized", "HOLD")),
+                "direction_correct": bool(m.get("direction_correct", False)),
+                "error_usd": float(m.get("error_usd", 0.0) or 0.0),
+            })
 
-Market Candlestick Telemetry:
-- Start Price: ${float(tick_features.get('close', 0)):,.2f}
-- High/Low Volatility Spread: {float(tick_features.get('volatility_range_pct', 0)):.2f}%
-- Taker Buy Ratio: {float(tick_features.get('taker_buy_ratio', 0.5)):.2%}
-- RSI Estimate: {float(tick_features.get('rsi_estimate', 50)):.1f}
-
-Recent News Context (Last 2 Hours):
-{news_str}
-
-Model Predictions vs Actual Outcomes:
-{models_str}
-
-Respond with strictly valid JSON matching this schema:
-{{
-  "market_summary": "1-2 sentence factual recap of price move and relevant news or order flow",
-  "per_model": {{
-    "<model_version>": {{
-      "root_cause_driver": "TOP_FEATURE_OR_NEWS_OR_REGIME",
-      "diagnosis_summary": "1 concise sentence explaining error or success citing specific numbers"
-    }}
-  }}
-}}"""
+        evidence_payload = {
+            "tick_features": evidence_features,
+            "mcp_context": evidence_mcp,
+            "model_outcomes": evidence_outcomes,
+        }
+        evidence_json = json.dumps(evidence_payload, indent=2)
+        prompt = POSTMORTEM_PROMPT_TEMPLATE.format(evidence_json=evidence_json)
 
         raw_resp, model_used = generate_with_gemini_fallback(
             api_key, prompt, return_model=True, response_mime_type="application/json"
