@@ -444,7 +444,7 @@ def test_outbox_flush_persists_and_unlinks(isolated_db, temp_outbox):
         "type": "tick",
         "payload": {
             "timestamp": t0.isoformat(), "open": 60000.0, "high": 60500.0, "low": 59500.0, "close": 60200.0, "volume": 120.0,
-            "model_version": "xgb_v1", "feature_schema_version": "v1_39features", "features": {"rsi": 55.4},
+            "model_version": "xgb_v1", "features": {"rsi": 55.4},
         }
     }]), encoding="utf-8")
     assert worker.flush_outbox(session) == 1
@@ -632,8 +632,6 @@ def test_ensure_model_registered_idempotency_and_shadow_prediction(isolated_db):
         timestamp=datetime.now(timezone.utc),
         open=65000.0, high=65500.0, low=64800.0, close=65200.0, volume=100.0,
         model_version=config.ACTIVE_MODEL_VERSION,
-        feature_schema_version=config.FEATURE_SCHEMA_VERSION,
-        market_regime="STANDARD_SPOT",
     )
     session.add(tick)
     session.flush()
@@ -642,7 +640,6 @@ def test_ensure_model_registered_idempotency_and_shadow_prediction(isolated_db):
         tick_id=tick.id,
         model_version="lgbm_v3.0.0",
         run_mode="SHADOW",
-        is_canonical=True,
         is_primary=False,
         feature_schema_version="v3_29stationary",
         predicted_return_pct=0.25,
