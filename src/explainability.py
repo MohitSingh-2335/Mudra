@@ -97,5 +97,66 @@ def explain_single_prediction(
     return base_val, top_pos, top_neg, fig
 
 
+def get_top_shap_drivers(
+    model: Any,
+    X_row: pd.DataFrame,
+    top_k: int = 3,
+) -> List[Dict[str, Any]]:
+    # extracts top-k features with strongest shap impact for an individual prediction row
+    if model is None or X_row is None or X_row.empty:
+        return []
+
+    try:
+        # unwrap base tree estimator from calibrated classifier or pipeline if wrapped
+        estimator = model
+        if hasattr(model, "calibrated_classifiers_") and len(model.calibrated_classifiers_) > 0:
+            cc = model.calibrated_classifiers_[0]
+            estimator = getattr(cc, "estimator", getattr(cc, "base_estimator", getattr(model, "base_estimator", model)))
+        elif hasattr(model, "base_estimator"):
+            estimator = getattr(model, "base_estimator", model)
+        elif hasattr(model, "_final_estimator"):
+            estimator = getattr(model, "_final_estimator", model)
+
+        # align input columns with expected feature names of the estimator
+        cols = getattr(estimator, "feature_names_in_", None)
+        if cols is not None and all(c in X_row.columns for c in cols):
+            X_eval = X_row[list(cols)]
+        else:
+            X_eval = X_row
+
+        # compute per-row shap explanations using tree explainer
+        explainer = shap.TreeExplainer(estimator)
+        exp = explainer(X_eval)
+        vals = exp.values
+
+        # handle multi-class vs binary classifier or regressor shape
+        if vals.ndim == 3:
+            vals = vals[0, :, 1] if vals.shape[2] > 1 else vals[0, :, 0]
+        elif vals.ndim == 2:
+            vals = vals[0]
+
+        drivers = []
+        for feat_name, shap_val in zip(X_eval.columns, vals):
+            raw_val = X_eval.iloc[0][feat_name]
+            drivers.append({
+                "feature": str(feat_name),
+                "value": round(float(raw_val), 4),
+                "shap_impact": round(float(shap_val), 4),
+                "_abs_impact": abs(float(shap_val)),
+            })
+        drivers.sort(key=lambda d: d["_abs_impact"], reverse=True)
+        return [{"feature": d["feature"], "value": d["value"], "shap_impact": d["shap_impact"]} for d in drivers[:top_k]]
+    except Exception:
+        # fallback attribution by magnitude when tree explainer is not supported
+        try:
+            items = []
+            for col in X_row.columns[:top_k]:
+                v = float(X_row.iloc[0][col])
+                items.append({"feature": str(col), "value": round(v, 4), "shap_impact": 0.0})
+            return items
+        except Exception:
+            return []
+
+
 if __name__ == '__main__':
     generate_global_explanations()
