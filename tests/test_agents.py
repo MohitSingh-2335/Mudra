@@ -200,3 +200,61 @@ def test_gemini_postmortem_raw_control_character_parsing(monkeypatch):
     diag = res["per_model"]["xgb_onnx_v1.0.0"]["diagnosis_summary"]
     assert diag == "Line one diagnosis.\nLine two diagnosis with raw newline."
 
+
+def test_get_top_shap_drivers_calibrated_classifier():
+    # verifies get_top_shap_drivers extracts valid top-k shap attributions for calibrated classifier
+    import numpy as np
+    import pandas as pd
+    from sklearn.calibration import CalibratedClassifierCV
+    import xgboost as xgb
+    from src.explainability import get_top_shap_drivers
+
+    # create minimal synthetic training data for tree model
+    np.random.seed(42)
+    X = pd.DataFrame({
+        "taker_buy_ratio": np.random.uniform(0.3, 0.7, 50),
+        "rsi": np.random.uniform(30.0, 70.0, 50),
+        "vol_log_z24": np.random.normal(0.0, 1.0, 50),
+        "return_4h": np.random.normal(0.0, 1.0, 50),
+    })
+    y = (X["taker_buy_ratio"] > 0.5).astype(int)
+
+    base_clf = xgb.XGBClassifier(n_estimators=5, max_depth=2, random_state=42, n_jobs=1)
+    base_clf.fit(X, y)
+
+    cal_clf = CalibratedClassifierCV(estimator=base_clf, method="sigmoid", cv="prefit")
+    cal_clf.fit(X, y)
+
+    test_row = pd.DataFrame([{
+        "taker_buy_ratio": 0.65,
+        "rsi": 62.0,
+        "vol_log_z24": 1.2,
+        "return_4h": 0.5,
+    }])
+
+    # 1. test unwrapped tree classifier
+    drivers_base = get_top_shap_drivers(base_clf, test_row, top_k=3)
+    assert isinstance(drivers_base, list)
+    assert len(drivers_base) == 3
+    for d in drivers_base:
+        assert "feature" in d
+        assert "value" in d
+        assert "shap_impact" in d
+        assert isinstance(d["shap_impact"], float)
+
+    # 2. test CalibratedClassifierCV wrapper
+    drivers_cal = get_top_shap_drivers(cal_clf, test_row, top_k=3)
+    assert isinstance(drivers_cal, list)
+    assert len(drivers_cal) == 3
+    for d in drivers_cal:
+        assert "feature" in d
+        assert "value" in d
+        assert "shap_impact" in d
+        assert isinstance(d["shap_impact"], float)
+
+    # 3. test graceful handling of empty or None inputs
+    assert get_top_shap_drivers(None, test_row, top_k=3) == []
+    assert get_top_shap_drivers(cal_clf, pd.DataFrame(), top_k=3) == []
+    assert get_top_shap_drivers(cal_clf, None, top_k=3) == []
+
+
