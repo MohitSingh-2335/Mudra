@@ -584,7 +584,6 @@ def ensure_model_registered(session: Session, model_version: str, cand_spec: Opt
         target_definition="next_1h_btc_return_and_direction",
         evaluation_metrics=manifest.get("metrics"),
         current_status=status,
-        lifecycle_seq=1,
     )
     try:
         with session.begin_nested():
@@ -656,7 +655,6 @@ def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]
         if is_existing:
             current_tick = existing
             if force:
-                current_tick.market_regime = regime
                 current_tick.predicted_return_1h = pred_return
                 current_tick.predicted_price_1h = pred_price
                 current_tick.model_confidence = confidence
@@ -666,7 +664,6 @@ def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]
             current_tick = MarketTick(
                 timestamp=latest_ts, open=candle["open"], high=candle["high"], low=candle["low"],
                 close=candle["close"], volume=candle["volume"], model_version=ACTIVE_MODEL_VERSION,
-                feature_schema_version=FEATURE_SCHEMA_VERSION, market_regime=regime,
                 predicted_return_1h=pred_return, predicted_price_1h=pred_price,
                 model_confidence=confidence, features=safe_features,
             )
@@ -689,7 +686,6 @@ def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]
                         tick_id=current_tick.id,
                         model_version=ACTIVE_MODEL_VERSION,
                         run_mode="PRIMARY",
-                        is_canonical=True,
                         is_primary=True,
                         feature_schema_version=FEATURE_SCHEMA_VERSION,
                         predicted_return_pct=pred_return,
@@ -739,7 +735,6 @@ def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]
                                     tick_id=current_tick.id,
                                     model_version=cand_version,
                                     run_mode="SHADOW",
-                                    is_canonical=True,
                                     is_primary=False,
                                     feature_schema_version=cand_spec.get("manifest_data", {}).get("feature_schema_version", "v2_36stationary"),
                                     predicted_return_pct=c_ret_pct,
@@ -770,13 +765,10 @@ def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]
 
         audit = CouncilAudit(
             tick_id=current_tick.id,
-            deliberation_latency_ms=council_state.get("latency_ms", 120.0),
             strategist_action=council_state.get("strategist_action", decision),
             strategist_conviction=council_state.get("strategist_conviction", 5),
             rag_context_summary=council_state.get("rag_context", "Normal quant market regime"),
             risk_verdict=verdict,
-            veto_reasons=council_state.get("veto_reasons", []),
-            kelly_fraction=kelly,
             final_decision=decision,
             execution_notes=f"Council deliberated {decision} ({verdict}) at BTC ${candle['close']:,.2f}." + (" [FORCED_REANALYSIS]" if (is_existing and force) else ""),
         )
@@ -899,7 +891,7 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
                 index_reconciled_outcome_memory(
                     tick_id=prior.id,
                     timestamp_iso=outcome.timestamp.isoformat() if hasattr(outcome.timestamp, "isoformat") else str(outcome.timestamp),
-                    market_regime=str(prior.market_regime or "STANDARD_SPOT"),
+                    market_regime="STANDARD_SPOT",
                     direction_predicted=dir_pred,
                     direction_realized=dir_real,
                     direction_correct=(dir_pred == dir_real),
@@ -940,7 +932,6 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
                             u_tag = "DIRECTION_MISALIGNED"
 
                     u.outcome_tick_id = outcome.id
-                    u.evaluation_policy_version = "binary_exact_t1_v2"
                     u.actual_price_at_t_plus_1 = act_p
                     u.actual_return_pct = act_ret
                     u.direction_realized = u_dir_real
@@ -948,7 +939,6 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
                     u.residual_error = u_residual
                     u.absolute_error_usd = u_abs_err
                     u.percentage_error = u_pct_err
-                    u.is_black_swan = u_is_swan
                     u.error_attribution_tag = u_tag
                     u.reconciled_at = datetime.now(timezone.utc)
                 session.flush()
@@ -1108,18 +1098,6 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
         except Exception as pm_exc:
             logger.warning("Could not record hourly postmortem for tick %s: %s", prior.id, pm_exc)
 
-        audit = session.execute(select(CouncilAudit).where(CouncilAudit.tick_id == prior.id).order_by(CouncilAudit.id.desc())).scalars().first()
-        if audit:
-            if audit.risk_verdict == "VETOED":
-                if (audit.strategist_action == "BUY" and act_ret < 0) or (audit.strategist_action == "SELL" and act_ret > 0):
-                    audit.veto_attribution = "SAVED_CAPITAL"
-                elif (audit.strategist_action == "BUY" and act_ret > 0.10) or (audit.strategist_action == "SELL" and act_ret < -0.10):
-                    audit.veto_attribution = "OPPORTUNITY_COST"
-                else:
-                    audit.veto_attribution = "NEUTRAL"
-            else:
-                audit.veto_attribution = "N/A_APPROVED"
-
     # fallback pass: reconciles any orphaned candidate ModelPrediction records whose outcome tick exists
     try:
         with session.begin_nested():
@@ -1166,7 +1144,6 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
                         u_tag = "DIRECTION_MISALIGNED"
 
                 pred_row.outcome_tick_id = outcome_tick.id
-                pred_row.evaluation_policy_version = "binary_exact_t1_v2"
                 pred_row.actual_price_at_t_plus_1 = act_p
                 pred_row.actual_return_pct = act_ret
                 pred_row.direction_realized = u_dir_real
@@ -1174,7 +1151,6 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
                 pred_row.residual_error = u_residual
                 pred_row.absolute_error_usd = u_abs_err
                 pred_row.percentage_error = u_pct_err
-                pred_row.is_black_swan = u_is_swan
                 pred_row.error_attribution_tag = u_tag
                 if not pred_row.diagnosis_summary:
                     pred_row.diagnosis_summary = f"{pred_row.direction_predicted} target ${u_pred_price:,.2f} vs actual ${act_p:,.2f} (diff ${u_abs_err:,.2f}, {u_tag})."
