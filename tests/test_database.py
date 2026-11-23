@@ -35,7 +35,7 @@ def test_market_tick_lifecycle_and_dict(in_memory_db):
     session = in_memory_db[0]
     tick = MarketTick(
         timestamp=datetime.now(timezone.utc), open=50000.0, high=51000.0, low=49500.0, close=50500.0, volume=1200.5,
-        model_version="xgb_v1", feature_schema_version="v1_39features",
+        model_version="xgb_v1",
         predicted_return_1h=0.015, predicted_price_1h=51257.5, model_confidence=0.72,
         features={"rsi": 55.4},
     )
@@ -49,8 +49,8 @@ def test_market_tick_lifecycle_and_dict(in_memory_db):
 def test_reconciliation_math_and_accurate_tagging(in_memory_db):
     session = in_memory_db[0]
     t0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-    tick0 = MarketTick(timestamp=t0, open=60000.0, high=60500.0, low=59500.0, close=60000.0, volume=100.0, model_version="xgb_v1", feature_schema_version="v1_39features", predicted_return_1h=0.01, predicted_price_1h=60600.0)
-    tick1 = MarketTick(timestamp=t0 + timedelta(hours=1), open=60000.0, high=60700.0, low=59900.0, close=60550.0, volume=120.0, model_version="xgb_v1", feature_schema_version="v1_39features")
+    tick0 = MarketTick(timestamp=t0, open=60000.0, high=60500.0, low=59500.0, close=60000.0, volume=100.0, model_version="xgb_v1", predicted_return_1h=0.01, predicted_price_1h=60600.0)
+    tick1 = MarketTick(timestamp=t0 + timedelta(hours=1), open=60000.0, high=60700.0, low=59900.0, close=60550.0, volume=120.0, model_version="xgb_v1")
     session.add_all([tick0, tick1])
     session.commit()
 
@@ -65,8 +65,8 @@ def test_reconciliation_math_and_accurate_tagging(in_memory_db):
 def test_reconciliation_sideways_drift_tagging(in_memory_db):
     session = in_memory_db[0]
     t0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-    tick0 = MarketTick(timestamp=t0, open=60000.0, high=60100.0, low=59900.0, close=60000.0, volume=100.0, predicted_return_1h=0.0008, predicted_price_1h=60048.0, model_version="xgb_v1", feature_schema_version="v1_39features")
-    tick1 = MarketTick(timestamp=t0 + timedelta(hours=1), open=60000.0, high=60050.0, low=59920.0, close=59960.0, volume=110.0, model_version="xgb_v1", feature_schema_version="v1_39features")
+    tick0 = MarketTick(timestamp=t0, open=60000.0, high=60100.0, low=59900.0, close=60000.0, volume=100.0, predicted_return_1h=0.0008, predicted_price_1h=60048.0, model_version="xgb_v1")
+    tick1 = MarketTick(timestamp=t0 + timedelta(hours=1), open=60000.0, high=60050.0, low=59920.0, close=59960.0, volume=110.0, model_version="xgb_v1")
     session.add_all([tick0, tick1])
     session.commit()
 
@@ -77,8 +77,8 @@ def test_reconciliation_sideways_drift_tagging(in_memory_db):
 def test_reconciliation_black_swan_outlier(in_memory_db):
     session = in_memory_db[0]
     t0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-    tick0 = MarketTick(timestamp=t0, open=60000.0, high=60500.0, low=59500.0, close=60000.0, volume=100.0, predicted_return_1h=0.002, predicted_price_1h=60120.0, model_version="xgb_v1", feature_schema_version="v1_39features")
-    tick1 = MarketTick(timestamp=t0 + timedelta(hours=1), open=60000.0, high=63500.0, low=59800.0, close=63000.0, volume=500.0, model_version="xgb_v1", feature_schema_version="v1_39features")
+    tick0 = MarketTick(timestamp=t0, open=60000.0, high=60500.0, low=59500.0, close=60000.0, volume=100.0, predicted_return_1h=0.002, predicted_price_1h=60120.0, model_version="xgb_v1")
+    tick1 = MarketTick(timestamp=t0 + timedelta(hours=1), open=60000.0, high=63500.0, low=59800.0, close=63000.0, volume=500.0, model_version="xgb_v1")
     session.add_all([tick0, tick1])
     session.commit()
 
@@ -136,8 +136,7 @@ def test_direction_and_return_independence(in_memory_db):
     session = in_memory_db[0]
     tick = MarketTick(
         timestamp=datetime.now(timezone.utc), open=65000.0, high=65500.0, low=64800.0, close=65100.0,
-        volume=100.0, model_version="xgb_candidate_v2.0.0", feature_schema_version="v2_36stationary",
-        market_regime="SIDEWAYS_RANGE",
+        volume=100.0, model_version="xgb_candidate_v2.0.0",
     )
     session.add(tick)
     session.flush()
@@ -146,7 +145,6 @@ def test_direction_and_return_independence(in_memory_db):
         tick_id=tick.id,
         model_version="xgb_candidate_v2.0.0",
         run_mode="SHADOW",
-        is_canonical=True,
         is_primary=False,
         feature_schema_version="v2_36stationary",
         predicted_return_pct=-0.045,
@@ -171,8 +169,7 @@ def test_hourly_postmortem_lifecycle(in_memory_db):
     session = in_memory_db[0]
     tick = MarketTick(
         timestamp=datetime.now(timezone.utc), open=65000.0, high=65500.0, low=64800.0, close=65100.0,
-        volume=100.0, model_version="xgb_onnx_v1.0.0", feature_schema_version="v1_39stationary",
-        market_regime="SIDEWAYS_RANGE",
+        volume=100.0, model_version="xgb_onnx_v1.0.0",
     )
     session.add(tick)
     session.flush()
