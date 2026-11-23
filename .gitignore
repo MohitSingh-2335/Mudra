@@ -58,3 +58,11 @@ mlflow.db
 # ChromaDB Vector Database
 data/chromadb/
 data/chromadb*/
+
+# Local scratch workspace and temporary diagnostic scripts
+scripts/scratch/
+tmp_*.py
+debug_*.py
+verify_*.py
+audit_*.py
+data/proof/
