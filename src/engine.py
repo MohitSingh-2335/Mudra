@@ -332,7 +332,6 @@ def backfill_missing_candles(session, candle: Dict[str, Any]) -> int:
         tick = MarketTick(
             timestamp=c_ts, open=c_data["open"], high=c_data["high"], low=c_data["low"],
             close=c_data["close"], volume=c_data["volume"], model_version=ACTIVE_MODEL_VERSION,
-            feature_schema_version=FEATURE_SCHEMA_VERSION,
         )
         try:
             with session.begin_nested():
