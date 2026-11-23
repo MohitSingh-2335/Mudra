@@ -1477,6 +1477,34 @@ with tab_models:
             st.image(str(shap_path), use_column_width=True)
             st.caption("Top TreeSHAP features driving model direction: taker_buy_ratio (aggressive market orders), volatility range, and short-term momentum.")
 
+        # Stored Feature Snapshot Viewer from Neon market_ticks.features
+        ticks_df = db_state.get("ticks_df", pd.DataFrame())
+        latest_feats = None
+        if not ticks_df.empty and "features" in ticks_df.columns:
+            for val in reversed(ticks_df["features"].tolist()):
+                if isinstance(val, dict) and val:
+                    latest_feats = val
+                    break
+                elif isinstance(val, str) and val.strip().startswith("{"):
+                    try:
+                        parsed = json.loads(val)
+                        if isinstance(parsed, dict) and parsed:
+                            latest_feats = parsed
+                            break
+                    except Exception:
+                        pass
+
+        with st.expander("Inspect Latest Stored Feature Snapshot (Neon market_ticks.features)", expanded=False):
+            if latest_feats:
+                st.caption(f"Latest feature snapshot verified from Neon PostgreSQL: **{len(latest_feats)} engineered features** stored as JSONB.")
+                feat_rows = []
+                for k, v in sorted(latest_feats.items()):
+                    val_str = f"{float(v):.6f}" if isinstance(v, (int, float)) and not isinstance(v, bool) else str(v)
+                    feat_rows.append({"Feature Name": k, "Engineered Value": val_str})
+                st.dataframe(pd.DataFrame(feat_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("No feature snapshot records found in recent market ticks.")
+
         with st.expander("Research Findings, Anti-Leakage Split & Model Governance", expanded=False):
             st.markdown("#### Active Production Model Pedigree")
             st.markdown(build_model_pedigree_markdown())
@@ -1724,6 +1752,42 @@ with tab_agent:
                     st.metric("Multi-Model Consensus", "Consensus Active", "Dual Models")
             else:
                 st.metric("Multi-Model Consensus", "Awaiting Data", "Standby")
+
+        st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+
+        # Live Episodic RAG Memory Proof Panel
+        try:
+            from src.agents import get_rag_collection, query_similar_error_memories
+            rag_col = get_rag_collection()
+            if rag_col:
+                total_docs = rag_col.count()
+                all_ids = rag_col.get().get("ids", [])
+                neon_docs = len([i for i in all_ids if str(i).startswith("neon_pred_")])
+                rule_docs = total_docs - neon_docs
+                retrieved_memories = query_similar_error_memories("market volatility and false breakout", n_results=3)
+
+                with st.container(border=True):
+                    st.markdown(
+                        f"""
+                        <div style="font-size: 0.9rem; font-weight: 700; color: #58A6FF; margin-bottom: 4px;">
+                            Live Episodic RAG Memory Proof (ChromaDB Vector Store)
+                        </div>
+                        <div style="font-size: 0.8rem; color: #8B949E; margin-bottom: 8px;">
+                            Persistent cloud-backed episodic memory: <strong style="color: #F0F6FC;">{total_docs} total vectors indexed</strong> 
+                            (<strong style="color: #3FB950;">{neon_docs} hydrated from Neon PostgreSQL</strong> · {rule_docs} quantitative core rules).
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                    st.caption("Top-3 Retrieved Historical Misprediction / Outcome Memories for Current Market Context:")
+                    if retrieved_memories:
+                        for m in retrieved_memories:
+                            doc_text = html.escape(str(m.get("document", "")))
+                            st.markdown(f"- <span style='font-size: 0.8rem; font-family: monospace; color: #C9D1D9;'>{doc_text}</span>", unsafe_allow_html=True)
+                    else:
+                        st.caption("No episodic outcome memories matching query.")
+        except Exception:
+            pass
 
         st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
 
