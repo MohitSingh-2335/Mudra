@@ -29,6 +29,7 @@ from src.data_preprocessing import (
 from src.database import (
     Base,
     MarketTick,
+    ModelPrediction,
     Reconciliation,
     get_reconciliation_history,
     get_reconciliation_kpis,
