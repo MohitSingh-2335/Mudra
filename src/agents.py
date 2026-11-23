@@ -552,6 +552,7 @@ You are Mudra AI's Quantitative ML Error-Analysis Specialist. Your mission is to
 2. No Outcome Restatement: Never write a diagnosis_summary that only restates the dollar error or UP/DOWN outcome (e.g., do NOT say "Predicted UP but actual price fell by $120").
 3. Feature Attribution: Every diagnosis_summary MUST cite AT LEAST 2 SPECIFIC feature or market drivers from the input JSON (e.g., RSI, taker_buy_ratio, vol_log_z24, hl_range_pct, return_4h, return_24h, funding_rate_8h_pct, or a specific news headline) explaining WHY that model succeeded or missed (e.g., "Called DOWN as taker_buy_ratio fell to 0.43 and RSI cooled from 68, catching the -0.69% drop.").
 4. Root Cause Driver: root_cause_driver must be a concise 2-4 word snake_case/CAPS label describing the market/feature mechanism (e.g., TAKER_SELL_CONFIRMATION, OVERBOUGHT_RSI_REVERSAL, LOW_VOL_CHOP_NOISE, REG_CLF_SIGNAL_CONFLICT, NEWS_VOLATILITY_SPIKE).
+5. Honest Unknown Rule: Use top_shap_drivers to identify which exact features pushed the model's prediction. If the error CANNOT be explained by the provided SHAP drivers, technical features, funding rate, or news headlines (e.g., flat indicators + no news + sudden unexplained move), DO NOT guess or invent a cause. Set root_cause_driver to UNEXPLAINED_OR_MISSING_SIGNAL and honestly state that current features do not explain the move and suggest what missing data type (if any) would be needed.
 
 ### OUTPUT JSON SCHEMA
 Respond with strictly valid JSON matching this schema:
@@ -588,6 +589,7 @@ def generate_hourly_postmortem_with_gemini(
                 }
                 for mv in model_versions
             },
+            "model_outcomes": model_outcomes,
         }
 
     try:
@@ -625,6 +627,7 @@ def generate_hourly_postmortem_with_gemini(
                 "direction_realized": str(m.get("direction_realized", "HOLD")),
                 "direction_correct": bool(m.get("direction_correct", False)),
                 "error_usd": float(m.get("error_usd", 0.0) or 0.0),
+                "top_shap_drivers": m.get("top_shap_drivers", []),
             })
 
         evidence_payload = {
@@ -655,6 +658,7 @@ def generate_hourly_postmortem_with_gemini(
             "error_detail": None,
             "market_summary": str(parsed.get("market_summary", "Hourly reconciliation completed.")),
             "per_model": per_model,
+            "model_outcomes": evidence_outcomes,
         }
     except Exception as exc:
         return {
@@ -669,6 +673,7 @@ def generate_hourly_postmortem_with_gemini(
                 }
                 for mv in model_versions
             },
+            "model_outcomes": model_outcomes,
         }
 
 
