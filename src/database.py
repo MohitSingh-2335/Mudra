@@ -59,9 +59,6 @@ class MarketTick(Base):
     volume = Column(Float, nullable=False)
 
     model_version = Column(String(32), nullable=False, default=ACTIVE_MODEL_VERSION)
-    feature_schema_version = Column(String(16), nullable=False, default=FEATURE_SCHEMA_VERSION)
-    market_regime = Column(String(32), nullable=True)
-
     predicted_return_1h = Column(Float, nullable=True)
     predicted_price_1h = Column(Float, nullable=True)
     model_confidence = Column(Float, nullable=True)
@@ -96,15 +93,11 @@ class CouncilAudit(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     timestamp = Column(DateTime(timezone=True), index=True, default=lambda: datetime.now(timezone.utc), nullable=False)
     tick_id = Column(Integer, ForeignKey("market_ticks.id"), nullable=True, index=True)
-    deliberation_latency_ms = Column(Float, nullable=True)
     strategist_action = Column(String(16), nullable=False)
     strategist_conviction = Column(Integer, nullable=False)
     rag_context_summary = Column(Text, nullable=True)
     risk_verdict = Column(String(16), nullable=False)
-    veto_reasons = Column(JSON, nullable=True)
-    kelly_fraction = Column(Float, nullable=False)
     final_decision = Column(String(16), nullable=False)
-    veto_attribution = Column(String(32), nullable=True)
     execution_notes = Column(Text, nullable=True)
 
     tick = relationship("MarketTick", back_populates="council_audits")
@@ -177,14 +170,13 @@ class ModelRegistry(Base):
     target_definition = Column(String(128), nullable=False)
     evaluation_metrics = Column(JSON, nullable=True)
     current_status = Column(String(24), nullable=False)
-    lifecycle_seq = Column(Integer, nullable=False, default=1)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
     predictions = relationship("ModelPrediction", primaryjoin="ModelRegistry.model_version == ModelPrediction.model_version", foreign_keys="ModelPrediction.model_version", back_populates="model", order_by="ModelPrediction.id.asc()")
 
     __table_args__ = (
         UniqueConstraint("model_version", name="uq_model_registry_model_version"),
-        CheckConstraint("current_status IN ('ACTIVE', 'CANDIDATE', 'REJECTED', 'ARCHIVED', 'ROLLED_BACK') AND lifecycle_seq >= 1", name="chk_model_registry_status"),
+        CheckConstraint("current_status IN ('ACTIVE', 'CANDIDATE', 'REJECTED', 'ARCHIVED', 'ROLLED_BACK')", name="chk_model_registry_status"),
         Index("uq_model_registry_single_active", "current_status", unique=True, postgresql_where=text("current_status = 'ACTIVE'"), sqlite_where=text("current_status = 'ACTIVE'")),
     )
 
@@ -211,7 +203,6 @@ class ModelPrediction(Base):
     tick_id = Column(Integer, nullable=False)
     model_version = Column(String(64), nullable=False)
     run_mode = Column(String(24), nullable=False)
-    is_canonical = Column(Boolean, nullable=False, default=True)
     is_primary = Column(Boolean, nullable=False, default=False)
     feature_schema_version = Column(String(32), nullable=False, default=FEATURE_SCHEMA_VERSION)
     predicted_return_pct = Column(Float, nullable=True)
@@ -222,7 +213,6 @@ class ModelPrediction(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
     outcome_tick_id = Column(Integer, nullable=True)
-    evaluation_policy_version = Column(String(32), nullable=True)
     actual_price_at_t_plus_1 = Column(Float, nullable=True)
     actual_return_pct = Column(Float, nullable=True)
     direction_realized = Column(String(16), nullable=True)
@@ -230,7 +220,6 @@ class ModelPrediction(Base):
     residual_error = Column(Float, nullable=True)
     absolute_error_usd = Column(Float, nullable=True)
     percentage_error = Column(Float, nullable=True)
-    is_black_swan = Column(Boolean, nullable=True)
     error_attribution_tag = Column(String(64), nullable=True)
     diagnosis_summary = Column(Text, nullable=True)
     reconciled_at = Column(DateTime(timezone=True), nullable=True)
@@ -244,8 +233,8 @@ class ModelPrediction(Base):
         ForeignKeyConstraint(["model_version"], ["model_registry.model_version"], name="fk_mp_model_version"),
         ForeignKeyConstraint(["outcome_tick_id"], ["market_ticks.id"], name="fk_mp_outcome_tick_id"),
         CheckConstraint(
-            "(((run_mode = 'PRIMARY' AND is_primary IS TRUE AND is_canonical IS TRUE) "
-            "OR (run_mode = 'SHADOW' AND is_primary IS FALSE AND is_canonical IS TRUE))) "
+            "(((run_mode = 'PRIMARY' AND is_primary IS TRUE) "
+            "OR (run_mode = 'SHADOW' AND is_primary IS FALSE))) "
             "AND (predicted_return_pct IS NULL OR predicted_return_pct NOT IN ('NaN', 'Infinity', '-Infinity')) "
             "AND (predicted_price_1h IS NULL OR (predicted_price_1h NOT IN ('NaN', 'Infinity', '-Infinity') AND predicted_price_1h >= 1.0)) "
             "AND (direction_prob_up IS NULL OR (direction_prob_up NOT IN ('NaN', 'Infinity', '-Infinity') AND direction_prob_up >= 0.0 AND direction_prob_up <= 1.0)) "
@@ -253,15 +242,15 @@ class ModelPrediction(Base):
             name="chk_prediction_mode_invariants",
         ),
         CheckConstraint(
-            "(outcome_tick_id IS NULL AND evaluation_policy_version IS NULL AND actual_price_at_t_plus_1 IS NULL "
+            "(outcome_tick_id IS NULL AND actual_price_at_t_plus_1 IS NULL "
             "AND actual_return_pct IS NULL AND direction_realized IS NULL AND direction_correct IS NULL "
             "AND residual_error IS NULL AND absolute_error_usd IS NULL AND percentage_error IS NULL "
-            "AND is_black_swan IS NULL AND error_attribution_tag IS NULL AND reconciled_at IS NULL) "
-            "OR (outcome_tick_id IS NOT NULL AND evaluation_policy_version = 'binary_exact_t1_v2' "
+            "AND error_attribution_tag IS NULL AND reconciled_at IS NULL) "
+            "OR (outcome_tick_id IS NOT NULL "
             "AND actual_price_at_t_plus_1 IS NOT NULL AND actual_return_pct IS NOT NULL "
             "AND direction_realized IS NOT NULL AND direction_correct IS NOT NULL "
             "AND residual_error IS NOT NULL AND absolute_error_usd IS NOT NULL "
-            "AND percentage_error IS NOT NULL AND is_black_swan IS NOT NULL "
+            "AND percentage_error IS NOT NULL "
             "AND error_attribution_tag IS NOT NULL AND reconciled_at IS NOT NULL "
             "AND actual_price_at_t_plus_1 >= 1.0 "
             "AND direction_realized IN ('UP', 'DOWN') "
@@ -272,7 +261,7 @@ class ModelPrediction(Base):
             "'SIDEWAYS_DRIFT', 'DIRECTION_MISALIGNED', 'BLACK_SWAN_OUTLIER'))",
             name="chk_reconciliation_all_or_nothing",
         ),
-        Index("uq_model_predictions_canonical_tick_version", "tick_id", "model_version", unique=True, postgresql_where=text("is_canonical IS TRUE"), sqlite_where=text("is_canonical IS TRUE")),
+        Index("uq_model_predictions_tick_version", "tick_id", "model_version", unique=True),
         Index("uq_model_predictions_primary_tick", "tick_id", unique=True, postgresql_where=text("is_primary IS TRUE"), sqlite_where=text("is_primary IS TRUE")),
         Index("ix_model_predictions_tick_id", "tick_id"),
         Index("ix_model_predictions_model_version", "model_version"),
@@ -304,13 +293,13 @@ def _classify_column_type(raw_type: str) -> str:
 
 
 CANONICAL_TABLE_COLUMNS: Dict[str, List[Tuple[str, str, bool]]] = {
-    "market_ticks": [("id", "integer", False), ("timestamp", "timestamp", False), ("open", "float", False), ("high", "float", False), ("low", "float", False), ("close", "float", False), ("volume", "float", False), ("model_version", "varchar", False), ("feature_schema_version", "varchar", False), ("market_regime", "varchar", True), ("predicted_return_1h", "float", True), ("predicted_price_1h", "float", True), ("model_confidence", "float", True), ("features", "json", True)],
+    "market_ticks": [("id", "integer", False), ("timestamp", "timestamp", False), ("open", "float", False), ("high", "float", False), ("low", "float", False), ("close", "float", False), ("volume", "float", False), ("model_version", "varchar", False), ("predicted_return_1h", "float", True), ("predicted_price_1h", "float", True), ("model_confidence", "float", True), ("features", "json", True)],
     "api_telemetry": [("id", "integer", False), ("timestamp", "timestamp", False), ("service_name", "varchar", False), ("endpoint", "varchar", False), ("latency_ms", "float", False), ("status_code", "integer", False), ("error_message", "text", True)],
-    "council_audits": [("id", "integer", False), ("timestamp", "timestamp", False), ("tick_id", "integer", True), ("deliberation_latency_ms", "float", True), ("strategist_action", "varchar", False), ("strategist_conviction", "integer", False), ("rag_context_summary", "text", True), ("risk_verdict", "varchar", False), ("veto_reasons", "json", True), ("kelly_fraction", "float", False), ("final_decision", "varchar", False), ("veto_attribution", "varchar", True), ("execution_notes", "text", True)],
+    "council_audits": [("id", "integer", False), ("timestamp", "timestamp", False), ("tick_id", "integer", True), ("strategist_action", "varchar", False), ("strategist_conviction", "integer", False), ("rag_context_summary", "text", True), ("risk_verdict", "varchar", False), ("final_decision", "varchar", False), ("execution_notes", "text", True)],
     "reconciliations": [("id", "integer", False), ("timestamp", "timestamp", False), ("tick_id", "integer", False), ("predicted_price", "float", False), ("actual_price_at_t_plus_1", "float", False), ("predicted_return_pct", "float", False), ("actual_return_pct", "float", False), ("residual_error", "float", False), ("absolute_error_usd", "float", False), ("percentage_error", "float", False), ("direction_predicted", "varchar", False), ("direction_realized", "varchar", False), ("direction_correct", "boolean", False), ("error_attribution_tag", "varchar", False), ("is_black_swan", "boolean", False)],
     "paper_portfolio": [("id", "integer", False), ("tick_id", "integer", True), ("timestamp", "timestamp", False), ("action", "varchar", False), ("btc_amount", "float", False), ("execution_price", "float", False), ("fee_deducted_usd", "float", False), ("slippage_usd", "float", False), ("cash_balance", "float", False), ("btc_balance", "float", False), ("total_equity_usd", "float", False), ("realized_pnl_usd", "float", False), ("unrealized_pnl_usd", "float", False), ("drawdown_pct", "float", False), ("cumulative_return_pct", "float", False), ("benchmark_btc_equity", "float", False), ("alpha_usd", "float", False), ("alpha_pct", "float", False), ("notes", "text", True)],
-    "model_registry": [("id", "integer", False), ("model_version", "varchar", False), ("regressor_artifact_path", "varchar", False), ("regressor_sha256", "varchar", False), ("classifier_artifact_path", "varchar", False), ("classifier_sha256", "varchar", False), ("feature_schema_version", "varchar", False), ("target_definition", "varchar", False), ("evaluation_metrics", "json", True), ("current_status", "varchar", False), ("lifecycle_seq", "integer", False), ("created_at", "timestamp", False)],
-    "model_predictions": [("id", "integer", False), ("tick_id", "integer", False), ("model_version", "varchar", False), ("run_mode", "varchar", False), ("is_canonical", "boolean", False), ("is_primary", "boolean", False), ("feature_schema_version", "varchar", False), ("predicted_return_pct", "float", True), ("predicted_price_1h", "float", True), ("direction_predicted", "varchar", True), ("direction_prob_up", "float", True), ("clears_hurdle", "boolean", False), ("created_at", "timestamp", False), ("outcome_tick_id", "integer", True), ("evaluation_policy_version", "varchar", True), ("actual_price_at_t_plus_1", "float", True), ("actual_return_pct", "float", True), ("direction_realized", "varchar", True), ("direction_correct", "boolean", True), ("residual_error", "float", True), ("absolute_error_usd", "float", True), ("percentage_error", "float", True), ("is_black_swan", "boolean", True), ("error_attribution_tag", "varchar", True), ("diagnosis_summary", "text", True), ("reconciled_at", "timestamp", True)],
+    "model_registry": [("id", "integer", False), ("model_version", "varchar", False), ("regressor_artifact_path", "varchar", False), ("regressor_sha256", "varchar", False), ("classifier_artifact_path", "varchar", False), ("classifier_sha256", "varchar", False), ("feature_schema_version", "varchar", False), ("target_definition", "varchar", False), ("evaluation_metrics", "json", True), ("current_status", "varchar", False), ("created_at", "timestamp", False)],
+    "model_predictions": [("id", "integer", False), ("tick_id", "integer", False), ("model_version", "varchar", False), ("run_mode", "varchar", False), ("is_primary", "boolean", False), ("feature_schema_version", "varchar", False), ("predicted_return_pct", "float", True), ("predicted_price_1h", "float", True), ("direction_predicted", "varchar", True), ("direction_prob_up", "float", True), ("clears_hurdle", "boolean", False), ("created_at", "timestamp", False), ("outcome_tick_id", "integer", True), ("actual_price_at_t_plus_1", "float", True), ("actual_return_pct", "float", True), ("direction_realized", "varchar", True), ("direction_correct", "boolean", True), ("residual_error", "float", True), ("absolute_error_usd", "float", True), ("percentage_error", "float", True), ("error_attribution_tag", "varchar", True), ("diagnosis_summary", "text", True), ("reconciled_at", "timestamp", True)],
     "hourly_postmortems": [("id", "integer", False), ("tick_id", "integer", False), ("news_headlines", "json", True), ("feature_snapshot", "json", True), ("gemini_full_analysis", "json", True), ("gemini_status", "varchar", False), ("error_detail", "text", True), ("created_at", "timestamp", False)],
 }
 
@@ -547,7 +536,7 @@ def get_reconciliation_history(limit: int = 500, model_version: Optional[str] = 
                         "direction_predicted": cp.direction_predicted,
                         "direction_realized": cp.direction_realized,
                         "direction_correct": cp.direction_correct,
-                        "is_black_swan": cp.is_black_swan,
+                        "is_black_swan": (cp.error_attribution_tag == "BLACK_SWAN_OUTLIER"),
                         "error_attribution_tag": cp.error_attribution_tag,
                         "model_version": cp.model_version,
                         "diagnosis_summary": getattr(cp, "diagnosis_summary", None),
