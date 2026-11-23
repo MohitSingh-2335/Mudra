@@ -957,6 +957,9 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
 
         # collect model outcomes for grounded gemini post-mortem analysis
         try:
+            prior_feats = dict(prior.features) if isinstance(prior.features, dict) else {}
+            prior_feats.setdefault("close", float(prior.close))
+
             preds_for_tick = session.execute(
                 select(ModelPrediction).where(ModelPrediction.tick_id == prior.id)
             ).scalars().all()
@@ -985,6 +988,26 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
                     "direction_correct": (dir_pred == dir_real),
                     "error_usd": abs_err,
                 })
+
+            # compute per-row tree shap drivers for each evaluated model
+            from src.explainability import get_top_shap_drivers
+            from src.model_loader import get_registered_models
+            registered_models = {}
+            try:
+                registered_models = get_registered_models()
+            except Exception:
+                registered_models = {}
+
+            for outcome_dict in model_outcomes:
+                mv = outcome_dict.get("model_version", "")
+                spec = registered_models.get(mv, {})
+                c_model = spec.get("classifier") or spec.get("regressor")
+                c_feats = spec.get("features", [])
+                if c_model is not None and c_feats:
+                    X_row = pd.DataFrame([{k: prior_feats.get(k, 0.0) for k in c_feats}])
+                else:
+                    X_row = pd.DataFrame([prior_feats])
+                outcome_dict["top_shap_drivers"] = get_top_shap_drivers(c_model, X_row, top_k=3)
 
             # only call live external apis (mcp and gemini) for the most recent pending tick to avoid timeouts during backlogs
             is_recent_pending = bool(pending_ticks and prior.id == pending_ticks[-1].id)
@@ -1028,9 +1051,6 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
                 if news.get("status") == "LIVE":
                     mcp_ctx["news_headlines"] = news.get("headlines", [])
 
-                prior_feats = dict(prior.features) if isinstance(prior.features, dict) else {}
-                prior_feats.setdefault("close", float(prior.close))
-
                 # log gemini post-mortem telemetry
                 t0_gem = time.perf_counter()
                 postmortem = generate_hourly_postmortem_with_gemini(prior_feats, mcp_ctx, model_outcomes)
@@ -1051,16 +1071,18 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
                         }
                         for m in model_outcomes
                     },
+                    "model_outcomes": model_outcomes,
                 }
 
             with session.begin_nested():
                 existing_pm = session.execute(
                     select(HourlyPostmortem).where(HourlyPostmortem.tick_id == prior.id)
                 ).scalars().first()
+                news_list = mcp_ctx.get("news_headlines", []) if is_recent_pending else []
                 if not existing_pm:
                     new_pm = HourlyPostmortem(
                         tick_id=prior.id,
-                        news_headlines=mcp_ctx.get("news_headlines", []),
+                        news_headlines=news_list,
                         feature_snapshot=prior_feats,
                         gemini_full_analysis=postmortem,
                         gemini_status=postmortem.get("gemini_status", "UNAVAILABLE"),
@@ -1068,6 +1090,12 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
                         created_at=datetime.now(timezone.utc),
                     )
                     session.add(new_pm)
+                else:
+                    existing_pm.gemini_full_analysis = postmortem
+                    existing_pm.gemini_status = postmortem.get("gemini_status", "UNAVAILABLE")
+                    existing_pm.error_detail = postmortem.get("error_detail")
+                    if news_list:
+                        existing_pm.news_headlines = news_list
 
                 per_model = postmortem.get("per_model", {})
                 for p_row in preds_for_tick:
