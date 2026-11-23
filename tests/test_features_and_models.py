@@ -159,7 +159,7 @@ def test_canonical_configuration_constants():
     assert BASELINE_MODEL_SPEC["model_version"] == ACTIVE_MODEL_VERSION
     assert BASELINE_MODEL_SPEC["regressor_sha256"] == REGRESSOR_MODEL_SHA256
     assert MarketTick.model_version.nullable is False
-    assert MarketTick.feature_schema_version.nullable is False
+    assert ModelPrediction.feature_schema_version.nullable is False
     assert compute_file_sha256(REGRESSOR_MODEL_PATH) == REGRESSOR_MODEL_SHA256
     assert compute_file_sha256(CLASSIFIER_MODEL_PATH) == CLASSIFIER_MODEL_SHA256
 
@@ -193,7 +193,6 @@ def rec_db():
     tick = MarketTick(
         timestamp=t0, open=60000.0, high=60100.0, low=59900.0, close=60000.0, volume=10.0,
         predicted_price_1h=60300.0, predicted_return_1h=0.005, model_version=ACTIVE_MODEL_VERSION,
-        feature_schema_version=FEATURE_SCHEMA_VERSION,
     )
     session.add(tick)
     session.commit()
