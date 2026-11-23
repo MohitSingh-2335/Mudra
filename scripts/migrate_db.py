@@ -141,13 +141,13 @@ def run_tx1c(target_engine: Engine) -> Dict[str, Any]:
         ins_res = conn.execute(
             text("""
                 INSERT INTO public.model_predictions (
-                    tick_id, model_version, run_mode, is_canonical, is_primary,
+                    tick_id, model_version, run_mode, is_primary,
                     feature_schema_version, predicted_return_pct,
                     predicted_price_1h, direction_predicted, direction_prob_up, clears_hurdle, created_at
                 )
                 SELECT
-                    mt.id AS tick_id, mt.model_version, 'PRIMARY', TRUE, TRUE,
-                    mt.feature_schema_version,
+                    mt.id AS tick_id, mt.model_version, 'PRIMARY', TRUE,
+                    :feat_schema_ver,
                     ((mt.predicted_price_1h - mt.close) / mt.close) * 100.0,
                     mt.predicted_price_1h,
                     CASE WHEN ((mt.predicted_price_1h - mt.close) / mt.close) >= 0.0 THEN 'UP' ELSE 'DOWN' END,
@@ -156,9 +156,9 @@ def run_tx1c(target_engine: Engine) -> Dict[str, Any]:
                     mt.timestamp
                 FROM public.market_ticks mt
                 WHERE mt.predicted_price_1h IS NOT NULL AND mt.close >= 1.0 AND mt.predicted_price_1h >= 1.0
-                ON CONFLICT (tick_id, model_version) WHERE (is_canonical IS TRUE) DO NOTHING
+                ON CONFLICT (tick_id, model_version) DO NOTHING
             """),
-            {"hurdle_pct": float(MIN_HURDLE_PCT)},
+            {"hurdle_pct": float(MIN_HURDLE_PCT), "feat_schema_ver": FEATURE_SCHEMA_VERSION},
         )
         inserted = ins_res.rowcount if ins_res.rowcount is not None and ins_res.rowcount >= 0 else 0
     return {"tx": "1C", "inserted_predictions": inserted}
