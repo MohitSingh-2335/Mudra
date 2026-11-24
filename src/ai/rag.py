@@ -180,7 +180,7 @@ def get_rag_agent() -> MarketKnowledgeRAG:
     if _rag_instance is None:
         _rag_instance = MarketKnowledgeRAG()
         if not os.getenv("PYTEST_CURRENT_TEST") and "pytest" not in sys.modules:
-            try: _rag_instance.hydrate_from_neon(limit=50)
+            try: _rag_instance.hydrate_from_neon(limit=15)
             except Exception as e: logger.debug("Auto-hydration skipped: %s", e)
     return _rag_instance
 
