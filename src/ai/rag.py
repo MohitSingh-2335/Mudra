@@ -38,6 +38,7 @@ class RAGMemoryItem(BaseModel):
 class GeminiEmbeddingFunction(EmbeddingFunction):
     def __init__(self, api_key: Optional[str] = None):
         self.api_key, self._local_fallback = api_key, None
+        self.last_embedding_mode: str = "uninitialized"
 
     def _hash_vector(self, text: str, dim: int = 768) -> List[float]:
         rng = np.random.RandomState(sum(ord(c) for c in text) % 10000 + 1)
@@ -48,10 +49,13 @@ class GeminiEmbeddingFunction(EmbeddingFunction):
     def __call__(self, input: Documents) -> Embeddings:
         texts = list(input)
         if os.getenv("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+            self.last_embedding_mode = "hash_test_fallback"
             return [self._hash_vector(t) for t in texts]
         try:
             from src.ai.llm import embed_texts
-            return embed_texts(texts, api_key=self.api_key, output_dimensionality=768)
+            embs = embed_texts(texts, api_key=self.api_key, output_dimensionality=768)
+            self.last_embedding_mode = "gemini-embedding-001"
+            return embs
         except Exception as exc:
             logger.warning("Gemini embed_texts failed, falling back to local: %s", exc)
 
@@ -63,8 +67,10 @@ class GeminiEmbeddingFunction(EmbeddingFunction):
         if self._local_fallback:
             try:
                 embs = self._local_fallback(texts)
+                self.last_embedding_mode = "local_minilm"
                 return [list(vec) + list(vec) if len(vec) == 384 else list(vec) for vec in embs]
             except Exception: pass
+        self.last_embedding_mode = "hash_test_fallback"
         return [self._hash_vector(t) for t in texts]
 
 
@@ -120,9 +126,15 @@ class MarketKnowledgeRAG:
             with get_db() as s:
                 rows = s.execute(select(ModelPrediction).where(or_(ModelPrediction.diagnosis_summary.isnot(None), ModelPrediction.error_attribution_tag.isnot(None))).order_by(ModelPrediction.id.desc()).limit(max(1, min(int(limit), 200)))).scalars().all()
                 if not rows: return 0
-                ids = [f"neon_pred_{r.id}" for r in rows]
-                docs = [f"Model: {r.model_version} | Pred: {r.direction_predicted} (${float(r.predicted_price_1h or 0.0):,.2f}) | Actual: {r.direction_realized or 'N/A'} (${float(r.actual_price_at_t_plus_1 or 0.0):,.2f}) | Correct: {bool(r.direction_correct)} | Tag: {r.error_attribution_tag or 'NONE'} | Notes: {r.diagnosis_summary or f'Error: ${float(r.absolute_error_usd or 0.0):,.2f}'}" for r in rows]
-                metas = [{"type": "episodic_outcome", "tick_id": int(r.tick_id or 0), "model_version": str(r.model_version or "unknown"), "direction_predicted": str(r.direction_predicted or "UP"), "direction_realized": str(r.direction_realized or "UP"), "direction_correct": bool(r.direction_correct), "error_attribution_tag": str(r.error_attribution_tag or "ACCURATE"), "absolute_error_usd": float(r.absolute_error_usd or 0.0)} for r in rows]
+                all_ids = [f"neon_pred_{r.id}" for r in rows]
+                existing_res = self.collection.get(ids=all_ids)
+                existing = set(existing_res.get("ids", []) if existing_res else [])
+                new_rows = [r for r in rows if f"neon_pred_{r.id}" not in existing]
+                if not new_rows:
+                    return 0
+                ids = [f"neon_pred_{r.id}" for r in new_rows]
+                docs = [f"Model: {r.model_version} | Pred: {r.direction_predicted} (${float(r.predicted_price_1h or 0.0):,.2f}) | Actual: {r.direction_realized or 'N/A'} (${float(r.actual_price_at_t_plus_1 or 0.0):,.2f}) | Correct: {bool(r.direction_correct)} | Tag: {r.error_attribution_tag or 'NONE'} | Notes: {r.diagnosis_summary or f'Error: ${float(r.absolute_error_usd or 0.0):,.2f}'}" for r in new_rows]
+                metas = [{"type": "episodic_outcome", "tick_id": int(r.tick_id or 0), "model_version": str(r.model_version or "unknown"), "direction_predicted": str(r.direction_predicted or "UP"), "direction_realized": str(r.direction_realized or "UP"), "direction_correct": bool(r.direction_correct), "error_attribution_tag": str(r.error_attribution_tag or "ACCURATE"), "absolute_error_usd": float(r.absolute_error_usd or 0.0)} for r in new_rows]
                 self.collection.upsert(ids=ids, documents=docs, metadatas=metas)
                 return len(ids)
         except Exception as exc:
@@ -140,6 +152,10 @@ class MarketKnowledgeRAG:
         except Exception as exc:
             logger.warning("Index outcome memory failed: %s", exc)
             return False
+
+    @property
+    def embedding_mode(self) -> str:
+        return getattr(getattr(self, "embedding_fn", None), "last_embedding_mode", "uninitialized")
 
     def query_memories(self, query_text: str, n_results: int = 3, where: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         if not self.has_chroma or self.collection is None: return []
@@ -176,3 +192,4 @@ def index_reconciled_outcome_memory(tick_id: int, timestamp_iso: str, market_reg
 def query_similar_error_memories(query_text: str, n_results: int = 3) -> List[Dict[str, Any]]:
     return get_rag_agent().query_memories(query_text=query_text, n_results=n_results, where={"type": "episodic_outcome"})
 def hydrate_rag_from_neon(limit: int = 50) -> int: return get_rag_agent().hydrate_from_neon(limit)
+def get_rag_embedding_mode() -> str: return getattr(get_rag_agent(), "embedding_mode", "uninitialized")
