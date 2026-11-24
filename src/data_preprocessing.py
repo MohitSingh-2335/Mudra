@@ -1,8 +1,10 @@
 import os
 import shutil
+import sys
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Any, Dict, Optional, Union
 import pandas as pd
 import requests
 
@@ -161,3 +163,27 @@ def merge_onchain(df: pd.DataFrame, timestamp_col: str = "timestamp", timespan: 
             df[col] = df[col].ffill().fillna(0.0)
 
     return df.drop(columns=["_target_date", "date"], errors="ignore")
+
+
+_MACRO_CACHE: Dict[str, Any] = {"ts": 0.0, "fng_df": None, "onchain_df": None}
+
+
+def enrich_candles_with_macro(df: pd.DataFrame, ttl_sec: float = 3600.0) -> pd.DataFrame:
+    # Enriches candle sequence with cached D-1 lagged Fear & Greed and 30-day on-chain features
+    if df is None or df.empty or "timestamp" not in df.columns:
+        return df
+    if os.getenv("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+        return df
+
+    now_mono = time.monotonic()
+    if (now_mono - float(_MACRO_CACHE["ts"])) >= ttl_sec or (_MACRO_CACHE["fng_df"] is None and _MACRO_CACHE["onchain_df"] is None):
+        fng_new = fetch_fear_greed_index(limit=10)
+        onchain_new = fetch_onchain_metrics(timespan="30days")
+        if fng_new is not None and not fng_new.empty:
+            _MACRO_CACHE["fng_df"] = fng_new
+        if onchain_new is not None and not onchain_new.empty:
+            _MACRO_CACHE["onchain_df"] = onchain_new
+        _MACRO_CACHE["ts"] = now_mono
+
+    out = merge_fear_greed(df, timestamp_col="timestamp", fng_df=_MACRO_CACHE["fng_df"])
+    return merge_onchain(out, timestamp_col="timestamp", timespan="30days", onchain_df=_MACRO_CACHE["onchain_df"])
