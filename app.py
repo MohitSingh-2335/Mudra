@@ -1740,10 +1740,14 @@ with tab_agent:
             mcp_ctx = {"funding_rate_8h_pct": 0.01, "derivatives_regime": "Neutral Funding", "futures_basis_usd": 0.0, "recent_error_memories": []}
 
         mp1, mp2, mp3 = st.columns(3)
+        fr_val = mcp_ctx.get("funding_rate_8h_pct")
+        fr_text = f"{fr_val:+.4f}%" if fr_val is not None else "N/A"
+        basis_val = mcp_ctx.get("futures_basis_usd")
+        basis_text = f"${basis_val:+,.2f}" if basis_val is not None else "N/A"
         with mp1:
-            st.metric("Derivatives Funding Rate (8h)", f"{mcp_ctx.get('funding_rate_8h_pct', 0.01):+.4f}%", mcp_ctx.get("derivatives_regime", "Neutral"))
+            st.metric("Derivatives Funding Rate (8h)", fr_text, mcp_ctx.get("derivatives_regime", "Unavailable"))
         with mp2:
-            st.metric("Futures Basis Gap", f"${mcp_ctx.get('futures_basis_usd', 0.0):+,.2f}", "Binance Futures vs. Spot")
+            st.metric("Futures Basis Gap", basis_text, "Binance Futures vs. Spot")
         with mp3:
             if forecast_result:
                 try:
