@@ -106,11 +106,11 @@ def get_live_btc_derivatives_pulse() -> Dict[str, Any]:
         "status": "OFFLINE_FALLBACK",
         "source": "none",
         "symbol": "BTC-PERPETUAL",
-        "mark_price_usd": 0.0,
-        "spot_index_price_usd": 0.0,
-        "futures_basis_usd": 0.0,
-        "funding_rate_8h_pct": 0.0100,
-        "derivatives_regime": "Neutral Funding (Offline Fallback)",
+        "mark_price_usd": None,
+        "spot_index_price_usd": None,
+        "futures_basis_usd": None,
+        "funding_rate_8h_pct": None,
+        "derivatives_regime": "Unavailable",
         "error": " ; ".join(errors) if errors else "DERIVATIVES_FEEDS_UNAVAILABLE",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -123,7 +123,7 @@ def get_live_btc_spot_and_range() -> Dict[str, Any]:
     from src.engine import estimate_next_hour_price_range_usd
     df = get_latest_market_ticks(limit=48)
     if df.empty:
-        return {"status": "OFFLINE_FALLBACK", "current_price": 65000.0, "predicted_range_usd": 650.0}
+        return {"status": "UNAVAILABLE", "current_price": None, "predicted_range_usd": None}
     current_price = float(df["close"].iloc[-1])
     price_24h_ago = float(df["close"].iloc[-24]) if len(df) >= 24 else current_price
     range_info = estimate_next_hour_price_range_usd(df, current_price)
