@@ -1,6 +1,9 @@
 import hashlib
+import logging
+import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 import pytest
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
@@ -191,6 +194,26 @@ def test_hourly_postmortem_lifecycle(in_memory_db):
     assert retrieved.gemini_status == "OK"
     assert len(retrieved.news_headlines) == 1
     assert retrieved.feature_snapshot["close"] == 65100.0
+
+
+def test_get_database_url_warns_on_malformed_secrets(tmp_path, monkeypatch, caplog):
+    # Verify malformed TOML secrets emit a warning instead of falling back to SQLite silently.
+    import src.database as src_db
+
+    bad_secrets = tmp_path / "secrets.toml"
+    bad_secrets.write_text('LANGSMITH_API_KEY = lsv2_unquoted_value\n', encoding="utf-8")
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("POSTGRES_URL", raising=False)
+    monkeypatch.setitem(sys.modules, "streamlit", SimpleNamespace())
+    monkeypatch.setattr(src_db, "SECRETS_FILE", bad_secrets)
+
+    caplog.set_level(logging.WARNING, logger="mudra.database")
+    db_url = src_db.get_database_url()
+
+    assert db_url.startswith("sqlite:///")
+    assert "Failed to parse secrets.toml" in caplog.text
+    assert "TOMLDecodeError" in caplog.text
 
 
 
