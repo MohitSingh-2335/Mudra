@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
@@ -20,9 +21,21 @@ class MCPContextPayload(BaseModel):
     news_headlines: List[str] = Field(default_factory=list)
     recent_error_memories: List[Dict[str, Any]] = Field(default_factory=list)
     error: Optional[str] = None
+    derivatives_status: str = "UNAVAILABLE"
+    derivatives_source: str = "none"
+    derivatives_error: Optional[str] = None
+    derivatives_latency_ms: float = 0.0
+    news_status: str = "UNAVAILABLE"
+    news_error: Optional[str] = None
+    news_latency_ms: float = 0.0
 
 
 async def _fetch_mcp_context_stdio(limit: int = 3, timeout_sec: float = 15.0) -> Dict[str, Any]:
+    async def _timed_tool(session: Any, name: str, arguments: Dict[str, Any]):
+        t0 = time.perf_counter()
+        res = await session.call_tool(name, arguments=arguments)
+        return res, (time.perf_counter() - t0) * 1000.0
+
     async def _impl():
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
@@ -39,17 +52,33 @@ async def _fetch_mcp_context_stdio(limit: int = 3, timeout_sec: float = 15.0) ->
                 tools_res = await session.list_tools()
                 discovered = [t.name for t in tools_res.tools]
 
-                p_task = session.call_tool("get_live_btc_derivatives_pulse", arguments={})
-                n_task = session.call_tool("get_recent_btc_news_headlines", arguments={"hours_back": 2, "max_items": 5})
-                p_call, n_call = await asyncio.gather(p_task, n_task, return_exceptions=True)
+                # Invoke derivatives, 6h news, and error memories concurrently so a cold DB never blocks live market feeds
+                p_task = _timed_tool(session, "get_live_btc_derivatives_pulse", {})
+                n_task = _timed_tool(session, "get_recent_btc_news_headlines", {"hours_back": 6, "max_items": 5})
+                e_task = _timed_tool(session, "get_recent_prediction_error_memories", {"limit": limit})
+                p_res, n_res, e_res = await asyncio.gather(p_task, n_task, e_task, return_exceptions=True)
+
+                p_lat = p_res[1] if not isinstance(p_res, Exception) else 0.0
+                n_lat = n_res[1] if not isinstance(n_res, Exception) else 0.0
+                p_call = p_res[0] if not isinstance(p_res, Exception) else p_res
+                n_call = n_res[0] if not isinstance(n_res, Exception) else n_res
+                e_call = e_res[0] if not isinstance(e_res, Exception) else e_res
 
                 p_data = json.loads(p_call.content[0].text) if (not isinstance(p_call, Exception) and p_call.content) else {}
                 n_data = json.loads(n_call.content[0].text) if (not isinstance(n_call, Exception) and n_call.content) else {}
                 e_data = []
+                if not isinstance(e_call, Exception) and getattr(e_call, "content", None):
+                    try:
+                        parsed_e = [json.loads(c.text) for c in e_call.content if getattr(c, "text", None)]
+                        e_data = parsed_e[0] if (len(parsed_e) == 1 and isinstance(parsed_e[0], list)) else parsed_e
+                    except Exception:
+                        e_data = []
 
         funding = p_data.get("funding_rate_8h_pct")
         headlines = n_data.get("headlines", []) if isinstance(n_data, dict) else []
-        live = (p_data.get("status") == "LIVE") and bool(headlines)
+        d_status = str(p_data.get("status", "UNAVAILABLE")) if p_data else "UNAVAILABLE"
+        n_status = str(n_data.get("status", "UNAVAILABLE")) if isinstance(n_data, dict) and n_data else "UNAVAILABLE"
+        live = (d_status == "LIVE") and bool(headlines)
         status = "LIVE" if live else ("PARTIAL" if (funding is not None or headlines) else "UNAVAILABLE")
 
         return MCPContextPayload(
@@ -61,6 +90,13 @@ async def _fetch_mcp_context_stdio(limit: int = 3, timeout_sec: float = 15.0) ->
             futures_basis_usd=float(p_data.get("futures_basis_usd")) if p_data.get("futures_basis_usd") is not None else None,
             recent_error_memories=e_data if isinstance(e_data, list) else [],
             news_headlines=headlines,
+            derivatives_status=d_status,
+            derivatives_source=str(p_data.get("source", "none")),
+            derivatives_error=str(p_res) if isinstance(p_res, Exception) else p_data.get("error"),
+            derivatives_latency_ms=round(float(p_lat), 2),
+            news_status=n_status,
+            news_error=str(n_res) if isinstance(n_res, Exception) else n_data.get("error"),
+            news_latency_ms=round(float(n_lat), 2),
         ).model_dump()
 
     return await asyncio.wait_for(_impl(), timeout=timeout_sec)
@@ -75,9 +111,13 @@ def fetch_mcp_context(limit: int = 3, timeout_sec: float = 15.0) -> Dict[str, An
                 get_recent_btc_news_headlines,
                 get_recent_prediction_error_memories,
             )
+            t0_p = time.perf_counter()
             pulse = get_live_btc_derivatives_pulse()
+            p_lat = (time.perf_counter() - t0_p) * 1000.0
             errs = get_recent_prediction_error_memories(limit=limit)
-            news = get_recent_btc_news_headlines(hours_back=2, max_items=5)
+            t0_n = time.perf_counter()
+            news = get_recent_btc_news_headlines(hours_back=6, max_items=5)
+            n_lat = (time.perf_counter() - t0_n) * 1000.0
             headlines = news.get("headlines", []) if isinstance(news, dict) else []
             funding = pulse.get("funding_rate_8h_pct")
             status = "LIVE" if (pulse.get("status") == "LIVE" or headlines) else "UNAVAILABLE"
@@ -91,6 +131,13 @@ def fetch_mcp_context(limit: int = 3, timeout_sec: float = 15.0) -> Dict[str, An
                 futures_basis_usd=float(pulse.get("futures_basis_usd")) if pulse.get("futures_basis_usd") is not None else None,
                 recent_error_memories=errs if isinstance(errs, list) else [],
                 news_headlines=headlines,
+                derivatives_status=str(pulse.get("status", "UNAVAILABLE")),
+                derivatives_source=str(pulse.get("source", "none")),
+                derivatives_error=pulse.get("error"),
+                derivatives_latency_ms=round(float(p_lat), 2),
+                news_status=str(news.get("status", "UNAVAILABLE")) if isinstance(news, dict) else "UNAVAILABLE",
+                news_error=news.get("error") if isinstance(news, dict) else None,
+                news_latency_ms=round(float(n_lat), 2),
             )
             return payload.model_dump()
         except Exception as exc:
