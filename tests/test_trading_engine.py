@@ -303,20 +303,21 @@ def test_plain_english_reconciliation_story_and_mcp_fallback(monkeypatch):
 def test_gemini_model_fallback_and_mcp_trade_plan(monkeypatch):
     called_models = []
 
-    class _DummyGenerativeModel:
-        def __init__(self, model_name=None, **kwargs):
-            self.m = model_name or kwargs.get("model_name")
-            called_models.append(self.m)
-
-        def generate_content(self, prompt, **kwargs):
+    class _DummyModels:
+        def generate_content(self, model=None, contents=None, config=None, **kwargs):
+            called_models.append(model)
             if len(called_models) == 1:
                 raise RuntimeError("Rate limit 429 on primary model candidate")
             res = MagicMock()
             res.text = "```json\n{\"trade_thesis\": \"MODERATE BULLISH\", \"conviction_score\": 7, \"executive_summary\": \"OK\", \"quantitative_driver_analysis\": \"SHAP OK\", \"macro_market_context\": \"RAG OK\", \"key_risks\": [\"Risk 1\"]}\n```"
             return res
 
-    import google.generativeai as genai
-    monkeypatch.setattr(genai, "GenerativeModel", _DummyGenerativeModel)
+    class _DummyClient:
+        def __init__(self, api_key=None, **kwargs):
+            self.models = _DummyModels()
+
+    from google import genai
+    monkeypatch.setattr(genai, "Client", _DummyClient)
     text = generate_with_gemini_fallback("test_key", "prompt")
     assert "MODERATE BULLISH" in text and len(called_models) >= 2
 
