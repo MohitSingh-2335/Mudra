@@ -68,6 +68,9 @@ def create_features(df: pd.DataFrame, drop_na: bool = True, is_training: bool = 
     df["candle_body_pct"] = (df["close"] - df["open"]) / df["open"]
     df["hl_range_pct"] = (df["high"] - df["low"]) / df["close"]
     df["sma_10_dist_pct"] = (df["close"] - df["Rolling_Mean_Close"]) / df["Rolling_Mean_Close"]
+    # True 10-hour SMA distance for Model 3 parity without breaking Model 2's 5-hour feature
+    sma_10_true = df["close"].rolling(10, min_periods=1).mean()
+    df["sma_10_true_dist_pct"] = (df["close"] - sma_10_true) / (sma_10_true + 1e-8)
     df["ema_10_dist_pct"] = (df["close"] - df["ema_10"]) / df["ema_10"]
     df["ema_30_dist_pct"] = (df["close"] - df["ema_30"]) / df["ema_30"]
     df["bb_width_pct"] = (df["bb_high"] - df["bb_low"]) / df["close"]
@@ -92,7 +95,7 @@ def create_features(df: pd.DataFrame, drop_na: bool = True, is_training: bool = 
 
     # Macro sentiment and on-chain network indicators
     df["fng_value"] = df["fng_value"] if "fng_value" in df.columns else 50.0
-    df["fng_mean_3d"] = df["fng_value"].rolling(72).mean() if "fng_value" in df.columns else 50.0
+    df["fng_mean_3d"] = df["fng_value"].rolling(72, min_periods=1).mean() if "fng_value" in df.columns else 50.0
 
     for col, src in [("onchain_num_tx_change", "onchain_num_tx"),
                      ("onchain_hash_rate_change", "onchain_hash_rate"),
