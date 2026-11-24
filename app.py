@@ -1,18 +1,16 @@
 import os
+import sys
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 # Linux / Streamlit Cloud SQLite upgrade hook for ChromaDB
 try:
     if sys.platform != "win32":
         __import__("pysqlite3")
-        import sys
         sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
 except Exception:
     pass
 
 import html
-import os
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -372,7 +370,7 @@ def generate_live_forecast(live_df: pd.DataFrame, reg_model: Any, clf_model: Any
             "pred_target": curr_price + pred_move, "cleared_hurdle": cleared, "direction_label": direction,
             "direction_badge": badge, "prob_up": prob_up, "prob_down": prob_down, "taker": taker,
             "spread_pct": spread, "candle_range_usd": candle_range, "hurdle_dollar_min": curr_price * (MIN_HURDLE_PCT / 100.0),
-            "current_price": curr_price,
+            "current_price": curr_price, "features": sample_input,
         }
     except Exception:
         return None
@@ -795,7 +793,10 @@ def generate_m3_forecast(live_df: pd.DataFrame, m3_reg: Any, m3_clf: Any) -> Opt
         if "lgbm_v3.0.0" not in reg_dict:
             return None
         c_feats = reg_dict["lgbm_v3.0.0"].get("features", [])
-        f_dict = extract_features_for_inference(live_df)
+        f_dict = dict(extract_features_for_inference(live_df))
+        # Model 3 uses true 10-period SMA distance while keeping the 5-period feature intact for Model 2.
+        if "sma_10_true_dist_pct" in f_dict:
+            f_dict["sma_10_dist_pct"] = f_dict["sma_10_true_dist_pct"]
         if not c_feats or not all(k in f_dict for k in c_feats):
             return None
         inp = pd.DataFrame([{k: f_dict[k] for k in c_feats}])
@@ -1213,7 +1214,15 @@ def render_ground_truth_html_table(df_subset: pd.DataFrame) -> None:
 @st.cache_data(ttl=60)
 def fetch_live_market_candles(symbol: str = "BTCUSDT") -> pd.DataFrame:
     try:
-        return fetch_historical_candles(symbol=symbol, limit=100)
+        df = fetch_historical_candles(symbol=symbol, limit=100)
+        # Ensure Fear & Greed and on-chain columns exist even if local fallback CSV lacked them.
+        if df is not None and not df.empty and ("fng_value" not in df.columns or "onchain_num_tx" not in df.columns):
+            try:
+                from src.data_preprocessing import enrich_candles_with_macro
+                df = enrich_candles_with_macro(df)
+            except Exception:
+                pass
+        return df
     except Exception as exc:
         empty = pd.DataFrame()
         empty.attrs["error"] = str(exc)
