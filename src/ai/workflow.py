@@ -59,6 +59,8 @@ ALLOWED_TRADE_ACTIONS = ("HOLD", "BUY", "SELL")
 
 def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LIMIT) -> pd.DataFrame:
     """Fetches confirmed 1h candles from Binance, Coinbase, or local cache."""
+    from src.data_preprocessing import enrich_candles_with_macro
+
     try:
         url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&limit={limit + 2}"
         resp = requests.get(url, timeout=5)
@@ -66,12 +68,16 @@ def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LI
             now_ms = datetime.now(timezone.utc).timestamp() * 1000.0
             closed = [c for c in resp.json() if float(c[6]) <= now_ms]
             if len(closed) >= 35:
-                return pd.DataFrame([{
+                df_b = pd.DataFrame([{
                     "timestamp": pd.to_datetime(c[0], unit="ms", utc=True),
                     "open": float(c[1]), "high": float(c[2]), "low": float(c[3]), "close": float(c[4]),
                     "volume": float(c[5]), "number_of_trades": int(c[8]),
                     "taker_buy_ratio": round(float(c[9]) / float(c[5]), 4) if float(c[5]) > 0 else 0.50,
                 } for c in closed[-limit:]])
+                try:
+                    return enrich_candles_with_macro(df_b)
+                except Exception:
+                    return df_b
     except Exception:
         pass
 
@@ -82,11 +88,15 @@ def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LI
             now_sec = datetime.now(timezone.utc).timestamp()
             closed = [c for c in resp.json() if (float(c[0]) + 3600.0) <= now_sec]
             if len(closed) >= 35:
-                return pd.DataFrame([{
+                df_cb = pd.DataFrame([{
                     "timestamp": pd.to_datetime(c[0], unit="s", utc=True),
                     "low": float(c[1]), "high": float(c[2]), "open": float(c[3]), "close": float(c[4]),
                     "volume": float(c[5]), "number_of_trades": None, "taker_buy_ratio": 0.50,
                 } for c in reversed(closed[:limit])])
+                try:
+                    return enrich_candles_with_macro(df_cb)
+                except Exception:
+                    return df_cb
     except Exception:
         pass
 
@@ -139,6 +149,13 @@ def calculate_technical_signals(
             candles_df["taker_buy_ratio"] = 0.50
         if timestamp:
             candles_df.at[idx, "timestamp"] = pd.to_datetime(timestamp)
+        # Populate cached Fear & Greed and on-chain features if the input candles lack them.
+        if "fng_value" not in candles_df.columns or "onchain_num_tx" not in candles_df.columns:
+            try:
+                from src.data_preprocessing import enrich_candles_with_macro
+                candles_df = enrich_candles_with_macro(candles_df)
+            except Exception:
+                pass
     return extract_features_for_inference(candles_df)
 
 
@@ -222,10 +239,25 @@ def get_multi_model_consensus(features: Optional[Dict[str, Any]] = None) -> Dict
         votes: Dict[str, str] = {}
         for ver, info in models.items():
             req_f = info.get("features", [])
-            if req_f and all(k in features for k in req_f):
-                inp = pd.DataFrame([{k: features[k] for k in req_f}])
-                if info.get("regressor") is not None:
-                    pred_r = float(info["regressor"].predict(inp)[0])
+            if not req_f:
+                continue
+            row_feats = dict(features)
+            # Supply true 10-period SMA distance for Model 3 without changing Model 2's 5-period feature.
+            if ver.startswith("lgbm_v3") and "sma_10_true_dist_pct" in row_feats:
+                row_feats["sma_10_dist_pct"] = row_feats["sma_10_true_dist_pct"]
+            if all(k in row_feats for k in req_f):
+                inp = pd.DataFrame([{k: row_feats[k] for k in req_f}])
+                clf_m = info.get("classifier")
+                reg_m = info.get("regressor")
+                # Vote using classifier probability >= 0.50 to stay aligned with live cards and reconciliation.
+                if clf_m is not None:
+                    if hasattr(clf_m, "predict_proba"):
+                        prob_up = float(clf_m.predict_proba(inp)[0][1])
+                        votes[ver] = "UP" if prob_up >= 0.50 else "DOWN"
+                    else:
+                        votes[ver] = "UP" if int(clf_m.predict(inp)[0]) == 1 else "DOWN"
+                elif reg_m is not None:
+                    pred_r = float(reg_m.predict(inp)[0])
                     votes[ver] = "UP" if pred_r >= 0 else "DOWN"
         if not votes:
             return {"summary": "Model consensus unavailable", "up_count": 0, "down_count": 0, "total": 0}
@@ -405,7 +437,7 @@ def strategist_node(state: AgentState) -> AgentState:
 JSON Keys: trade_action (BUY/SELL/HOLD), conviction_score (1-10), executive_summary, strategist_thesis"""
 
             parsed = json.loads(
-                _clean_json_response(_current_gemini_fallback(api_key, prompt, response_mime_type="application/json")),
+                _clean_json_response(_current_gemini_fallback(api_key, prompt, response_mime_type="application/json", caller="strategist")),
                 strict=False,
             )
             action = str(parsed.get("trade_action", "HOLD")).strip().upper()
@@ -554,7 +586,7 @@ def risk_critic_node(state: AgentState) -> AgentState:
     if api_key and not state.get("circuit_breaker_active", False):
         try:
             prompt = f"Chief Risk Officer: {action} order, conviction {conviction}/10, price ${current_price:,.2f}. Position: {position_pct:.1%}. Authorize concisely."
-            state["risk_critic_critique"] = _current_gemini_fallback(api_key, prompt)
+            state["risk_critic_critique"] = _current_gemini_fallback(api_key, prompt, caller="risk_critic")
             return state
         except Exception:
             pass
