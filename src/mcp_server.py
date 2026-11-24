@@ -1,9 +1,13 @@
 # src/mcp/mudra_mcp_server.py
+import logging
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import requests
+
+# Ensure all logging and diagnostic messages go exclusively to stderr, never corrupting JSON-RPC stdout
+logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -153,7 +157,10 @@ def get_spot_and_futures_trade_plan(
     conviction_score: int = 5, volatility_range_pct: float = 1.0,
     risk_approved: bool = True, clears_hurdle: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    # returns spot hold-until-net-profit decision and marks leveraged futures out of scope
+    """Evaluates spot-only BTC/USDT trade execution with hold-until-net-profit protection.
+    
+    Note: Mudra executes 100% spot-only trading; leveraged futures contracts are strictly out of scope.
+    """
     from config import MIN_HURDLE_PCT
     from src.engine import evaluate_spot_hold_until_profit_decision
     from src.database import get_db
