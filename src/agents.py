@@ -45,6 +45,7 @@ from src.ai.rag import (
     initialize_knowledge_base,
     query_similar_error_memories,
     retrieve_rag_context,
+    get_rag_embedding_mode,
 )
 
 from src.ai.workflow import (
