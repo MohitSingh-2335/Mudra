@@ -3,9 +3,10 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 # Linux / Streamlit Cloud SQLite upgrade hook for ChromaDB
 try:
-    __import__("pysqlite3")
-    import sys
-    sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+    if sys.platform != "win32":
+        __import__("pysqlite3")
+        import sys
+        sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
 except Exception:
     pass
 
@@ -1821,7 +1822,7 @@ with tab_agent:
                 if st.button("Run Live Multi-Agent Deliberation Now", use_container_width=True, help="Executes LangGraph agentic loop across Strategist, Risk Critic, ChromaDB memory, and Execution agents."):
                     with st.spinner("Deliberating through LangGraph council..."):
                         m_data, t_data, f_data = build_council_scenario_payload("live", current_price, forecast_result, live_market_df)
-                        res = run_trading_graph("BTCUSDT", current_price, m_data, t_data, f_data)
+                        res = run_trading_graph("BTCUSDT", current_price, m_data, t_data, f_data, use_llm=True)
                         st.session_state["council_state"] = res
                         st.success("Council Deliberation Complete!")
                         st.rerun()
