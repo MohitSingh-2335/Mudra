@@ -2,15 +2,15 @@
 ### Empirical Quantitative Research: Negative Result — No Durable Post-Fee Alpha on 1-Hour OHLCV Features
 
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://mudra-trading.streamlit.app)
-[![CI/CD Pipeline](https://github.com/MohitSingh-2335/Stock_Prediction_ML/actions/workflows/ci.yml/badge.svg)](https://github.com/MohitSingh-2335/Stock_Prediction_ML/actions/workflows/ci.yml)
-[![Tests Passing](https://img.shields.io/badge/pytest-90%20passed-00C087?logo=pytest&logoColor=white)](https://github.com/MohitSingh-2335/Stock_Prediction_ML)
+[![CI/CD Pipeline](https://github.com/MohitSingh-2335/Mudra/actions/workflows/ci.yml/badge.svg)](https://github.com/MohitSingh-2335/Mudra/actions/workflows/ci.yml)
+[![Tests Passing](https://img.shields.io/badge/pytest-93%20passed-00C087?logo=pytest&logoColor=white)](https://github.com/MohitSingh-2335/Mudra)
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![XGBoost](https://img.shields.io/badge/XGBoost-2.0-EB5E28)](https://xgboost.readthedocs.io/)
 [![LangGraph](https://img.shields.io/badge/Orchestration-LangGraph-8A2BE2)](https://langchain-ai.github.io/langgraph/)
 [![PostgreSQL](https://img.shields.io/badge/Database-Neon%20PostgreSQL-00E599?logo=postgresql&logoColor=white)](https://neon.tech/)
 
 **Live Streamlit Dashboard:** [`https://mudra-trading.streamlit.app`](https://mudra-trading.streamlit.app)  
-**GitHub Repository:** [`https://github.com/MohitSingh-2335/Stock_Prediction_ML`](https://github.com/MohitSingh-2335/Stock_Prediction_ML)  
+**GitHub Repository:** [`https://github.com/MohitSingh-2335/Mudra.git`](https://github.com/MohitSingh-2335/Mudra.git)  
 **Author:** Mohit Singh (Entry-Level Machine Learning / AI Engineer)
 
 ---
@@ -32,7 +32,7 @@ Across **34,990 hours** of cleaned Binance market data (`2022-07-08` to `2026-07
 4. **Capital Preservation vs. Alpha:**  
    During a 6,998-hour bear-market holdout where Bitcoin fell **-45.41%**, an execution strategy with a minimum return hurdle lost **-17.66%** solely because it sat in cash **96.43% of the time**. This was **cash preservation**, not active alpha.
 
-Rather than hiding this negative finding or reporting inflated numbers using lookahead leakage, this repository documents the complete empirical audit trail alongside a production-style, 24/7 autonomous MLOps architecture.
+Rather than hiding this negative finding or reporting inflated numbers using lookahead leakage, this repository documents the complete empirical audit trail alongside a production-style, 24/7 autonomous MLOps architecture. Detailed engineering rationale, architectural trade-offs, and database designs are documented in [Technical Decisions](docs/TECH_DECISIONS.md). Full historical experiment tracking and post-mortems across all model iterations are recorded in the [Model Evolution Ledger](docs/reports/model_evolution_ledger.md).
 
 ![Mudra Live Monitoring Dashboard](docs/images/dashboard_screenshot.png)
 
@@ -72,7 +72,7 @@ Out-of-sample directional accuracy on the 6,998-hour test set demonstrates that 
 | Model Architecture | Role / Status | Regressor RMSE (USD) | Return MAE | Direction Accuracy | Log-Loss (50/50 = 0.6931) | Model Documentation |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Naive Persistence ($\hat{P}_{t+1} = P_t$)** | Baseline | **$398.77** | **0.003198** | 50.39% | 0.6931 | Reference Benchmark |
-| **[Model 1 (`xgb_onnx_v1.0.0`)](docs/models/model_1_xgb_v1.md)** | **Active Production** | $399.47 | 0.003221 | **53.26%** | 0.6914 | [Model Card](docs/models/model_1_xgb_v1.md) (39 Features) |
+| **[Model 1 (`xgb_onnx_v1.0.0`)](docs/models/model_1_xgb_v1.md)** | **Active Production** | $399.47 | 0.003221 | **53.26%** | 0.6914 | [Model Card](docs/models/model_1_xgb_v1.md) (39 Features, serialized `.pkl` XGBoost; legacy ID, no ONNX runtime) |
 | **[Model 2 (`xgb_v2.0.0`)](docs/models/model_2_xgb_v2.md)** | **Shadow Consensus** | $401.12 | 0.003222 | 52.07% | 0.6926 | [Model Card](docs/models/model_2_xgb_v2.md) (Stationary) |
 | **[Model 3 (`lgbm_v3.0.0`)](docs/models/model_3_lgbm_v3.md)** | **Shadow Candidate** | $400.22 | 0.003220 | 52.89% | **0.6913** | [Model Card](docs/models/model_3_lgbm_v3.md) (29 Stationary) |
 | **Amazon Chronos-2 (Zero-Shot)** | Foundation Model | $322.65 *(Scaled)* | - | 49.60% | - | Failed to beat coin flip |
@@ -174,6 +174,7 @@ The live production database on **Neon Serverless PostgreSQL** maintains continu
 A key machine learning lesson uncovered during empirical testing was the impact of feature stationarity:
 
 - **Model 1 (`xgb_onnx_v1.0.0` — Active Production):**
+  - Standard serialized `joblib` (`.pkl`) XGBoost model retaining its legacy `xgb_onnx_v1.0.0` identifier (runs with zero ONNX runtime dependency).
   - Uses 39 features, including some raw price levels (`close_lag_1`, `bb_high`, `bb_low`, `ema_10`).
   - Achieves **53.26%** directional accuracy on the holdout test set.
   - *Limitation:* Non-stationary dollar levels saturate tree splits when Bitcoin trades above the historical training price ceiling.
@@ -191,15 +192,15 @@ A key machine learning lesson uncovered during empirical testing was the impact 
 
 ### 6.1 Clone and Install Dependencies
 ```bash
-git clone https://github.com/MohitSingh-2335/Stock_Prediction_ML.git
-cd Stock_Prediction_ML
+git clone https://github.com/MohitSingh-2335/Mudra.git
+cd Mudra
 
 python -m venv .venv
 source .venv/bin/activate       # On Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 6.2 Run Automated Test Suite (88/88 Passing)
+### 6.2 Run Automated Test Suite (93/93 Passing)
 ```bash
 pytest tests/ -q
 ```
@@ -225,7 +226,7 @@ python scripts/run_hourly_worker.py
 ## 7. Repository Structure
 
 ```text
-Stock_Prediction_ML/
+Mudra/
 ├── app.py                              # Streamlit live monitoring & governance dashboard
 ├── config.py                           # Central configuration, SHA-256 digests & fee parameters
 ├── requirements.txt                    # Pinned production dependencies
@@ -241,13 +242,14 @@ Stock_Prediction_ML/
 │   ├── raw/BTCUSDT-1H.csv              # 35,064 raw 1-hour Binance candles
 │   └── processed/featured_btc_data.csv # 34,990 clean featured rows
 ├── docs/
+│   ├── TECH_DECISIONS.md               # Architectural trade-offs, database designs & invariants
 │   ├── images/                         # Real empirical proof plots & live dashboard screenshots
 │   │   ├── dashboard_screenshot.png    # Live Streamlit headline metrics & predictions table
 │   │   ├── dashboard_trading.png       # Live LangGraph multi-agent council & paper trading ledger
 │   │   ├── chronological_split_proof.png
 │   │   ├── model_benchmark_comparison.png
 │   │   └── ground_truth_reconciliation.png
-│   └── reports/                        # 4 controlled empirical research reports
+│   └── reports/                        # Empirical research reports & model evolution ledger
 ├── scripts/
 │   ├── run_pipeline.py                 # Full 7-stage ML training, SHAP & evaluation CLI
 │   ├── run_hourly_worker.py            # Hourly live inference & T+1h reconciliation worker
@@ -261,7 +263,7 @@ Stock_Prediction_ML/
 │   ├── backtesting.py                  # Chronological backtest simulator with fee/slippage
 │   ├── engine.py                       # Paper trading portfolio ledger & sync orchestrator
 │   └── api/                            # FastAPI REST service & Pydantic v2 schemas
-└── tests/                              # Automated test suite (88 test cases passing)
+└── tests/                              # Automated test suite (93 test cases passing)
 ```
 
 ---
