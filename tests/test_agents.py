@@ -171,11 +171,10 @@ def test_gemini_postmortem_raw_control_character_parsing(monkeypatch):
         json.loads(raw_json_with_control_chars)
 
     # mock fallback generator returning raw unescaped json
-    monkeypatch.setattr(
-        agents,
-        "generate_with_gemini_fallback",
-        lambda api_key, prompt, **kwargs: (raw_json_with_control_chars, "gemini-3.1-flash-lite") if kwargs.get("return_model") else raw_json_with_control_chars,
-    )
+    import src.ai.llm as ai_llm
+    mock_gen = lambda api_key, prompt, **kwargs: (raw_json_with_control_chars, "gemini-3.1-flash-lite") if kwargs.get("return_model") else raw_json_with_control_chars
+    monkeypatch.setattr(ai_llm, "generate_with_gemini_fallback", mock_gen)
+    monkeypatch.setattr(agents, "generate_with_gemini_fallback", mock_gen)
 
     tick_features = {"close": 65000.0, "volatility_range_pct": 1.2, "taker_buy_ratio": 0.52}
     mcp_context = {"news_headlines": ["ETF inflows continue."]}
