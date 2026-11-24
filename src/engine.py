@@ -756,6 +756,7 @@ def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]
         council_state = run_trading_graph(
             symbol="BTCUSDT", current_price=candle["close"], market_data=candle,
             engineered_features=signals_output, ml_forecast=ml_output, timestamp=latest_ts.isoformat(),
+            use_llm=False,
         )
         decision = council_state.get("final_decision", "HOLD")
         verdict = council_state.get("risk_verdict", "VETOED")
