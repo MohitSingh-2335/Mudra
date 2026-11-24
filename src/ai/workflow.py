@@ -150,7 +150,15 @@ def get_model_return_forecast(features: Optional[Dict[str, Any]] = None) -> Dict
 
     df_reg = validate_inference_features(features, model_type="regressor")
     df_clf = validate_inference_features(features, model_type="classifier")
-    close = float(features.get("close", features.get("close_price", features.get("current_price", 65000.0))))
+    close_raw = features.get("close", features.get("close_price", features.get("current_price")))
+    if close_raw is None:
+        raise ValueError("Missing valid current BTC price")
+    try:
+        close = float(close_raw)
+    except (TypeError, ValueError):
+        raise ValueError("Missing valid current BTC price")
+    if close <= 0.0:
+        raise ValueError("Missing valid current BTC price")
 
     model_reg = load_verified_model(REGRESSOR_MODEL_PATH, REGRESSOR_MODEL_SHA256)
     if hasattr(model_reg, "set_params"):
@@ -314,10 +322,18 @@ def strategist_node(state: AgentState) -> AgentState:
     if not state.get("market_data") or state.get("current_price", 0.0) <= 0.0:
         market_res = get_live_market_data.invoke({"symbol": symbol})
         state["market_data"] = market_res
-        state["current_price"] = float(market_res.get("close", 65000.0))
+        close_raw = market_res.get("close") if isinstance(market_res, dict) else None
+        if close_raw is None or float(close_raw) <= 0.0:
+            raise ValueError("Missing valid current BTC price")
+        state["current_price"] = float(close_raw)
         state["tools_called"].append("get_live_market_data")
     else:
         market_res = state["market_data"]
+        if state.get("current_price", 0.0) <= 0.0:
+            close_raw = market_res.get("close") if isinstance(market_res, dict) else None
+            if close_raw is None or float(close_raw) <= 0.0:
+                raise ValueError("Missing valid current BTC price")
+            state["current_price"] = float(close_raw)
 
     if not state.get("engineered_features"):
         tech_input = {
