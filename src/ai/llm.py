@@ -26,9 +26,8 @@ logger = logging.getLogger("mudra.ai.llm")
 GEMINI_MODEL_CANDIDATES = (
     "gemini-3.1-flash-lite",
     "gemini-3.5-flash-lite",
-    "gemini-3.8-flash",
     "gemini-3.6-flash",
-    "gemini-flash-latest",
+    "gemini-3.8-flash",
 )
 
 POSTMORTEM_PROMPT_TEMPLATE = """### ROLE
@@ -161,7 +160,11 @@ def generate_with_gemini_fallback(
             raise
         except Exception as exc:
             last_exc = exc
+            err_msg = str(exc)
             logger.warning("Gemini candidate %s failed: %s", model_name, exc)
+            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                logger.warning("Rate limit hit on %s. Sleeping 4.0s before trying next candidate.", model_name)
+                time.sleep(4.0)
 
     raise RuntimeError(f"All Gemini model candidates failed or timed out. Last error: {last_exc}")
 
