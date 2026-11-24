@@ -708,7 +708,10 @@ def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]
                 try:
                     c_feats = cand_spec.get("features", [])
                     if c_feats and all(k in signals_output for k in c_feats):
-                        c_input_df = pd.DataFrame([{k: signals_output[k] for k in c_feats}])
+                        c_row = {k: signals_output[k] for k in c_feats}
+                        if cand_version.startswith("lgbm_v3") and "sma_10_true_dist_pct" in signals_output:
+                            c_row["sma_10_dist_pct"] = signals_output["sma_10_true_dist_pct"]
+                        c_input_df = pd.DataFrame([c_row])
                         c_clf = cand_spec.get("classifier")
                         c_reg = cand_spec.get("regressor")
                         if c_clf is None or c_reg is None:
@@ -859,7 +862,16 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
         act_p, pred_p, base_p = max(1.0, float(outcome.close)), float(prior.predicted_price_1h), max(1.0, float(prior.close))
         pred_ret, act_ret = ((pred_p - base_p) / base_p) * 100.0, ((act_p - base_p) / base_p) * 100.0
         abs_err, pct_err = abs(act_p - pred_p), (abs(act_p - pred_p) / act_p) * 100.0
-        dir_pred, dir_real = ("UP" if pred_ret >= 0 else "DOWN"), ("UP" if act_ret >= 0 else "DOWN")
+        # Prefer Model 1's stored classifier direction when present; fall back to regressor sign in unit tests.
+        active_ver = prior.model_version or ACTIVE_MODEL_VERSION
+        m1_pred = session.execute(
+            select(ModelPrediction).where(ModelPrediction.tick_id == prior.id, ModelPrediction.model_version == active_ver)
+        ).scalars().first()
+        if m1_pred and m1_pred.direction_predicted in ("UP", "DOWN"):
+            dir_pred = str(m1_pred.direction_predicted)
+        else:
+            dir_pred = "UP" if pred_ret >= 0 else "DOWN"
+        dir_real = "UP" if act_ret >= 0 else "DOWN"
         is_swan = bool(abs(act_ret) >= 3.8 or abs(act_ret - pred_ret) >= 3.8)
 
         if is_swan:
@@ -994,62 +1006,51 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
                 c_model = spec.get("classifier") or spec.get("regressor")
                 c_feats = spec.get("features", [])
                 if c_model is not None and c_feats:
-                    X_row = pd.DataFrame([{k: prior_feats.get(k, 0.0) for k in c_feats}])
+                    row_feats = dict(prior_feats)
+                    # Map true 10-period SMA distance for Model 3 SHAP without disturbing Model 2.
+                    if mv.startswith("lgbm_v3") and "sma_10_true_dist_pct" in row_feats:
+                        row_feats["sma_10_dist_pct"] = row_feats["sma_10_true_dist_pct"]
+                    X_row = pd.DataFrame([{k: row_feats.get(k, 0.0) for k in c_feats}])
                 else:
                     X_row = pd.DataFrame([prior_feats])
                 outcome_dict["top_shap_drivers"] = get_top_shap_drivers(c_model, X_row, top_k=3)
 
-            # log mcp derivatives funding pulse telemetry
-            t0_mcp = time.perf_counter()
-            try:
-                from src.mcp_server import get_live_btc_derivatives_pulse
-                pulse = get_live_btc_derivatives_pulse()
-                pulse_lat = (time.perf_counter() - t0_mcp) * 1000.0
-                pulse_status = 200 if pulse.get("status") == "LIVE" else 503
-                pulse_err = None if pulse_status == 200 else str(pulse.get("error") or "OFFLINE_FALLBACK")
-            except Exception as mcp_err:
-                pulse_lat = (time.perf_counter() - t0_mcp) * 1000.0
-                pulse_status = 503
-                pulse_err = str(mcp_err)
-                pulse = {"status": "fallback", "funding_rate_8h_pct": 0.01, "derivatives_regime": "Neutral Funding", "futures_basis_usd": 0.0}
-            pulse_endpoint = "/api/v2/public/ticker" if pulse.get("source") == "deribit" else ("/derivatives/api/v3/tickers" if pulse.get("source") == "kraken_futures" else "/derivatives/pulse")
-            log_telemetry(session, "mcp_derivatives", pulse_endpoint, pulse_lat, pulse_status, pulse_err)
-
-            # log mcp btc news headlines telemetry
-            t0_news = time.perf_counter()
-            try:
-                from src.mcp_server import get_recent_btc_news_headlines
-                news = get_recent_btc_news_headlines(hours_back=6, max_items=5)
-                news_lat = (time.perf_counter() - t0_news) * 1000.0
-                news_status = 200 if news.get("status") in ("LIVE", "OK_NO_HEADLINES") else 503
-                news_err = None if news_status == 200 else str(news.get("error") or "FEED_OFFLINE")
-            except Exception as news_err_exc:
-                news_lat = (time.perf_counter() - t0_news) * 1000.0
-                news_status = 503
-                news_err = str(news_err_exc)
-                news = {"status": "UNAVAILABLE", "headlines": []}
-            log_telemetry(session, "mcp_rss_news", "cryptocompare+rss_news", news_lat, news_status, news_err)
-
+            # Fetch derivatives pulse, 6h BTC news, and episodic error memories in a single MCP round-trip.
             mcp_ctx = fetch_mcp_context(limit=3)
-            if pulse.get("status") == "LIVE":
-                mcp_ctx["funding_rate_8h_pct"] = float(pulse.get("funding_rate_8h_pct", 0.01))
-                mcp_ctx["derivatives_regime"] = str(pulse.get("derivatives_regime", "Neutral Funding"))
-                mcp_ctx["futures_basis_usd"] = float(pulse.get("futures_basis_usd", 0.0))
-            if news.get("status") == "LIVE":
-                mcp_ctx["news_headlines"] = news.get("headlines", [])
+
+            d_source = mcp_ctx.get("derivatives_source", "none")
+            pulse_endpoint = "/api/v2/public/ticker" if d_source == "deribit" else ("/derivatives/api/v3/tickers" if d_source == "kraken_futures" else "/derivatives/pulse")
+            d_ok = mcp_ctx.get("derivatives_status") == "LIVE"
+            log_telemetry(
+                session,
+                "mcp_derivatives",
+                pulse_endpoint,
+                float(mcp_ctx.get("derivatives_latency_ms") or 0.0),
+                200 if d_ok else 503,
+                None if d_ok else str(mcp_ctx.get("derivatives_error") or mcp_ctx.get("error") or "OFFLINE_FALLBACK"),
+            )
+
+            n_status = mcp_ctx.get("news_status", "UNAVAILABLE")
+            n_ok = n_status in ("LIVE", "OK_NO_HEADLINES")
+            log_telemetry(
+                session,
+                "mcp_rss_news",
+                "cryptocompare+rss_news",
+                float(mcp_ctx.get("news_latency_ms") or 0.0),
+                200 if n_ok else 503,
+                None if n_ok else str(mcp_ctx.get("news_error") or mcp_ctx.get("error") or "FEED_OFFLINE"),
+            )
 
             # pace multi-tick reconciliation calls to stay under 15 RPM free tier limits
             if idx > 0 and not os.getenv("PYTEST_CURRENT_TEST") and "pytest" not in sys.modules:
                 time.sleep(5.0)
 
-            # log gemini post-mortem telemetry
+            # Record pre-call missing-key failures here; candidate Gemini calls log telemetry in llm.py.
             t0_gem = time.perf_counter()
             postmortem = generate_hourly_postmortem_with_gemini(prior_feats, mcp_ctx, model_outcomes)
             gem_lat = (time.perf_counter() - t0_gem) * 1000.0
-            gem_ok = (postmortem.get("gemini_status") == "OK")
-            gem_status = 200 if gem_ok else (429 if "quota" in str(postmortem.get("error_detail", "")).lower() else 503)
-            gem_err = None if gem_ok else str(postmortem.get("error_detail") or "GEMINI_UNAVAILABLE")
-            log_telemetry(session, "gemini_api", "hourly_postmortem", gem_lat, gem_status, gem_err)
+            if postmortem.get("gemini_status") != "OK" and "missing" in str(postmortem.get("error_detail", "")).lower():
+                log_telemetry(session, "gemini_api", "hourly_postmortem", gem_lat, 503, str(postmortem.get("error_detail") or "GEMINI_UNAVAILABLE"))
 
             with session.begin_nested():
                 existing_pm = session.execute(
