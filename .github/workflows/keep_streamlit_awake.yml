@@ -14,7 +14,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Wake Mudra Streamlit Dashboard
-        uses: gpenessot/streamlit-keep-alive@v1
+      - name: Ping Mudra Streamlit Dashboard
+        run: |
+          echo "Pinging Mudra Streamlit Dashboard..."
+          curl -s -L --max-time 30 -o /dev/null -w "HTTP status: %{http_code}\n" https://mudra-trading.streamlit.app || true
+
+      - name: Wake Mudra Streamlit Dashboard (Browser Fallback)
+        uses: gpenessot/streamlit-keep-alive@main
         with:
           app-urls: https://mudra-trading.streamlit.app
