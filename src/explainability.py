@@ -148,21 +148,13 @@ def get_top_shap_drivers(
             drivers.append({
                 "feature": str(feat_name),
                 "value": round(float(raw_val), 4),
-                "shap_impact": round(float(shap_val), 4),
+                "shap_impact": round(float(shap_val), 5),
                 "_abs_impact": abs(float(shap_val)),
             })
         drivers.sort(key=lambda d: d["_abs_impact"], reverse=True)
         return [{"feature": d["feature"], "value": d["value"], "shap_impact": d["shap_impact"]} for d in drivers[:top_k]]
     except Exception:
-        # fallback attribution by magnitude when tree explainer is not supported
-        try:
-            items = []
-            for col in X_row.columns[:top_k]:
-                v = float(X_row.iloc[0][col])
-                items.append({"feature": str(col), "value": round(v, 4), "shap_impact": 0.0})
-            return items
-        except Exception:
-            return []
+        return []
 
 
 if __name__ == '__main__':
