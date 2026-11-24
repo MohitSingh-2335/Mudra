@@ -388,16 +388,17 @@ def get_database_url() -> str:
             found = _find_postgres_url(st.secrets)
             if found:
                 return _normalize_db_url(found)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Failed to read st.secrets (%s)", type(exc).__name__)
     if SECRETS_FILE.exists():
         try:
             data = tomllib.loads(SECRETS_FILE.read_text(encoding="utf-8"))
             found = _find_postgres_url(data)
             if found:
                 return _normalize_db_url(found)
-        except Exception:
-            pass
+        except Exception as exc:
+            loc = f" at line {exc.lineno}, col {exc.colno}" if hasattr(exc, "lineno") else ""
+            logger.warning("Failed to parse %s: %s%s", SECRETS_FILE.name, type(exc).__name__, loc)
     fallback = ROOT_DIR / "data" / "mudra_operational.db"
     fallback.parent.mkdir(parents=True, exist_ok=True)
     return f"sqlite:///{fallback.as_posix()}"
