@@ -8,7 +8,10 @@ import json
 import logging
 import os
 import re
+import sys
 import time
+import tomllib
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
@@ -22,6 +25,59 @@ except ImportError:
 
 load_dotenv(".env")
 logger = logging.getLogger("mudra.ai.llm")
+
+
+def _sync_langsmith_env() -> None:
+    """Bridges LangSmith configuration from Streamlit secrets into os.environ outside pytest."""
+    if os.getenv("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+        return
+    keys = ("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2", "LANGSMITH_API_KEY", "LANGSMITH_PROJECT")
+    sources: List[Any] = []
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets"):
+            sources.append(st.secrets)
+    except Exception:
+        pass
+    secrets_path = Path(__file__).resolve().parent.parent.parent / ".streamlit" / "secrets.toml"
+    if secrets_path.is_file():
+        try:
+            sources.append(tomllib.loads(secrets_path.read_text(encoding="utf-8")))
+        except Exception:
+            pass
+    for src in sources:
+        candidates = [src]
+        for sec in ("langsmith", "LangSmith", "langchain", "LangChain"):
+            try:
+                if sec in src:
+                    candidates.append(src[sec])
+            except Exception:
+                pass
+        for block in candidates:
+            for k in keys:
+                try:
+                    if not os.getenv(k) and k in block:
+                        val = block[k]
+                        os.environ[k] = str(val).lower() if isinstance(val, bool) else str(val).strip()
+                except Exception:
+                    pass
+    if os.getenv("LANGSMITH_TRACING", "").lower() == "true" and not os.getenv("LANGCHAIN_TRACING_V2"):
+        os.environ["LANGCHAIN_TRACING_V2"] = "true"
+
+
+_sync_langsmith_env()
+
+
+def _log_llm_telemetry(endpoint: str, latency_ms: float, status_code: int, error_msg: Optional[str] = None) -> None:
+    """Records per-model Gemini API latency and status codes to api_telemetry without failing calls."""
+    if os.getenv("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+        return
+    try:
+        from src.database import get_db, log_telemetry
+        with get_db() as session:
+            log_telemetry(session, "gemini_api", endpoint, latency_ms, status_code, error_msg)
+    except Exception:
+        pass
 
 GEMINI_MODEL_CANDIDATES = (
     "gemini-3.1-flash-lite",
@@ -128,6 +184,7 @@ def generate_with_gemini_fallback(
     return_model: bool = False,
     response_mime_type: Optional[str] = "application/json",
     response_schema: Optional[Any] = None,
+    caller: str = "general",
 ) -> Union[str, Tuple[str, str]]:
     """Generates response using official Google GenAI SDK with candidate model fallback."""
     if not api_key:
@@ -149,27 +206,40 @@ def generate_with_gemini_fallback(
     for model_name in candidates:
         if (time.perf_counter() - t0) >= total_deadline_sec:
             break
+        start_cand = time.perf_counter()
         try:
-            start_cand = time.perf_counter()
             resp = client.models.generate_content(model=model_name, contents=prompt, config=config)
+            lat_ms = (time.perf_counter() - start_cand) * 1000.0
             text_out = getattr(resp, "text", None)
             if text_out and str(text_out).strip():
-                logger.info("Gemini call succeeded with model %s in %.1f ms", model_name, (time.perf_counter() - start_cand) * 1000.0)
+                # Record per-model Gemini API latency and HTTP 200 status for quota visibility.
+                _log_llm_telemetry(f"{model_name}:{caller}", lat_ms, 200)
+                logger.info("Gemini call succeeded with model %s in %.1f ms", model_name, lat_ms)
                 return (str(text_out).strip(), model_name) if return_model else str(text_out).strip()
+            _log_llm_telemetry(f"{model_name}:{caller}", lat_ms, 503, "EMPTY_RESPONSE")
         except AssertionError:
             raise
         except Exception as exc:
             last_exc = exc
+            lat_ms = (time.perf_counter() - start_cand) * 1000.0
             err_msg = str(exc)
+            # Map HTTP quota (429) and deprecated model (404) errors accurately for monitoring.
+            status_code = 429 if ("429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg) else (404 if ("404" in err_msg or "NOT_FOUND" in err_msg) else 503)
+            _log_llm_telemetry(f"{model_name}:{caller}", lat_ms, status_code, err_msg[:300])
             logger.warning("Gemini candidate %s failed: %s", model_name, exc)
-            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+            if status_code == 429:
                 logger.warning("Rate limit hit on %s. Sleeping 4.0s before trying next candidate.", model_name)
                 time.sleep(4.0)
 
     raise RuntimeError(f"All Gemini model candidates failed or timed out. Last error: {last_exc}")
 
 
-def embed_texts(texts: List[str], api_key: Optional[str] = None, output_dimensionality: int = 768) -> List[List[float]]:
+def embed_texts(
+    texts: List[str],
+    api_key: Optional[str] = None,
+    output_dimensionality: int = 768,
+    caller: str = "rag_embed",
+) -> List[List[float]]:
     """Embeds texts using Gemini gemini-embedding-001 model, failing honestly if unavailable."""
     key = api_key or _get_gemini_api_key()
     if not key:
@@ -179,13 +249,21 @@ def embed_texts(texts: List[str], api_key: Optional[str] = None, output_dimensio
     from google import genai
     from google.genai import types
 
+    t0 = time.perf_counter()
     try:
         client = genai.Client(api_key=key)
         cfg = types.EmbedContentConfig(output_dimensionality=output_dimensionality)
         res = client.models.embed_content(model="gemini-embedding-001", contents=texts, config=cfg)
+        lat_ms = (time.perf_counter() - t0) * 1000.0
         embs = getattr(res, "embeddings", [getattr(res, "embedding", None)])
+        # Log embedding call status and latency so daily RPD/RPM limits remain observable.
+        _log_llm_telemetry(f"gemini-embedding-001:{caller}", lat_ms, 200)
         return [list(getattr(e, "values", e)) for e in embs if e is not None]
     except Exception as exc:
+        lat_ms = (time.perf_counter() - t0) * 1000.0
+        err_msg = str(exc)
+        status_code = 429 if ("429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg) else 503
+        _log_llm_telemetry(f"gemini-embedding-001:{caller}", lat_ms, status_code, err_msg[:300])
         logger.warning("Gemini embed_content failed: %s", exc)
         raise RuntimeError(f"Gemini embed_content error: {exc}") from exc
 
@@ -224,7 +302,7 @@ def generate_hourly_postmortem_with_gemini(
 
         raw_resp, model_used = generate_with_gemini_fallback(
             api_key, prompt, return_model=True, response_mime_type="application/json",
-            timeout_sec=20.0, total_deadline_sec=45.0,
+            timeout_sec=20.0, total_deadline_sec=45.0, caller="postmortem",
         )
         clean_text = _clean_json_response(raw_resp)
         try:
@@ -284,7 +362,7 @@ def generate_market_commentary(
         )
         raw_text = generate_with_gemini_fallback(
             api_key, prompt, response_mime_type="application/json",
-            timeout_sec=20.0, total_deadline_sec=45.0,
+            timeout_sec=20.0, total_deadline_sec=45.0, caller="commentary",
         )
         clean_text = _clean_json_response(raw_text if isinstance(raw_text, str) else raw_text[0])
         try:
