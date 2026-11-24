@@ -257,3 +257,94 @@ def test_get_top_shap_drivers_calibrated_classifier():
     assert get_top_shap_drivers(cal_clf, None, top_k=3) == []
 
 
+def test_multi_model_consensus_uses_classifier_and_m3_sma10(monkeypatch):
+    # Consensus must follow classifier direction probabilities rather than regressor sign, and feed true 10h SMA to Model 3.
+    from src.ai.workflow import get_multi_model_consensus
+
+    seen_sma = {}
+
+    class _Reg:
+        def __init__(self, val):
+            self.val = val
+
+        def predict(self, df):
+            return [self.val]
+
+    class _Clf:
+        def __init__(self, key, prob_up):
+            self.key = key
+            self.prob_up = prob_up
+
+        def predict_proba(self, df):
+            if "sma_10_dist_pct" in df.columns:
+                seen_sma[self.key] = float(df["sma_10_dist_pct"].iloc[0])
+            return [[1.0 - self.prob_up, self.prob_up]]
+
+    fake_models = {
+        "xgb_onnx_v1.0.0": {"features": ["f1"], "regressor": _Reg(-0.5), "classifier": _Clf("m1", 0.72)},
+        "lgbm_v2.0.0": {"features": ["sma_10_dist_pct"], "regressor": _Reg(0.8), "classifier": _Clf("m2", 0.35)},
+        "lgbm_v3.0.0": {"features": ["sma_10_dist_pct"], "regressor": _Reg(-0.2), "classifier": _Clf("m3", 0.61)},
+    }
+    monkeypatch.setattr("src.model_loader.get_registered_models", lambda: fake_models)
+
+    res = get_multi_model_consensus({"f1": 1.0, "sma_10_dist_pct": -0.02, "sma_10_true_dist_pct": 0.09})
+    assert res["total"] == 3
+    assert res["votes"] == {"xgb_onnx_v1.0.0": "UP", "lgbm_v2.0.0": "DOWN", "lgbm_v3.0.0": "UP"}
+    assert res["up_count"] == 2
+    assert res["down_count"] == 1
+    assert seen_sma["m2"] == pytest.approx(-0.02)
+    assert seen_sma["m3"] == pytest.approx(0.09)
+
+
+def test_llm_telemetry_logs_model_and_caller(monkeypatch):
+    # Each Gemini generation and embedding call must record model_name:caller to api_telemetry helper.
+    import sys
+    from types import SimpleNamespace
+    import src.ai.llm as ai_llm
+
+    logged = []
+    monkeypatch.setattr(ai_llm, "_log_llm_telemetry", lambda ep, lat, st, err=None: logged.append((ep, lat, st, err)))
+    monkeypatch.setattr(ai_llm.time, "sleep", lambda _: None)
+
+    call_count = {"n": 0}
+
+    class _FakeModels:
+        def generate_content(self, model, contents, config):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("429 RESOURCE_EXHAUSTED quota exceeded")
+            return SimpleNamespace(text='{"market_summary": "ok"}')
+
+        def embed_content(self, model, contents, config):
+            return SimpleNamespace(embeddings=[SimpleNamespace(values=[0.1, 0.2])])
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            self.models = _FakeModels()
+
+    fake_types = SimpleNamespace(
+        HttpOptions=lambda **kw: kw,
+        GenerateContentConfig=lambda **kw: kw,
+        EmbedContentConfig=lambda **kw: kw,
+    )
+    fake_genai = SimpleNamespace(Client=_FakeClient, types=fake_types)
+    fake_google = SimpleNamespace(genai=fake_genai)
+    monkeypatch.setitem(sys.modules, "google", fake_google)
+    monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
+
+    out, used = ai_llm.generate_with_gemini_fallback(
+        "test-key", "hello", return_model=True, caller="postmortem"
+    )
+    assert out == '{"market_summary": "ok"}'
+    assert used == ai_llm.GEMINI_MODEL_CANDIDATES[1]
+    assert logged[0][0] == f"{ai_llm.GEMINI_MODEL_CANDIDATES[0]}:postmortem"
+    assert logged[0][2] == 429
+    assert logged[1][0] == f"{ai_llm.GEMINI_MODEL_CANDIDATES[1]}:postmortem"
+    assert logged[1][2] == 200
+
+    vecs = ai_llm.embed_texts(["btc up"], api_key="test-key", caller="rag_embed")
+    assert vecs == [[0.1, 0.2]]
+    assert logged[2][0] == "gemini-embedding-001:rag_embed"
+    assert logged[2][2] == 200
+
+
