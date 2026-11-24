@@ -19,11 +19,11 @@ python-binance==1.0.19
 requests==2.32.3
 
 # AI / LLM API & Agent Orchestration
-google-generativeai==0.7.2
+google-genai>=1.0.0
 langchain-core==1.6.9
 langgraph==1.2.14
 langsmith==0.14.7
-mcp>=1.2.0
+mcp==1.30.0
 
 # Web App
 streamlit==1.35.0
@@ -40,6 +40,8 @@ pysqlite3-binary
 
 # API Backend
 fastapi==0.111.1
+starlette==0.37.2
+sse-starlette==2.4.1
 uvicorn==0.30.3
 pydantic==2.8.2
 python-dotenv==1.0.1
