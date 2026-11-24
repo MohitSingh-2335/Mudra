@@ -850,7 +850,7 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
     if pending_ticks:
         print(f"[RECONCILE] Found {len(pending_ticks)} pending prior ticks to reconcile against closed candles...", flush=True)
 
-    for prior in pending_ticks:
+    for idx, prior in enumerate(pending_ticks):
         expected_ts = prior.timestamp + timedelta(hours=1)
         outcome = current_tick if current_tick.timestamp == expected_ts else session.execute(select(MarketTick).where(MarketTick.timestamp == expected_ts)).scalars().first()
         if not outcome or outcome.close <= 0:
@@ -999,76 +999,63 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
                     X_row = pd.DataFrame([prior_feats])
                 outcome_dict["top_shap_drivers"] = get_top_shap_drivers(c_model, X_row, top_k=3)
 
-            # only call live external apis (mcp and gemini) for the most recent pending tick to avoid timeouts during backlogs
-            is_recent_pending = bool(pending_ticks and prior.id == pending_ticks[-1].id)
-            if is_recent_pending:
-                # log mcp derivatives funding pulse telemetry
-                t0_mcp = time.perf_counter()
-                try:
-                    from src.mcp_server import get_live_btc_derivatives_pulse
-                    pulse = get_live_btc_derivatives_pulse()
-                    pulse_lat = (time.perf_counter() - t0_mcp) * 1000.0
-                    pulse_status = 200 if pulse.get("status") == "LIVE" else 503
-                    pulse_err = None if pulse_status == 200 else str(pulse.get("error") or "OFFLINE_FALLBACK")
-                except Exception as mcp_err:
-                    pulse_lat = (time.perf_counter() - t0_mcp) * 1000.0
-                    pulse_status = 503
-                    pulse_err = str(mcp_err)
-                    pulse = {"status": "fallback", "funding_rate_8h_pct": 0.01, "derivatives_regime": "Neutral Funding", "futures_basis_usd": 0.0}
-                pulse_endpoint = "/api/v2/public/ticker" if pulse.get("source") == "deribit" else ("/derivatives/api/v3/tickers" if pulse.get("source") == "kraken_futures" else "/derivatives/pulse")
-                log_telemetry(session, "mcp_derivatives", pulse_endpoint, pulse_lat, pulse_status, pulse_err)
+            # log mcp derivatives funding pulse telemetry
+            t0_mcp = time.perf_counter()
+            try:
+                from src.mcp_server import get_live_btc_derivatives_pulse
+                pulse = get_live_btc_derivatives_pulse()
+                pulse_lat = (time.perf_counter() - t0_mcp) * 1000.0
+                pulse_status = 200 if pulse.get("status") == "LIVE" else 503
+                pulse_err = None if pulse_status == 200 else str(pulse.get("error") or "OFFLINE_FALLBACK")
+            except Exception as mcp_err:
+                pulse_lat = (time.perf_counter() - t0_mcp) * 1000.0
+                pulse_status = 503
+                pulse_err = str(mcp_err)
+                pulse = {"status": "fallback", "funding_rate_8h_pct": 0.01, "derivatives_regime": "Neutral Funding", "futures_basis_usd": 0.0}
+            pulse_endpoint = "/api/v2/public/ticker" if pulse.get("source") == "deribit" else ("/derivatives/api/v3/tickers" if pulse.get("source") == "kraken_futures" else "/derivatives/pulse")
+            log_telemetry(session, "mcp_derivatives", pulse_endpoint, pulse_lat, pulse_status, pulse_err)
 
-                # log mcp btc news headlines telemetry
-                t0_news = time.perf_counter()
-                try:
-                    from src.mcp_server import get_recent_btc_news_headlines
-                    news = get_recent_btc_news_headlines(hours_back=6, max_items=5)
-                    news_lat = (time.perf_counter() - t0_news) * 1000.0
-                    news_status = 200 if news.get("status") in ("LIVE", "OK_NO_HEADLINES") else 503
-                    news_err = None if news_status == 200 else str(news.get("error") or "FEED_OFFLINE")
-                except Exception as news_err_exc:
-                    news_lat = (time.perf_counter() - t0_news) * 1000.0
-                    news_status = 503
-                    news_err = str(news_err_exc)
-                    news = {"status": "UNAVAILABLE", "headlines": []}
-                log_telemetry(session, "mcp_rss_news", "cryptocompare+rss_news", news_lat, news_status, news_err)
+            # log mcp btc news headlines telemetry
+            t0_news = time.perf_counter()
+            try:
+                from src.mcp_server import get_recent_btc_news_headlines
+                news = get_recent_btc_news_headlines(hours_back=6, max_items=5)
+                news_lat = (time.perf_counter() - t0_news) * 1000.0
+                news_status = 200 if news.get("status") in ("LIVE", "OK_NO_HEADLINES") else 503
+                news_err = None if news_status == 200 else str(news.get("error") or "FEED_OFFLINE")
+            except Exception as news_err_exc:
+                news_lat = (time.perf_counter() - t0_news) * 1000.0
+                news_status = 503
+                news_err = str(news_err_exc)
+                news = {"status": "UNAVAILABLE", "headlines": []}
+            log_telemetry(session, "mcp_rss_news", "cryptocompare+rss_news", news_lat, news_status, news_err)
 
-                mcp_ctx = fetch_mcp_context(limit=3)
-                if pulse.get("status") == "LIVE":
-                    mcp_ctx["funding_rate_8h_pct"] = float(pulse.get("funding_rate_8h_pct", 0.01))
-                    mcp_ctx["derivatives_regime"] = str(pulse.get("derivatives_regime", "Neutral Funding"))
-                    mcp_ctx["futures_basis_usd"] = float(pulse.get("futures_basis_usd", 0.0))
-                if news.get("status") == "LIVE":
-                    mcp_ctx["news_headlines"] = news.get("headlines", [])
+            mcp_ctx = fetch_mcp_context(limit=3)
+            if pulse.get("status") == "LIVE":
+                mcp_ctx["funding_rate_8h_pct"] = float(pulse.get("funding_rate_8h_pct", 0.01))
+                mcp_ctx["derivatives_regime"] = str(pulse.get("derivatives_regime", "Neutral Funding"))
+                mcp_ctx["futures_basis_usd"] = float(pulse.get("futures_basis_usd", 0.0))
+            if news.get("status") == "LIVE":
+                mcp_ctx["news_headlines"] = news.get("headlines", [])
 
-                # log gemini post-mortem telemetry
-                t0_gem = time.perf_counter()
-                postmortem = generate_hourly_postmortem_with_gemini(prior_feats, mcp_ctx, model_outcomes)
-                gem_lat = (time.perf_counter() - t0_gem) * 1000.0
-                gem_ok = (postmortem.get("gemini_status") == "OK")
-                gem_status = 200 if gem_ok else (429 if "quota" in str(postmortem.get("error_detail", "")).lower() else 503)
-                gem_err = None if gem_ok else str(postmortem.get("error_detail") or "GEMINI_UNAVAILABLE")
-                log_telemetry(session, "gemini_api", "hourly_postmortem", gem_lat, gem_status, gem_err)
-            else:
-                postmortem = {
-                    "gemini_status": "SKIPPED_BATCH_BACKLOG",
-                    "error_detail": "Historical backlog tick: skipped live external calls to avoid job timeout.",
-                    "market_summary": f"Historical tick #{prior.id} reconciled against actual price ${act_p:,.2f}.",
-                    "per_model": {
-                        m["model_version"]: {
-                            "root_cause_driver": "HISTORICAL_RECONCILIATION",
-                            "diagnosis_summary": f"{m['direction_predicted']} target ${m['predicted_price']:,.2f} vs actual ${act_p:,.2f} (diff ${m['error_usd']:,.2f}, {'CORRECT' if m['direction_correct'] else 'WRONG'}).",
-                        }
-                        for m in model_outcomes
-                    },
-                    "model_outcomes": model_outcomes,
-                }
+            # pace multi-tick reconciliation calls to stay under 15 RPM free tier limits
+            if idx > 0 and not os.getenv("PYTEST_CURRENT_TEST") and "pytest" not in sys.modules:
+                time.sleep(5.0)
+
+            # log gemini post-mortem telemetry
+            t0_gem = time.perf_counter()
+            postmortem = generate_hourly_postmortem_with_gemini(prior_feats, mcp_ctx, model_outcomes)
+            gem_lat = (time.perf_counter() - t0_gem) * 1000.0
+            gem_ok = (postmortem.get("gemini_status") == "OK")
+            gem_status = 200 if gem_ok else (429 if "quota" in str(postmortem.get("error_detail", "")).lower() else 503)
+            gem_err = None if gem_ok else str(postmortem.get("error_detail") or "GEMINI_UNAVAILABLE")
+            log_telemetry(session, "gemini_api", "hourly_postmortem", gem_lat, gem_status, gem_err)
 
             with session.begin_nested():
                 existing_pm = session.execute(
                     select(HourlyPostmortem).where(HourlyPostmortem.tick_id == prior.id)
                 ).scalars().first()
-                news_list = mcp_ctx.get("news_headlines", []) if is_recent_pending else []
+                news_list = mcp_ctx.get("news_headlines", [])
                 if not existing_pm:
                     new_pm = HourlyPostmortem(
                         tick_id=prior.id,
