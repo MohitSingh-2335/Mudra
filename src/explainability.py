@@ -117,6 +117,13 @@ def get_top_shap_drivers(
         elif hasattr(model, "_final_estimator"):
             estimator = getattr(model, "_final_estimator", model)
 
+        # restore C++ booster handles for LightGBM/XGBoost on Windows
+        try:
+            from src.model_loader import restore_estimator_boosters
+            restore_estimator_boosters(estimator)
+        except Exception:
+            pass
+
         # align input columns with expected feature names of the estimator
         cols = getattr(estimator, "feature_names_in_", None)
         if cols is not None and all(c in X_row.columns for c in cols):
