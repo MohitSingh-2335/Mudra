@@ -378,29 +378,30 @@ def generate_live_forecast(live_df: pd.DataFrame, reg_model: Any, clf_model: Any
         return None
 
 
-def fetch_live_btc_ticker_price(fallback_price: Optional[float] = None) -> float:
-    # fetches live real-time spot price for BTCUSDT from Binance ticker endpoint
-    try:
-        import requests
-        resp = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=3.0)
-        if resp.status_code == 200:
-            data = resp.json()
-            if isinstance(data, dict) and "price" in data:
-                return float(data["price"])
-    except Exception:
-        pass
-    return float(fallback_price or 65000.0)
+def fetch_live_btc_ticker_price(fallback_price: Optional[float] = None) -> Optional[float]:
+    # fetches live real-time spot price for BTCUSDT querying data-api.binance.vision first then api.binance.com
+    for url in (
+        "https://data-api.binance.vision/api/v3/ticker/price?symbol=BTCUSDT",
+        "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+    ):
+        try:
+            import requests
+            resp = requests.get(url, timeout=3.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, dict) and "price" in data:
+                    return float(data["price"])
+        except Exception:
+            pass
+    return float(fallback_price) if (fallback_price is not None and float(fallback_price) > 0) else None
 
 
-def render_live_btc_websocket_ticker(fallback_price: float, fallback_24h_pct: Optional[float] = None) -> None:
+def render_live_btc_websocket_ticker(fallback_price: Optional[float] = None, fallback_24h_pct: Optional[float] = None) -> None:
     # renders live self-updating WebSocket ticker bar for BTC/USDT with Binance and Coinbase fallback
-    init_price = max(1.0, float(fallback_price or 65000.0))
-    pct = float(fallback_24h_pct or 0.0)
-    pct_sign = "+" if pct >= 0 else ""
-    pct_str = f"{pct_sign}{pct:.2f}%"
-    badge_class = "badge-green" if pct >= 0 else "badge-red"
-    init_high = init_price * 1.015
-    init_low = init_price * 0.985
+    has_fallback = fallback_price is not None and float(fallback_price) > 0
+    init_price_val = float(fallback_price) if has_fallback else None
+    price_display_str = f"${init_price_val:,.2f}" if init_price_val is not None else "Waiting for tick..."
+    last_price_js = str(init_price_val) if init_price_val is not None else "null"
 
     html_code = f"""
     <!DOCTYPE html>
@@ -436,15 +437,15 @@ def render_live_btc_websocket_ticker(fallback_price: float, fallback_24h_pct: Op
       .live-dot {{
         width: 7px;
         height: 7px;
-        background-color: #00C087;
+        background-color: #D29922;
         border-radius: 50%;
         display: inline-block;
         animation: livePulse 1.5s infinite ease-in-out;
       }}
       @keyframes livePulse {{
-        0% {{ transform: scale(0.95); opacity: 0.7; box-shadow: 0 0 0 0 rgba(0, 192, 135, 0.7); }}
-        70% {{ transform: scale(1.1); opacity: 1; box-shadow: 0 0 0 6px rgba(0, 192, 135, 0); }}
-        100% {{ transform: scale(0.95); opacity: 0.7; box-shadow: 0 0 0 0 rgba(0, 192, 135, 0); }}
+        0% {{ transform: scale(0.95); opacity: 0.7; box-shadow: 0 0 0 0 rgba(210, 153, 34, 0.7); }}
+        70% {{ transform: scale(1.1); opacity: 1; box-shadow: 0 0 0 6px rgba(210, 153, 34, 0); }}
+        100% {{ transform: scale(0.95); opacity: 0.7; box-shadow: 0 0 0 0 rgba(210, 153, 34, 0); }}
       }}
       .price-row {{
         display: flex;
@@ -515,12 +516,12 @@ def render_live_btc_websocket_ticker(fallback_price: float, fallback_24h_pct: Op
     <div class="ticker-bar">
       <div class="ticker-section">
         <div class="top-label">
-          <span class="live-dot" id="liveDot"></span>
+          <span class="live-dot" id="liveDot" style="background-color: #D29922;"></span>
           <span>BTC/USDT SPOT</span>
-          <span id="feedStatus" style="color: #00C087; font-size: 10px;">LIVE</span>
+          <span id="feedStatus" style="color: #D29922; font-size: 10px;">CONNECTING...</span>
         </div>
         <div class="price-row">
-          <span class="price-val" id="priceDisplay">${init_price:,.2f}</span>
+          <span class="price-val" id="priceDisplay">{price_display_str}</span>
           <span class="tick-arrow" id="tickArrow" style="color: #8B949E;">▲</span>
         </div>
       </div>
@@ -528,28 +529,28 @@ def render_live_btc_websocket_ticker(fallback_price: float, fallback_24h_pct: Op
       <div class="stat-grid">
         <div class="stat-item">
           <span class="top-label">24h Change</span>
-          <span class="badge-pct {badge_class}" id="change24h">{pct_str}</span>
+          <span class="badge-pct" id="change24h" style="background: rgba(139, 148, 158, 0.15); color: #8B949E; border: 1px solid rgba(139, 148, 158, 0.35); font-size: 11px;">Waiting for stream...</span>
         </div>
         <div class="stat-item">
           <span class="top-label">24h High</span>
-          <span class="stat-val" id="high24h">${init_high:,.2f}</span>
+          <span class="stat-val" id="high24h" style="font-size: 11px; color: #8B949E;">Waiting for stream...</span>
         </div>
         <div class="stat-item">
           <span class="top-label">24h Low</span>
-          <span class="stat-val" id="low24h">${init_low:,.2f}</span>
+          <span class="stat-val" id="low24h" style="font-size: 11px; color: #8B949E;">Waiting for stream...</span>
         </div>
       </div>
 
       <div class="clock-section">
         <div class="top-label" style="justify-content: flex-end;">Synchronized Clock</div>
         <div class="clock-val" id="liveClock">--:--:-- UTC</div>
-        <div class="stream-tag" id="streamSource">Connecting to Feed...</div>
+        <div class="stream-tag" id="streamSource">Connecting to stream...</div>
       </div>
     </div>
 
     <script>
     (function() {{
-      let lastPrice = {init_price};
+      let lastPrice = {last_price_js};
       let activeWs = null;
       let binanceConnected = false;
       let fallbackTimer = null;
@@ -579,17 +580,19 @@ def render_live_btc_websocket_ticker(fallback_price: float, fallback_24h_pct: Op
         return '$' + Number(p).toLocaleString('en-US', {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }});
       }}
 
-      function handleTick(newPrice, pctChange, high24, low24, sourceName) {{
-        if (newPrice > lastPrice) {{
-          arrowEl.textContent = '▲';
-          arrowEl.style.color = '#00C087';
-          priceEl.style.color = '#00C087';
-        }} else if (newPrice < lastPrice) {{
-          arrowEl.textContent = '▼';
-          arrowEl.style.color = '#FF3B69';
-          priceEl.style.color = '#FF3B69';
+      function handleTick(newPrice, pctChange, high24, low24, sourceName, statusLabel) {{
+        if (lastPrice !== null) {{
+          if (newPrice > lastPrice) {{
+            arrowEl.textContent = '▲';
+            arrowEl.style.color = '#00C087';
+            priceEl.style.color = '#00C087';
+          }} else if (newPrice < lastPrice) {{
+            arrowEl.textContent = '▼';
+            arrowEl.style.color = '#FF3B69';
+            priceEl.style.color = '#FF3B69';
+          }}
+          setTimeout(function() {{ priceEl.style.color = '#F0F6FC'; }}, 400);
         }}
-        setTimeout(function() {{ priceEl.style.color = '#F0F6FC'; }}, 400);
 
         lastPrice = newPrice;
         priceEl.textContent = formatPrice(newPrice);
@@ -598,17 +601,27 @@ def render_live_btc_websocket_ticker(fallback_price: float, fallback_24h_pct: Op
           const sign = pctChange >= 0 ? '+' : '';
           changeEl.textContent = sign + pctChange.toFixed(2) + '%';
           changeEl.className = 'badge-pct ' + (pctChange >= 0 ? 'badge-green' : 'badge-red');
+          changeEl.removeAttribute('style');
         }}
         if (high24 && !isNaN(high24) && high24 > 0) {{
           highEl.textContent = formatPrice(high24);
+          highEl.removeAttribute('style');
         }}
         if (low24 && !isNaN(low24) && low24 > 0) {{
           lowEl.textContent = formatPrice(low24);
+          lowEl.removeAttribute('style');
         }}
         streamEl.textContent = sourceName;
         dotEl.style.backgroundColor = '#00C087';
-        statusEl.textContent = 'LIVE';
+        statusEl.textContent = statusLabel;
         statusEl.style.color = '#00C087';
+      }}
+
+      function setFallbackBadge() {{
+        dotEl.style.backgroundColor = '#D29922';
+        statusEl.textContent = 'FALLBACK (Last Closed Candle)';
+        statusEl.style.color = '#D29922';
+        streamEl.textContent = 'WebSocket Disconnected · Stale Snapshot';
       }}
 
       function connectCoinbase() {{
@@ -616,6 +629,13 @@ def render_live_btc_websocket_ticker(fallback_price: float, fallback_24h_pct: Op
           try {{ activeWs.close(); }} catch(e) {{}}
         }}
         streamEl.textContent = 'Connecting Coinbase...';
+        let coinbaseConnected = false;
+        let cbTimeout = setTimeout(function() {{
+          if (!coinbaseConnected) {{
+            setFallbackBadge();
+          }}
+        }}, 4000);
+
         try {{
           const cbWs = new WebSocket('wss://ws-feed.exchange.coinbase.com');
           activeWs = cbWs;
@@ -625,34 +645,36 @@ def render_live_btc_websocket_ticker(fallback_price: float, fallback_24h_pct: Op
               product_ids: ['BTC-USD'],
               channels: ['ticker']
             }}));
-            streamEl.textContent = 'Coinbase WebSocket (Fallback)';
+            streamEl.textContent = 'Coinbase WebSocket (Connecting...)';
           }};
           cbWs.onmessage = function(event) {{
             try {{
               const data = JSON.parse(event.data);
               if (data.type === 'ticker' && data.price) {{
+                coinbaseConnected = true;
+                clearTimeout(cbTimeout);
                 const p = parseFloat(data.price);
                 const open = parseFloat(data.open_24h);
                 const high = parseFloat(data.high_24h);
                 const low = parseFloat(data.low_24h);
                 const pct = (open > 0) ? ((p - open) / open) * 100 : null;
-                handleTick(p, pct, high, low, 'Coinbase WebSocket');
+                handleTick(p, pct, high, low, 'Coinbase WebSocket', 'LIVE (COINBASE)');
               }}
             }} catch(e) {{}}
           }};
           cbWs.onclose = function() {{
-            dotEl.style.backgroundColor = '#FF3B69';
-            statusEl.textContent = 'RECONNECTING';
-            statusEl.style.color = '#FF3B69';
+            setFallbackBadge();
             clearTimeout(retryTimer);
-            retryTimer = setTimeout(connectBinance, 3000);
+            retryTimer = setTimeout(connectBinance, 5000);
           }};
           cbWs.onerror = function() {{
+            setFallbackBadge();
             try {{ cbWs.close(); }} catch(e) {{}}
           }};
         }} catch(err) {{
+          setFallbackBadge();
           clearTimeout(retryTimer);
-          retryTimer = setTimeout(connectBinance, 3000);
+          retryTimer = setTimeout(connectBinance, 5000);
         }}
       }}
 
@@ -673,7 +695,7 @@ def render_live_btc_websocket_ticker(fallback_price: float, fallback_24h_pct: Op
           const bWs = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@ticker');
           activeWs = bWs;
           bWs.onopen = function() {{
-            // Connected to Binance
+            // Connected to Binance socket
           }};
           bWs.onmessage = function(event) {{
             binanceConnected = true;
@@ -685,7 +707,7 @@ def render_live_btc_websocket_ticker(fallback_price: float, fallback_24h_pct: Op
                 const pct = parseFloat(d.P);
                 const high = parseFloat(d.h);
                 const low = parseFloat(d.l);
-                handleTick(p, pct, high, low, 'Binance WebSocket (1s)');
+                handleTick(p, pct, high, low, 'Binance WebSocket (1s)', 'LIVE (BINANCE)');
               }}
             }} catch(e) {{}}
           }};
@@ -693,9 +715,7 @@ def render_live_btc_websocket_ticker(fallback_price: float, fallback_24h_pct: Op
             if (!binanceConnected) {{
               connectCoinbase();
             }} else {{
-              dotEl.style.backgroundColor = '#FF3B69';
-              statusEl.textContent = 'RECONNECTING';
-              statusEl.style.color = '#FF3B69';
+              setFallbackBadge();
               clearTimeout(retryTimer);
               retryTimer = setTimeout(connectBinance, 3000);
             }}
@@ -703,6 +723,8 @@ def render_live_btc_websocket_ticker(fallback_price: float, fallback_24h_pct: Op
           bWs.onerror = function() {{
             if (!binanceConnected) {{
               connectCoinbase();
+            }} else {{
+              setFallbackBadge();
             }}
           }};
         }} catch(err) {{
@@ -1217,7 +1239,7 @@ def fetch_cloud_database_state(current_price: Optional[float]):
             "rec_kpis": get_reconciliation_kpis(lookback_hours=168),
             "latest_audit": get_latest_council_audit(),
             "port_df": get_portfolio_history(limit=500),
-            "port_kpis": get_portfolio_kpis(current_price=current_price or 90000.0),
+            "port_kpis": get_portfolio_kpis(current_price=float(current_price)) if (current_price is not None and float(current_price) > 0) else {},
             "api_telemetry": get_api_telemetry_summary(hours=24),
         }
     except Exception as exc:
@@ -1553,8 +1575,12 @@ with tab_ground_truth:
         if not rec_df.empty:
             total_lifetime = rec_kpis.get("total_lifetime_evaluated") or len(rec_df)
             rolling_eval = rec_kpis.get("total_reconciled") or min(168, total_lifetime)
-            hit_rate = rec_kpis.get("directional_accuracy_pct") or rec_kpis.get("win_rate_pct") or 52.8
-            mae = rec_kpis.get("mae_usd") or (float(rec_df["absolute_error_usd"].mean()) if "absolute_error_usd" in rec_df.columns else 284.0)
+            hit_rate = rec_kpis.get("directional_accuracy_pct") or rec_kpis.get("win_rate_pct")
+            mae = rec_kpis.get("mae_usd") if rec_kpis.get("mae_usd") is not None else (
+                float(rec_df["absolute_error_usd"].mean())
+                if ("absolute_error_usd" in rec_df.columns and not rec_df["absolute_error_usd"].isna().all())
+                else None
+            )
 
             rk1, rk2, rk3 = st.columns(3)
             with rk1:
@@ -1565,17 +1591,19 @@ with tab_ground_truth:
                     help=f"Total all-time 1-hour prediction cycles ({total_lifetime:,} hours) continuously evaluated against real exchange close prices in Neon PostgreSQL."
                 )
             with rk2:
+                hit_rate_str = f"{float(hit_rate):.1f}%" if hit_rate is not None else "Awaiting DB data"
                 st.metric(
                     "Directional Hit Rate",
-                    f"{float(hit_rate):.1f}%",
-                    "vs. 50% Random Flip",
+                    hit_rate_str,
+                    "vs. 50% Random Flip" if hit_rate is not None else "Awaiting DB data",
                     help="Percentage of hourly forecasts where predicted direction matched actual market movement."
                 )
             with rk3:
+                mae_str = f"${float(mae):,.2f}" if mae is not None else "Awaiting DB data"
                 st.metric(
                     "Mean Dollar Error (MAE)",
-                    f"${float(mae):,.2f}",
-                    "Next-Hour Price Move",
+                    mae_str,
+                    "Next-Hour Price Move" if mae is not None else "Awaiting DB data",
                     help="Average absolute dollar gap between predicted target and actual close."
                 )
 
@@ -1762,7 +1790,7 @@ with tab_agent:
 
         # Live Episodic RAG Memory Proof Panel
         try:
-            from src.agents import get_rag_collection, query_similar_error_memories
+            from src.agents import get_rag_collection, query_similar_error_memories, get_rag_embedding_mode
             rag_col = get_rag_collection()
             if rag_col:
                 total_docs = rag_col.count()
@@ -1770,12 +1798,15 @@ with tab_agent:
                 neon_docs = len([i for i in all_ids if str(i).startswith("neon_pred_")])
                 rule_docs = total_docs - neon_docs
                 retrieved_memories = query_similar_error_memories("market volatility and false breakout", n_results=3)
+                embedding_mode = get_rag_embedding_mode()
+                mode_color = "#3FB950" if embedding_mode == "gemini-embedding-001" else "#D29922"
 
                 with st.container(border=True):
                     st.markdown(
                         f"""
-                        <div style="font-size: 0.9rem; font-weight: 700; color: #58A6FF; margin-bottom: 4px;">
-                            Live Episodic RAG Memory Proof (ChromaDB Vector Store)
+                        <div style="font-size: 0.9rem; font-weight: 700; color: #58A6FF; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center;">
+                            <span>Live Episodic RAG Memory Proof (ChromaDB Vector Store)</span>
+                            <span style="font-size: 0.72rem; font-weight: 600; color: {mode_color}; background: rgba(56, 139, 253, 0.1); border: 1px solid {mode_color}; padding: 2px 8px; border-radius: 4px;">Provider: {embedding_mode}</span>
                         </div>
                         <div style="font-size: 0.8rem; color: #8B949E; margin-bottom: 8px;">
                             Persistent cloud-backed episodic memory: <strong style="color: #F0F6FC;">{total_docs} total vectors indexed</strong> 
