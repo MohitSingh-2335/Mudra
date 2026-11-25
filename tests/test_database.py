@@ -216,4 +216,57 @@ def test_get_database_url_warns_on_malformed_secrets(tmp_path, monkeypatch, capl
     assert "TOMLDecodeError" in caplog.text
 
 
+def test_get_reconciliation_summary_model_prediction_no_black_swan_attr(in_memory_db):
+    # Verify get_reconciliation_summary handles ModelPrediction rows (which lack an is_black_swan column).
+    from src.engine import get_reconciliation_summary
+
+    session = in_memory_db[0]
+    t0 = datetime.now(timezone.utc) - timedelta(hours=1)
+    t1 = datetime.now(timezone.utc)
+    tick0 = MarketTick(timestamp=t0, open=60000.0, high=60500.0, low=59800.0, close=60000.0, volume=100.0, model_version=ACTIVE_MODEL_VERSION)
+    tick1 = MarketTick(timestamp=t1, open=60000.0, high=60100.0, low=57400.0, close=57500.0, volume=200.0, model_version=ACTIVE_MODEL_VERSION)
+    session.add_all([tick0, tick1])
+    session.add(ModelRegistry(
+        model_version="xgb_v2.0.0",
+        regressor_artifact_path="artifacts/models/xgb_v2_regressor.pkl",
+        regressor_sha256="a" * 64,
+        classifier_artifact_path="artifacts/models/xgb_v2_classifier.pkl",
+        classifier_sha256="b" * 64,
+        feature_schema_version="v2_36stationary",
+        target_definition="next_1h_btc_return_and_direction",
+        current_status="CANDIDATE",
+    ))
+    session.flush()
+
+    session.add(ModelPrediction(
+        tick_id=tick0.id,
+        model_version="xgb_v2.0.0",
+        run_mode="SHADOW",
+        is_primary=False,
+        feature_schema_version="v2_36stationary",
+        predicted_return_pct=0.2,
+        predicted_price_1h=60120.0,
+        direction_predicted="UP",
+        direction_prob_up=0.58,
+        clears_hurdle=True,
+        outcome_tick_id=tick1.id,
+        actual_price_at_t_plus_1=57500.0,
+        actual_return_pct=-4.1667,
+        direction_realized="DOWN",
+        direction_correct=False,
+        residual_error=-4.3667,
+        absolute_error_usd=2620.0,
+        percentage_error=4.5565,
+        error_attribution_tag="BLACK_SWAN_OUTLIER",
+        reconciled_at=t1,
+    ))
+    session.commit()
+
+    summary = get_reconciliation_summary(session, limit=168, model_version="xgb_v2.0.0")
+    assert summary["total_reconciled"] == 1
+    assert summary["black_swan_count"] == 1
+    assert summary["black_swans_filtered"] == 1
+    assert summary["model_version"] == "xgb_v2.0.0"
+
+
 
