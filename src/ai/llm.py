@@ -268,12 +268,34 @@ def embed_texts(
         raise RuntimeError(f"Gemini embed_content error: {exc}") from exc
 
 
-def _unavailable_postmortem(error_msg: str, model_versions: List[str], outcomes: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _unavailable_postmortem(
+    error_msg: str,
+    model_versions: List[str],
+    outcomes: List[Dict[str, Any]],
+    mcp_snapshot: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     return {
         "gemini_status": "UNAVAILABLE", "model_used": None, "error_detail": error_msg,
         "market_summary": "Gemini unavailable (offline or missing key)",
         "per_model": {mv: {"root_cause_driver": "GEMINI_UNAVAILABLE", "diagnosis_summary": "Gemini API unavailable (check quota/logs) — manual review needed."} for mv in model_versions},
         "model_outcomes": outcomes,
+        "mcp_snapshot": mcp_snapshot or {},
+    }
+
+
+def _build_mcp_snapshot(mcp_context: Any) -> Dict[str, Any]:
+    """Extracts derivatives and news telemetry honestly without substituting fake defaults."""
+    raw_mcp = mcp_context if isinstance(mcp_context, dict) else {}
+    raw_funding = raw_mcp.get("funding_rate_8h_pct")
+    raw_basis = raw_mcp.get("futures_basis_usd")
+    raw_headlines = [str(h) for h in (raw_mcp.get("news_headlines") or [])[:5]]
+    return {
+        "funding_rate_8h_pct": float(raw_funding) if raw_funding is not None else None,
+        "futures_basis_usd": float(raw_basis) if raw_basis is not None else None,
+        "derivatives_regime": str(raw_mcp.get("derivatives_regime") or "Unavailable"),
+        "derivatives_source": str(raw_mcp.get("derivatives_source") or "none"),
+        "news_headlines": raw_headlines,
+        "news_headline_count": len(raw_headlines),
     }
 
 
@@ -285,19 +307,15 @@ def generate_hourly_postmortem_with_gemini(
 ) -> Dict[str, Any]:
     """Generates grounded post-mortem explanation per model using Gemini, failing honestly if unavailable."""
     model_versions = [str(m.get("model_version", "unknown")) for m in model_outcomes]
+    mcp_snapshot = _build_mcp_snapshot(mcp_context)
     api_key = _get_gemini_api_key()
     if not api_key or os.getenv("PYTEST_CURRENT_TEST"):
         logger.warning("Gemini postmortem offline or test active: returning UNAVAILABLE.")
-        return _unavailable_postmortem("Gemini API key missing or test mode active", model_versions, model_outcomes)
+        return _unavailable_postmortem("Gemini API key missing or test mode active", model_versions, model_outcomes, mcp_snapshot)
 
     try:
         evidence_features = {k: v for k, v in tick_features.items() if isinstance(v, (int, float, str, bool))}
-        evidence_mcp = {
-            "funding_rate_8h_pct": float(mcp_context.get("funding_rate_8h_pct", 0.01) or 0.01) if isinstance(mcp_context, dict) else 0.01,
-            "derivatives_regime": str(mcp_context.get("derivatives_regime", "Neutral")) if isinstance(mcp_context, dict) else "Neutral",
-            "news_headlines": (mcp_context.get("news_headlines", []) if isinstance(mcp_context, dict) else [])[:5],
-        }
-        evidence_payload = {"tick_features": evidence_features, "mcp_context": evidence_mcp, "model_outcomes": model_outcomes}
+        evidence_payload = {"tick_features": evidence_features, "mcp_context": mcp_snapshot, "model_outcomes": model_outcomes}
         prompt = POSTMORTEM_PROMPT_TEMPLATE.format(evidence_json=json.dumps(evidence_payload, indent=2))
 
         raw_resp, model_used = generate_with_gemini_fallback(
@@ -320,10 +338,14 @@ def generate_hourly_postmortem_with_gemini(
             ds = getattr(m_data, "diagnosis_summary", None) or (m_data.get("diagnosis_summary") if isinstance(m_data, dict) else None) or "Reconciliation completed."
             per_model[mv] = {"root_cause_driver": str(rc), "diagnosis_summary": str(ds)}
 
-        return {"gemini_status": "OK", "model_used": model_used, "error_detail": None, "market_summary": market_summary, "per_model": per_model, "model_outcomes": model_outcomes}
+        return {
+            "gemini_status": "OK", "model_used": model_used, "error_detail": None,
+            "market_summary": market_summary, "per_model": per_model,
+            "model_outcomes": model_outcomes, "mcp_snapshot": mcp_snapshot,
+        }
     except Exception as exc:
         logger.warning("Hourly postmortem generation failed: %s", exc)
-        return _unavailable_postmortem(str(exc), model_versions, model_outcomes)
+        return _unavailable_postmortem(str(exc), model_versions, model_outcomes, mcp_snapshot)
 
 
 def _generate_fallback_report(
