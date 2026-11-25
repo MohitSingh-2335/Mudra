@@ -90,6 +90,31 @@ def test_candle_closure_timestamp_excludes_forming_candle(monkeypatch):
     assert c["close"] == 60050.0 and len(c["candles"]) == 40
 
 
+def test_binance_c9_taker_buy_base_volume_extraction(monkeypatch):
+    # Verify Binance c[9] taker_buy_base_volume is preserved in live ingestion and workflow candles.
+    from types import SimpleNamespace
+    from src.ai.workflow import fetch_historical_candles
+    from src.engine import fetch_latest_confirmed_candle
+
+    mock_raw = [
+        [1706781600000 + i * 3600000, "60000", "60100", "59900", "60050", "100.0", 1706781600000 + (i + 1) * 3600000 - 1, "0", 150, str(50.0 + (i % 5) * 3.0), "0", "0"]
+        for i in range(40)
+    ]
+    monkeypatch.setattr("src.engine._fetch_feed_with_retry", lambda *a, **k: mock_raw)
+    c = fetch_latest_confirmed_candle()
+    expected_last = float(mock_raw[-1][9])
+    assert c["taker_buy_base_volume"] == expected_last
+    assert c["candles"][-1]["taker_buy_base_volume"] == expected_last
+
+    monkeypatch.setattr("src.ai.workflow.requests.get", lambda *a, **k: SimpleNamespace(status_code=200, json=lambda: mock_raw))
+    df_hist = fetch_historical_candles(symbol="BTCUSDT", limit=40)
+    assert "taker_buy_base_volume" in df_hist.columns
+    assert float(df_hist["taker_buy_base_volume"].iloc[-1]) == expected_last
+    feats = extract_features_for_inference(df_hist)
+    assert feats["taker_buy_base_volume"] == expected_last
+    assert abs(float(feats["taker_log_z24"])) > 0.0
+
+
 def test_merge_onchain_prevents_intraday_leakage():
     candle_df = pd.DataFrame({"timestamp": ["2026-10-10 12:00:00", "2026-10-11 05:00:00"], "close": [60000.0, 60200.0]})
     mock_onchain = pd.DataFrame({
