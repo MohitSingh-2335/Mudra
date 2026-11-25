@@ -1,45 +1,57 @@
-import os
 import json
+import logging
 import math
-from decimal import Decimal
+import os
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
+except ImportError:
+    pass
 
 BASE_DIR = Path(__file__).resolve().parent
+_logger = logging.getLogger("mudra.config")
 
 
-def _parse_execution_cost_rate(rate_var: str, pct_var: str, default_rate: Optional[float] = None, max_rate: float = 0.01, max_pct: float = 5.0) -> float:
-    # parses execution cost rates from environment variables with bounds checking
-    rate_str, pct_str = os.getenv(rate_var), os.getenv(pct_var)
-    rate_val: Optional[float] = None
-    if rate_str and rate_str.strip():
-        try:
-            rate_val = float(rate_str)
-        except ValueError as err:
-            raise ValueError(f"Invalid non-numeric value for {rate_var}='{rate_str}'.") from err
-        if not math.isfinite(rate_val) or rate_val < 0.0 or rate_val > max_rate:
-            raise ValueError(f"{rate_var} must be a non-negative finite rate <= {max_rate}.")
+def _parse_bounded_float(var_name: str, max_val: float, min_val: float = 0.0, msg_label: str = "rate") -> Optional[float]:
+    raw = os.getenv(var_name)
+    if not raw or not raw.strip():
+        return None
+    try:
+        val = float(raw)
+    except ValueError as err:
+        raise ValueError(f"Invalid non-numeric value for {var_name}='{raw}'.") from err
+    if not math.isfinite(val) or val < min_val or val > max_val:
+        raise ValueError(f"{var_name} must be a finite {msg_label} between {min_val} and {max_val}.")
+    return val
 
-    pct_val: Optional[float] = None
-    if pct_str and pct_str.strip():
-        try:
-            pct_val = float(pct_str)
-        except ValueError as err:
-            raise ValueError(f"Invalid non-numeric value for {pct_var}='{pct_str}'.") from err
-        if not math.isfinite(pct_val) or pct_val < 0.0 or pct_val > max_pct:
-            raise ValueError(f"{pct_var} must be a finite percentage between 0 and {max_pct}.")
+
+def _parse_execution_cost_rate(
+    rate_var: str, pct_var: str, default_rate: Optional[float] = None,
+    max_rate: float = 0.01, max_pct: float = 5.0, min_rate: float = 0.0,
+) -> float:
+    # Parses execution cost rates or percentages from env vars with bounds and cross-checks
+    rate_val = _parse_bounded_float(rate_var, max_rate, msg_label="rate")
+    pct_val = _parse_bounded_float(pct_var, max_pct, msg_label="percentage")
 
     if rate_val is not None and pct_val is not None:
         if abs(rate_val - pct_val / 100.0) > 1e-7:
             raise ValueError(f"Conflicting environment configuration between {rate_var} and {pct_var}.")
-        return rate_val
-    if rate_val is not None:
-        return rate_val
-    if pct_val is not None:
-        return pct_val / 100.0
-    if default_rate is not None:
-        return default_rate
-    raise ValueError(f"Neither {rate_var} nor {pct_var} was provided.")
+        chosen = rate_val
+    elif rate_val is not None:
+        chosen = rate_val
+    elif pct_val is not None:
+        chosen = pct_val / 100.0
+    elif default_rate is not None:
+        chosen = default_rate
+    else:
+        raise ValueError(f"Neither {rate_var} nor {pct_var} was provided.")
+
+    if chosen + 1e-12 < min_rate:
+        raise ValueError(f"Configured {rate_var} cannot be less than floor {min_rate:.6f}.")
+    return chosen
 
 
 def _parse_positive_int(var_name: str, default_val: int) -> int:
@@ -62,23 +74,17 @@ def _parse_positive_float(var_name: str, default_val: float) -> float:
     return val
 
 
-# Execution friction settings
+# Execution friction settings (0.05% taker + 0.02% slippage per side)
 INITIAL_CAPITAL_USD = float(os.getenv("INITIAL_CAPITAL_USD", 10000.0))
 PORTFOLIO_ADVISORY_LOCK_ID: int = int(os.getenv("PORTFOLIO_ADVISORY_LOCK_ID", "888001"))
 TAKER_FEE_RATE: float = _parse_execution_cost_rate("TAKER_FEE_RATE", "TAKER_FEE_PCT", default_rate=0.0005)
 SLIPPAGE_RATE: float = _parse_execution_cost_rate("SLIPPAGE_RATE", "SLIPPAGE_PCT", default_rate=0.0002)
 TOTAL_FRICTION_PER_SIDE_RATE: float = TAKER_FEE_RATE + SLIPPAGE_RATE
 ROUND_TRIP_FRICTION_RATE: float = 1.0 - (1.0 - TOTAL_FRICTION_PER_SIDE_RATE) ** 2
-
-_hurdle_rate_env, _hurdle_pct_env = os.getenv("MIN_HURDLE_RATE"), os.getenv("MIN_HURDLE_PCT")
-if (_hurdle_rate_env and _hurdle_rate_env.strip()) or (_hurdle_pct_env and _hurdle_pct_env.strip()):
-    MIN_HURDLE_RATE: float = _parse_execution_cost_rate("MIN_HURDLE_RATE", "MIN_HURDLE_PCT", default_rate=ROUND_TRIP_FRICTION_RATE, max_rate=0.05)
-    _floor_dec = Decimal("1") - (Decimal("1") - (Decimal(str(TAKER_FEE_RATE)) + Decimal(str(SLIPPAGE_RATE)))) ** 2
-    _configured_dec = Decimal(_hurdle_rate_env.strip()) if _hurdle_rate_env and _hurdle_rate_env.strip() else Decimal(_hurdle_pct_env.strip()) / Decimal("100")
-    if _configured_dec < _floor_dec:
-        raise ValueError("Configured MIN_HURDLE_RATE cannot be less than estimated ROUND_TRIP_FRICTION_RATE.")
-else:
-    MIN_HURDLE_RATE: float = ROUND_TRIP_FRICTION_RATE
+MIN_HURDLE_RATE: float = _parse_execution_cost_rate(
+    "MIN_HURDLE_RATE", "MIN_HURDLE_PCT", default_rate=ROUND_TRIP_FRICTION_RATE,
+    max_rate=0.05, min_rate=ROUND_TRIP_FRICTION_RATE,
+)
 
 TAKER_FEE_PCT: float = TAKER_FEE_RATE * 100.0
 SLIPPAGE_PCT: float = SLIPPAGE_RATE * 100.0
@@ -86,7 +92,7 @@ TOTAL_FRICTION_PER_SIDE_PCT: float = TOTAL_FRICTION_PER_SIDE_RATE * 100.0
 ROUND_TRIP_FRICTION_PCT: float = ROUND_TRIP_FRICTION_RATE * 100.0
 MIN_HURDLE_PCT: float = MIN_HURDLE_RATE * 100.0
 
-# Artifact paths and hashes
+# Artifact paths and cryptographic manifest defaults
 MODELS_DIR = str(BASE_DIR / "artifacts" / "models")
 REGRESSOR_MODEL_PATH = str(BASE_DIR / "artifacts" / "models" / "best_regressor_model.pkl")
 CLASSIFIER_MODEL_PATH = str(BASE_DIR / "artifacts" / "models" / "best_classifier_model.pkl")
@@ -108,13 +114,7 @@ SHAP_IMPORTANCE_CSV_PATH = str(BASE_DIR / "artifacts" / "shap_feature_importance
 CHROMADB_DIR = str(BASE_DIR / "data" / "chromadb")
 CHROMA_COLLECTION_NAME = "mudra_rag_minilm_v1"
 
-FETCH_DAYS = 59
 LIVE_FETCH_LIMIT = 100
-LOOKBACK_WINDOW = 48
-DEFAULT_WALK_FORWARD_WINDOWS: int = _parse_positive_int("DEFAULT_WALK_FORWARD_WINDOWS", 5)
-DEFAULT_WALK_FORWARD_TRAIN_FRAC: float = _parse_positive_float("DEFAULT_WALK_FORWARD_TRAIN_FRAC", 0.60)
-DEFAULT_SIGNIFICANCE_ALPHA: float = _parse_positive_float("DEFAULT_SIGNIFICANCE_ALPHA", 0.05)
-
 EXCHANGE_RETRY_MAX_ATTEMPTS: int = _parse_positive_int("EXCHANGE_RETRY_MAX_ATTEMPTS", 3)
 EXCHANGE_CONNECT_TIMEOUT: float = _parse_positive_float("EXCHANGE_CONNECT_TIMEOUT", 3.5)
 EXCHANGE_READ_TIMEOUT: float = _parse_positive_float("EXCHANGE_READ_TIMEOUT", 7.0)
@@ -164,39 +164,8 @@ if os.path.exists(MODEL_MANIFEST_PATH):
             REGRESSOR_FEATURES = _manifest["regressor_features"]
         if "classifier_features" in _manifest:
             CLASSIFIER_FEATURES = _manifest["classifier_features"]
-    except Exception:
-        pass
-
-APP_TITLE: str = "Mudra — Bitcoin Price Prediction & Model Monitoring"
-APP_SUBTITLE: str = "Live BTC/USDT Price, Next-Hour ML Forecast & Multi-Model Evaluation"
-
-FEATURE_DISPLAY_NAMES: Dict[str, str] = {
-    "taker_buy_ratio": "Buyer vs. Seller Volume", "taker_buy_ratio_mean_6h": "6-Hour Average Buyer Ratio",
-    "vol_mean_6h": "6-Hour Average Price Swing ($)", "vol_std_6h": "6-Hour Swing Change ($)",
-    "vol_max_6h": "Largest 1h Swing in Last 6h ($)", "vol_min_6h": "Smallest 1h Swing in Last 6h ($)",
-    "vol_1h": "1-Hour High–Low Price Range ($)", "Volatility": "Hourly Price Volatility ($)",
-    "high_low_spread": "1-Hour High–Low Price Range ($)", "Price Change": "1-Hour Price Change ($)",
-    "close_open_diff": "1-Hour Open-to-Close Difference ($)", "close_lag_1": "Previous Hour Closing Price ($)",
-    "volume_lag_1": "Previous Hour Trading Volume", "Rolling_Mean_Close": "10-Hour Moving Average Price ($)",
-    "Rolling_Std_Close": "10-Hour Price Volatility ($)", "return_mean_6h": "6-Hour Average Return %",
-    "return_std_6h": "6-Hour Return Volatility %", "return_1h": "1-Hour Price Trend %",
-    "return_3h": "3-Hour Price Trend %", "return_6h": "6-Hour Price Trend %",
-    "rolling_max_6h": "6-Hour Rolling Highest Price ($)", "rolling_min_6h": "6-Hour Rolling Lowest Price ($)",
-    "price_volatility_interaction": "Price x Volatility Interaction", "rsi": "Price Momentum (RSI)",
-    "macd": "Trend Direction (MACD)", "macd_signal": "MACD Signal Line", "macd_hist": "MACD Histogram Divergence",
-    "bb_high": "Upper Bollinger Band ($)", "bb_low": "Lower Bollinger Band ($)", "bb_mid": "Bollinger Middle Basis ($)",
-    "ema_10": "10-Hour Exponential Moving Average ($)", "ema_20": "20-Hour Exponential Moving Average ($)",
-    "ema_30": "30-Hour Exponential Moving Average ($)", "ema_50": "50-Hour Exponential Moving Average ($)",
-    "ema_10_30_diff": "Fast vs. Slow EMA Trend Spread ($)", "volume": "Trading Volume",
-    "Volume_Change": "Hourly Volume Growth Rate", "trades_mean_6h": "6-Hour Average Number of Trades",
-    "number_of_trades": "Number of Trades", "fng_value": "Market Sentiment (Fear & Greed)",
-    "fng_mean_3d": "3-Day Average Sentiment (Fear & Greed)", "onchain_num_tx_change": "On-Chain Transaction Growth Rate %",
-    "onchain_hash_rate_change": "Bitcoin Network Hashrate Change %", "onchain_miners_revenue_change": "Miner Revenue Growth Rate %",
-    "hour": "Hour of Day (UTC)", "dayofweek": "Day of Week", "day": "Day of Month",
-    "hour_sin": "Cyclical Hour (Sine)", "hour_cos": "Cyclical Hour (Cosine)",
-    "day_sin": "Cyclical Day (Sine)", "day_cos": "Cyclical Day (Cosine)",
-    "high_low_ratio": "High-to-Low Ratio",
-}
+    except Exception as exc:
+        _logger.warning("Could not parse model manifest %s: %s", MODEL_MANIFEST_PATH, exc)
 
 __all__ = [
     "BASE_DIR", "INITIAL_CAPITAL_USD", "PORTFOLIO_ADVISORY_LOCK_ID", "TAKER_FEE_RATE",
@@ -207,10 +176,9 @@ __all__ = [
     "REGRESSOR_MODEL_SHA256", "CLASSIFIER_MODEL_SHA256", "THRESHOLD_SWEEP", "BTCUSDT_1H_CSV",
     "FEATURED_BTC_DATA_PATH", "MLFLOW_TRACKING_URI", "MLFLOW_EXPERIMENT_NAME",
     "SHAP_REGRESSOR_SUMMARY_PATH", "SHAP_CLASSIFIER_SUMMARY_PATH", "SHAP_IMPORTANCE_CSV_PATH",
-    "CHROMADB_DIR", "CHROMA_COLLECTION_NAME", "FETCH_DAYS", "LIVE_FETCH_LIMIT",
-    "LOOKBACK_WINDOW", "DEFAULT_WALK_FORWARD_WINDOWS", "DEFAULT_WALK_FORWARD_TRAIN_FRAC",
-    "DEFAULT_SIGNIFICANCE_ALPHA", "EXCHANGE_RETRY_MAX_ATTEMPTS", "EXCHANGE_CONNECT_TIMEOUT",
-    "EXCHANGE_READ_TIMEOUT", "EXCHANGE_RETRY_BASE_BACKOFF", "EXCHANGE_RETRY_BACKOFF_FACTOR",
-    "EXCHANGE_RETRY_MAX_BACKOFF", "EXCHANGE_MAX_RETRY_AFTER_CAP", "EXCHANGE_RETRY_TOTAL_DEADLINE",
-    "REGRESSOR_FEATURES", "CLASSIFIER_FEATURES", "APP_TITLE", "APP_SUBTITLE", "FEATURE_DISPLAY_NAMES",
+    "CHROMADB_DIR", "CHROMA_COLLECTION_NAME", "LIVE_FETCH_LIMIT",
+    "EXCHANGE_RETRY_MAX_ATTEMPTS", "EXCHANGE_CONNECT_TIMEOUT", "EXCHANGE_READ_TIMEOUT",
+    "EXCHANGE_RETRY_BASE_BACKOFF", "EXCHANGE_RETRY_BACKOFF_FACTOR", "EXCHANGE_RETRY_MAX_BACKOFF",
+    "EXCHANGE_MAX_RETRY_AFTER_CAP", "EXCHANGE_RETRY_TOTAL_DEADLINE",
+    "REGRESSOR_FEATURES", "CLASSIFIER_FEATURES",
 ]
