@@ -1,21 +1,19 @@
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import logging
 from typing import Any, Dict, List, Optional
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, status
+
+from fastapi import FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
+import shap
 
-from config import (
-    ACTIVE_MODEL_VERSION,
-    REGRESSOR_MODEL_PATH, REGRESSOR_MODEL_SHA256,
-    CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256,
-    REGRESSOR_FEATURES, CLASSIFIER_FEATURES
-)
-from src.model_loader import load_verified_model
-from src.feature_engineering import validate_inference_features, predict_with_validation
-from src.explainability import get_tree_explainer, explain_single_prediction
-from src.agents import MarketAnalystReport, generate_market_commentary
+from config import ACTIVE_MODEL_VERSION, CLASSIFIER_FEATURES, REGRESSOR_FEATURES
+from src.ai.llm import MarketAnalystReport, generate_market_commentary
+from src.ai.workflow import run_trading_graph
+from src.explainability import explain_single_prediction
+from src.feature_engineering import predict_with_validation, validate_inference_features
+from src.model_loader import load_production_models
 
 logger = logging.getLogger("src.api.main")
 __all__ = [
@@ -134,14 +132,10 @@ class PortfolioSummaryResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # loads verified models and SHAP tree explainer on startup
-    reg = load_verified_model(REGRESSOR_MODEL_PATH, REGRESSOR_MODEL_SHA256)
-    clf = load_verified_model(CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256)
-    reg.set_params(device="cpu")
-    clf.set_params(device="cpu")
+    reg, clf = load_production_models()
     models["regressor"] = reg
     models["classifier"] = clf
-    models["explainer"] = get_tree_explainer(clf)
+    models["explainer"] = shap.TreeExplainer(clf)
     yield
     models.clear()
 
@@ -157,8 +151,7 @@ async def health_check():
 
 @app.post("/predict", response_model=PredictResponse, tags=["Inference"])
 async def predict(req: PredictRequest):
-    # validates features and runs regression and direction classification
-    missing = sorted(list(set([f for f in REGRESSOR_FEATURES if f not in req.features] + [f for f in CLASSIFIER_FEATURES if f not in req.features])))
+    missing = sorted(set(f for f in REGRESSOR_FEATURES + CLASSIFIER_FEATURES if f not in req.features))
     if missing:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Missing required feature fields: {missing}")
 
@@ -173,15 +166,17 @@ async def predict(req: PredictRequest):
     move_code = int(predict_with_validation(models["classifier"], input_clf, model_type="classifier")[0])
 
     return PredictResponse(
-        current_price=req.current_price, predicted_price=round(pred_price, 2),
-        predicted_return=round(pred_return, 6), directional_movement="Upward 📈" if move_code == 1 else "Downward 📉",
-        movement_code=move_code, model_version=ACTIVE_MODEL_VERSION,
+        current_price=req.current_price,
+        predicted_price=round(pred_price, 2),
+        predicted_return=round(pred_return, 6),
+        directional_movement="Upward" if move_code == 1 else "Downward",
+        movement_code=move_code,
+        model_version=ACTIVE_MODEL_VERSION,
     )
 
 
 @app.post("/explain", response_model=ExplainResponse, tags=["Explainability"])
 async def explain(req: PredictRequest):
-    # computes SHAP feature attributions for classifier prediction
     missing_clf = [f for f in CLASSIFIER_FEATURES if f not in req.features]
     if missing_clf:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Missing required classifier features for SHAP: {missing_clf}")
@@ -191,37 +186,39 @@ async def explain(req: PredictRequest):
     except ValueError as val_err:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Feature validation error: {val_err}")
 
-    base_val, top_pos, top_neg, _ = explain_single_prediction(models["explainer"], input_clf, top_n=4)
+    base_val, top_pos, top_neg, _ = explain_single_prediction(models["explainer"], input_clf, top_n=4, return_fig=False)
     bullish = [FeatureAttribution(feature=d["feature"], shap_value=round(d["shap"], 4), actual_value=round(d["value"], 4)) for d in top_pos]
     bearish = [FeatureAttribution(feature=d["feature"], shap_value=round(d["shap"], 4), actual_value=round(d["value"], 4)) for d in top_neg]
-
     return ExplainResponse(base_value=round(float(base_val), 4), top_bullish_drivers=bullish, top_bearish_drivers=bearish)
 
 
 @app.post("/analyze", response_model=FullAnalysisResponse, tags=["Agentic AI"])
 async def analyze(req: PredictRequest):
-    # runs prediction, explanation, and Gemini market commentary
     pred_res = await predict(req)
     exp_res = await explain(req)
     pos_drivers = [{"feature": d.feature, "shap": d.shap_value, "value": d.actual_value} for d in exp_res.top_bullish_drivers]
     neg_drivers = [{"feature": d.feature, "shap": d.shap_value, "value": d.actual_value} for d in exp_res.top_bearish_drivers]
 
     report = generate_market_commentary(
-        current_price=pred_res.current_price, pred_price=pred_res.predicted_price,
-        pred_return=pred_res.predicted_return, pred_move_text=pred_res.directional_movement,
-        top_pos_drivers=pos_drivers, top_neg_drivers=neg_drivers
+        current_price=pred_res.current_price,
+        pred_price=pred_res.predicted_price,
+        pred_return=pred_res.predicted_return,
+        pred_move_text=pred_res.directional_movement,
+        top_pos_drivers=pos_drivers,
+        top_neg_drivers=neg_drivers,
     )
     return FullAnalysisResponse(prediction=pred_res, explanation=exp_res, analyst_commentary=report)
 
 
 @app.post("/agents/trade", response_model=AgentTradeResponse, tags=["Multi-Agent LangGraph"])
 async def run_agent_trade(req: AgentTradeRequest):
-    # runs LangGraph multi-agent trade decision pipeline
-    from src.agents import run_trading_graph
     try:
         state = run_trading_graph(
-            symbol=req.symbol, current_price=req.current_price, market_data=req.market_data,
-            engineered_features=req.engineered_features, ml_forecast=req.ml_forecast
+            symbol=req.symbol,
+            current_price=req.current_price,
+            market_data=req.market_data,
+            engineered_features=req.engineered_features,
+            ml_forecast=req.ml_forecast,
         )
         return AgentTradeResponse(**state)
     except Exception as e:
@@ -230,7 +227,6 @@ async def run_agent_trade(req: AgentTradeRequest):
 
 @app.get("/reconciliation/summary", response_model=ReconciliationSummaryResponse, tags=["Observability & Database"])
 async def get_reconciliation_metrics(lookback_hours: int = 168, model_version: Optional[str] = None):
-    # fetches database reconciliation KPIs for model governance
     from src.database import get_reconciliation_kpis
     try:
         return get_reconciliation_kpis(lookback_hours=lookback_hours, model_version=model_version)
@@ -240,11 +236,18 @@ async def get_reconciliation_metrics(lookback_hours: int = 168, model_version: O
 
 
 @app.get("/portfolio/summary", response_model=PortfolioSummaryResponse, tags=["Observability & Database"])
-async def get_portfolio_metrics(current_price: float = 83000.0):
-    # fetches live paper portfolio balance and performance statistics
+async def get_portfolio_metrics(current_price: float = Query(..., gt=0)):
     from src.database import get_portfolio_kpis
     try:
-        return get_portfolio_kpis(current_price=current_price)
+        data = get_portfolio_kpis(current_price=current_price)
+        if isinstance(data, dict) and data.get("query_failed"):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(data.get("error") or "Database unavailable"),
+            )
+        return data
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Failed to fetch portfolio metrics: %s", type(e).__name__)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database query failed")
