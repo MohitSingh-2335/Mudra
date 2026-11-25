@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import json
 import logging
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 import numpy as np
 import pandas as pd
@@ -8,7 +9,6 @@ import pytest
 import requests
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 import app
 import config
@@ -22,20 +22,13 @@ from config import (
     SLIPPAGE_RATE,
     TAKER_FEE_PCT,
     TAKER_FEE_RATE,
-    TOTAL_FRICTION_PER_SIDE_PCT,
     TOTAL_FRICTION_PER_SIDE_RATE,
     _parse_execution_cost_rate,
 )
 import scripts.run_hourly_worker as worker
-from src.backtesting import run_backtest_threshold
-from src.agents import (
-    generate_with_gemini_fallback,
-    get_gemini_status,
-    risk_critic_node,
-    run_trading_graph,
-    strategist_node,
-)
-from src.backtesting import _simulate_from_signals
+from src.ai.llm import generate_with_gemini_fallback
+from src.ai.workflow import risk_critic_node, run_trading_graph, strategist_node
+from src.backtesting import _simulate_from_signals, run_backtest_threshold
 from src.database import (
     Base, CouncilAudit, MarketTick, ModelPrediction, ModelRegistry,
     PaperPortfolio, Reconciliation, init_db as real_init_db,
@@ -54,7 +47,7 @@ from src.engine import (
     sync_hourly_quant_cycle,
 )
 import src.engine as sync
-from src.mcp_server import get_live_btc_derivatives_pulse, get_spot_and_futures_trade_plan
+from src.mcp_server import get_live_btc_derivatives_pulse
 
 
 # helper mocks for market feed responses
@@ -93,13 +86,6 @@ def isolated_db(monkeypatch):
     session.close()
     Base.metadata.drop_all(bind=engine)
     engine.dispose()
-
-
-@pytest.fixture
-def temp_outbox(tmp_path, monkeypatch):
-    outbox_path = tmp_path / "sync_outbox.json"
-    monkeypatch.setattr(worker, "OUTBOX_FILE", outbox_path)
-    return outbox_path
 
 
 def test_canonical_cost_rates_and_display_aliases():
@@ -241,11 +227,26 @@ def test_ui_generate_live_forecast_hurdle(monkeypatch):
 
 
 def test_council_scenarios_and_monkeypatch(monkeypatch):
-    monkeypatch.setattr("src.agents._get_gemini_api_key", lambda: None)
-    for scenario, expected_action in [("chop", "HOLD"), ("bullish", "BUY"), ("vol_spike", "SELL")]:
-        m, t, f = app.build_council_scenario_payload(scenario, 65000.0)
+    monkeypatch.setattr("src.ai.workflow._get_gemini_api_key", lambda: None)
+    scenarios = [
+        ("HOLD", 0.004, 400.0, 0.49, 0.02, False, "SIDEWAYS"),
+        ("BUY", 0.015, 5000.0, 0.65, 0.42, True, "UP"),
+        ("SELL", 0.052, 12000.0, 0.35, -0.20, True, "DOWN"),
+    ]
+    for expected_action, spread, vol, taker, ret_pct, clears, direction in scenarios:
+        m = {"close": 65000.0, "high": 65000.0 * (1 + spread / 2), "low": 65000.0 * (1 - spread / 2), "volume": vol, "taker_buy_ratio": taker}
+        t = {"volatility_spread": spread, "volatility_range_pct": round(spread * 100, 3), "rsi_estimate": 50.0}
+        f = {"expected_return_pct": ret_pct, "predicted_dollar_move": 65000.0 * (ret_pct / 100.0), "clears_hurdle": clears, "confidence": 0.7, "direction": direction}
         state = run_trading_graph("BTCUSDT", 65000.0, m, t, f)
         assert state["strategist_action"] == expected_action
+
+    # Live payload helper must preserve engineered RSI and handle None taker ratio honestly.
+    m_live, t_live, _ = app.build_live_council_payload(
+        65000.0,
+        {"pred_ret_pct": 0.2, "direction_label": "UP", "prob_up": 62.0, "spread_pct": 1.1, "taker": None, "features": {"rsi": 61.5, "volume": 900.0}},
+    )
+    assert m_live["taker_buy_ratio"] is None and t_live["order_flow_bias"] == "UNAVAILABLE"
+    assert t_live["rsi_estimate"] == pytest.approx(61.5) and t_live["rsi"] == pytest.approx(61.5)
 
 
 def test_format_portfolio_rationale():
@@ -300,7 +301,7 @@ def test_plain_english_reconciliation_story_and_mcp_fallback(monkeypatch):
     assert get_live_btc_derivatives_pulse()["status"] == "OFFLINE_FALLBACK"
 
 
-def test_gemini_model_fallback_and_mcp_trade_plan(monkeypatch):
+def test_gemini_model_fallback(monkeypatch):
     called_models = []
 
     class _DummyModels:
@@ -320,15 +321,6 @@ def test_gemini_model_fallback_and_mcp_trade_plan(monkeypatch):
     monkeypatch.setattr(genai, "Client", _DummyClient)
     text = generate_with_gemini_fallback("test_key", "prompt")
     assert "MODERATE BULLISH" in text and len(called_models) >= 2
-
-    st = get_gemini_status()
-    assert st["configured"] is False or st["configured"] is True
-
-    plan = get_spot_and_futures_trade_plan(
-        current_price=80000.0, predicted_direction="UP", expected_return_pct=0.45,
-        conviction_score=8, volatility_range_pct=1.0, risk_approved=True, clears_hurdle=True,
-    )
-    assert "spot_plan" in plan and "futures_plan" in plan
 
 
 def test_parse_retry_after():
@@ -364,6 +356,8 @@ def test_binance_exhausted_retries_coinbase_fallback(monkeypatch):
     monkeypatch.setattr("requests.get", mock_get)
     result = fetch_latest_confirmed_candle(sleep_fn=lambda s: None, clock_fn=lambda: 1000.0, now_dt_fn=lambda: datetime(2026, 7, 6, 14, 5, 0, tzinfo=timezone.utc))
     assert result["close"] == 60250.0 and result["number_of_trades"] is None
+    assert result["taker_buy_ratio"] is None and result["taker_buy_base_volume"] is None
+    assert result["feed_name"] == "coinbase" and result["feed_status"] == 200
 
 
 def test_both_providers_exhausted_raises_runtime_error(monkeypatch):
@@ -397,71 +391,33 @@ def test_confirmed_candle_filtering_and_minimum_count(monkeypatch):
     assert result is not None and result["close"] == 60200.0 and len(result["candles"]) >= 35
 
 
-def test_worker_success_on_new_sync(isolated_db, temp_outbox, monkeypatch):
+def test_worker_success_on_new_sync(isolated_db, monkeypatch):
     monkeypatch.setattr(worker, "sync_hourly_quant_cycle", lambda force=False: (True, "Recorded tick #1", {}))
     assert worker.run_worker(force=False) is True
 
 
-def test_worker_success_on_already_recorded(isolated_db, temp_outbox, monkeypatch):
+def test_worker_success_on_already_recorded(isolated_db, monkeypatch):
     monkeypatch.setattr(worker, "sync_hourly_quant_cycle", lambda force=False: (False, "Candle already recorded in Neon.", {}))
     assert worker.run_worker(force=False) is True
 
 
-def test_worker_failure_on_feed_error(isolated_db, temp_outbox, monkeypatch):
+def test_worker_failure_on_feed_error(isolated_db, monkeypatch):
     monkeypatch.setattr(worker, "sync_hourly_quant_cycle", lambda force=False: (False, "Market feed error", {}))
     assert worker.run_worker(force=False) is False
 
 
-def test_worker_failure_on_db_timeout(isolated_db, temp_outbox, monkeypatch):
+def test_worker_failure_on_db_timeout(isolated_db, monkeypatch):
     monkeypatch.setattr("src.database.test_connection", lambda: (False, "Timeout", 5000.0))
     assert worker.run_worker(force=False) is False
 
 
-def test_worker_failure_on_exception(isolated_db, temp_outbox, monkeypatch):
+def test_worker_failure_on_exception(isolated_db, monkeypatch):
     monkeypatch.setattr(worker, "sync_hourly_quant_cycle", MagicMock(side_effect=RuntimeError("crash")))
     assert worker.run_worker(force=False) is False
 
 
-def test_outbox_missing_noop(isolated_db, temp_outbox):
-    assert worker.flush_outbox(isolated_db[0]) == 0
-
-
-def test_outbox_empty_unlinked(isolated_db, temp_outbox):
-    temp_outbox.write_text("   \n ", encoding="utf-8")
-    assert worker.flush_outbox(isolated_db[0]) == 0
-    assert not temp_outbox.exists()
-
-
-def test_outbox_malformed_preserved(isolated_db, temp_outbox):
-    temp_outbox.write_text("{corrupt json", encoding="utf-8")
-    assert worker.flush_outbox(isolated_db[0]) == 0
-    assert temp_outbox.exists()
-
-
-def test_outbox_flush_persists_and_unlinks(isolated_db, temp_outbox):
-    session = isolated_db[0]
-    t0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-    temp_outbox.write_text(json.dumps([{
-        "type": "tick",
-        "payload": {
-            "timestamp": t0.isoformat(), "open": 60000.0, "high": 60500.0, "low": 59500.0, "close": 60200.0, "volume": 120.0,
-            "model_version": "xgb_v1", "features": {"rsi": 55.4},
-        }
-    }]), encoding="utf-8")
-    assert worker.flush_outbox(session) == 1
-    assert not temp_outbox.exists()
-    tick = session.execute(select(MarketTick).where(MarketTick.timestamp == t0)).scalar_one_or_none()
-    assert tick is not None and tick.close == 60200.0
-
-
-def test_outbox_replay_idempotent(isolated_db, temp_outbox):
-    session = isolated_db[0]
-    t0 = datetime(2026, 1, 1, 14, 0, tzinfo=timezone.utc)
-    session.add(MarketTick(timestamp=t0, open=60000.0, high=60100.0, low=59900.0, close=60050.0, volume=10.0))
-    session.commit()
-    temp_outbox.write_text(json.dumps([{"type": "tick", "payload": {"timestamp": t0.isoformat(), "open": 60000.0, "high": 60100.0, "low": 59900.0, "close": 60050.0, "volume": 10.0}}]), encoding="utf-8")
-    assert worker.flush_outbox(session) == 0
-    assert not temp_outbox.exists()
+def test_worker_require_postgres_rejects_sqlite(isolated_db):
+    assert worker.run_worker(force=False, require_postgres=True) is False
 
 
 def test_force_sync_deduplicates_paper_trade(isolated_db, monkeypatch):
@@ -470,9 +426,9 @@ def test_force_sync_deduplicates_paper_trade(isolated_db, monkeypatch):
     candle = {"timestamp": t0, "open": 60000.0, "high": 60200.0, "low": 59800.0, "close": 60100.0, "volume": 75.0}
 
     monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: candle)
-    monkeypatch.setattr(sync, "calculate_technical_signals", MagicMock(invoke=lambda *a: {"rsi": 55.0}))
-    mock_ml = MagicMock(invoke=lambda *a: {"expected_return_pct": 0.45, "predicted_target_price": 60370.0, "confidence": 0.8, "clears_hurdle": True})
-    monkeypatch.setattr(sync, "get_model_return_forecast", mock_ml)
+    monkeypatch.setattr(sync, "calculate_technical_signals", lambda **k: {"rsi": 55.0})
+    pred_payload = {"expected_return_pct": 0.45, "predicted_target_price": 60370.0, "confidence": 0.8, "clears_hurdle": True}
+    monkeypatch.setattr(sync, "get_model_return_forecast", lambda **k: pred_payload)
     monkeypatch.setattr(sync, "run_trading_graph", lambda **k: {
         "final_decision": "BUY", "risk_verdict": "APPROVED", "strategist_action": "BUY",
         "strategist_conviction": 8, "kelly_fraction": 0.10, "thesis": "Bullish",
@@ -482,7 +438,7 @@ def test_force_sync_deduplicates_paper_trade(isolated_db, monkeypatch):
     assert ok1 is True
     assert len(session.execute(select(PaperPortfolio).where(PaperPortfolio.action == "BUY")).scalars().all()) == 1
 
-    mock_ml.invoke = lambda *a: {"expected_return_pct": 0.95, "predicted_target_price": 60670.0, "confidence": 0.9, "clears_hurdle": True}
+    pred_payload.update({"expected_return_pct": 0.95, "predicted_target_price": 60670.0, "confidence": 0.9})
     ok2, msg2, _ = sync.sync_hourly_quant_cycle(force=True)
     assert ok2 is True
     assert "Trade deduplicated | No fees" in msg2
@@ -505,9 +461,7 @@ def test_atomic_rollback_on_failure(isolated_db, monkeypatch):
     session = isolated_db[0]
     t0 = datetime(2026, 1, 1, 16, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: {"timestamp": t0, "open": 60000.0, "high": 60200.0, "low": 59800.0, "close": 60100.0, "volume": 75.0})
-    mock_signals = MagicMock()
-    mock_signals.invoke.side_effect = RuntimeError("signal crash")
-    monkeypatch.setattr(sync, "calculate_technical_signals", mock_signals)
+    monkeypatch.setattr(sync, "calculate_technical_signals", MagicMock(side_effect=RuntimeError("signal crash")))
 
     with pytest.raises(RuntimeError):
         sync.sync_hourly_quant_cycle(force=False)
@@ -532,8 +486,8 @@ def test_backfill_empty_db_bootstrap(isolated_db, monkeypatch):
     monkeypatch.setattr(sync, "fetch_latest_confirmed_candle", lambda: {
         "timestamp": t_latest, "open": 60000.0, "high": 60100.0, "low": 59900.0, "close": 60000.0, "volume": 10.0, "candles": history,
     })
-    monkeypatch.setattr(sync, "calculate_technical_signals", MagicMock(invoke=lambda *a: {}))
-    monkeypatch.setattr(sync, "get_model_return_forecast", MagicMock(invoke=lambda *a: {"expected_return_pct": 0.1, "predicted_target_price": 60060.0, "confidence": 0.7, "clears_hurdle": False}))
+    monkeypatch.setattr(sync, "calculate_technical_signals", lambda **k: {})
+    monkeypatch.setattr(sync, "get_model_return_forecast", lambda **k: {"expected_return_pct": 0.1, "predicted_target_price": 60060.0, "confidence": 0.7, "clears_hurdle": False})
     monkeypatch.setattr(sync, "run_trading_graph", lambda **k: {"final_decision": "HOLD", "risk_verdict": "APPROVED", "strategist_action": "HOLD", "strategist_conviction": 5, "kelly_fraction": 0.0, "thesis": "hold"})
 
     ok, _, _ = sync.sync_hourly_quant_cycle(force=False)
@@ -545,8 +499,8 @@ def test_single_missing_hour_backfill_and_reconcile(isolated_db, monkeypatch):
     session = isolated_db[0]
     t0, t1, t2 = datetime(2026, 2, 2, 10, 0, tzinfo=timezone.utc), datetime(2026, 2, 2, 11, 0, tzinfo=timezone.utc), datetime(2026, 2, 2, 12, 0, tzinfo=timezone.utc)
 
-    monkeypatch.setattr(sync, "calculate_technical_signals", MagicMock(invoke=lambda *a: {}))
-    monkeypatch.setattr(sync, "get_model_return_forecast", MagicMock(invoke=lambda *a: {"expected_return_pct": 0.5, "predicted_target_price": 60300.0, "confidence": 0.8, "clears_hurdle": True}))
+    monkeypatch.setattr(sync, "calculate_technical_signals", lambda **k: {})
+    monkeypatch.setattr(sync, "get_model_return_forecast", lambda **k: {"expected_return_pct": 0.5, "predicted_target_price": 60300.0, "confidence": 0.8, "clears_hurdle": True})
     monkeypatch.setattr(sync, "run_trading_graph", lambda **k: {"final_decision": "BUY", "risk_verdict": "APPROVED", "strategist_action": "BUY", "strategist_conviction": 8, "kelly_fraction": 0.10, "thesis": "Bullish"})
 
     c0 = {"timestamp": t0, "open": 59900.0, "high": 60100.0, "low": 59800.0, "close": 60000.0, "volume": 80.0, "candles": [{"timestamp": pd.Timestamp(t0), "open": 59900.0, "high": 60100.0, "low": 59800.0, "close": 60000.0, "volume": 80.0}]}
@@ -659,11 +613,6 @@ def test_ensure_model_registered_idempotency_and_shadow_prediction(isolated_db):
 
 def test_sync_hourly_persists_mcp_signals_and_council_thesis(isolated_db, monkeypatch):
     """Ensure Stage 4 persists live MCP derivatives/news on MarketTick.features and council thesis in CouncilAudit."""
-    from datetime import datetime, timezone
-    from types import SimpleNamespace
-    import src.engine as eng
-    from src.database import MarketTick, CouncilAudit
-
     session = isolated_db[0]
     ts = datetime(2026, 11, 25, 10, 0, 0, tzinfo=timezone.utc)
     candle = {
@@ -678,29 +627,27 @@ def test_sync_hourly_persists_mcp_signals_and_council_thesis(isolated_db, monkey
     }
 
     monkeypatch.setattr(
-        eng,
+        sync,
         "calculate_technical_signals",
-        SimpleNamespace(invoke=lambda payload: {"rsi_14": 54.0, "volatility_range_pct": 0.008}),
+        lambda **kwargs: {"rsi_14": 54.0, "volatility_range_pct": 0.008},
     )
     monkeypatch.setattr(
-        eng,
+        sync,
         "get_model_return_forecast",
-        SimpleNamespace(
-            invoke=lambda payload: {
-                "expected_return_pct": 0.05,
-                "predicted_target_price": 90295.0,
-                "confidence": 0.62,
-                "clears_hurdle": False,
-                "direction": "UP",
-                "direction_probability_up": 54.0,
-                "model_version": "xgb_onnx_v1.0.0",
-            }
-        ),
+        lambda **kwargs: {
+            "expected_return_pct": 0.05,
+            "predicted_target_price": 90295.0,
+            "confidence": 0.62,
+            "clears_hurdle": False,
+            "direction": "UP",
+            "direction_probability_up": 54.0,
+            "model_version": "xgb_onnx_v1.0.0",
+        },
     )
     monkeypatch.setattr("src.model_loader.get_registered_models", lambda: {})
-    monkeypatch.setattr(eng, "reconcile_pending_ticks", lambda sess, tick: [])
+    monkeypatch.setattr(sync, "reconcile_pending_ticks", lambda sess, tick: [])
     monkeypatch.setattr(
-        eng,
+        sync,
         "run_trading_graph",
         lambda **kwargs: {
             "final_decision": "HOLD",
@@ -722,7 +669,7 @@ def test_sync_hourly_persists_mcp_signals_and_council_thesis(isolated_db, monkey
         },
     )
 
-    synced, msg, _ = eng.sync_hourly_quant_cycle(force=False, candle=candle)
+    synced, msg, _ = sync.sync_hourly_quant_cycle(force=False, candle=candle)
     assert synced is True, msg
 
     tick = session.query(MarketTick).order_by(MarketTick.id.desc()).first()
