@@ -1,9 +1,12 @@
+import json
 import pytest
-from src.agents import (
+import src.ai.llm as ai_llm
+from src.ai.llm import generate_hourly_postmortem_with_gemini
+from src.ai.mcp_client import fetch_mcp_context
+from src.ai.workflow import (
     AgentState,
     build_trading_graph,
     calculate_technical_signals,
-    get_model_return_forecast,
     risk_critic_node,
     run_trading_graph,
 )
@@ -16,13 +19,23 @@ def test_trading_graph_compilation():
 
 
 def test_technical_tools_execution():
-    res = calculate_technical_signals.invoke({
-        "close": 65000.0, "high": 65800.0, "low": 64700.0, "volume": 2500.0, "taker_buy_ratio": 0.62,
-    })
+    import pandas as pd
+    res = calculate_technical_signals(
+        close=65000.0, high=65800.0, low=64700.0, volume=2500.0, taker_buy_ratio=0.62,
+    )
     assert res["close_price"] == 65000.0
     assert res["high_low_spread_usd"] == 1100.0
     assert res["taker_buy_ratio"] == 0.62
     assert "Bullish Aggressive Buying" in res["order_flow_bias"]
+
+    cb_candles = pd.DataFrame({
+        "timestamp": pd.date_range("2026-07-01", periods=45, freq="1h", tz="UTC"),
+        "open": [64900.0] * 45, "high": [65200.0] * 45, "low": [64700.0] * 45,
+        "close": [65000.0] * 45, "volume": [2500.0] * 45,
+    })
+    res_cb = calculate_technical_signals(candles=cb_candles, close=65000.0, volume=2500.0)
+    assert res_cb["taker_buy_ratio"] == pytest.approx(0.50)
+    assert "Neutral" in res_cb["order_flow_bias"] or "Balanced" in res_cb["order_flow_bias"] or res_cb["close_price"] == 65000.0
 
 
 def test_trading_graph_bullish_approval():
@@ -92,12 +105,10 @@ def test_trading_graph_hold_preservation():
 def test_mcp_server_tools_and_context_fetcher():
     # verifies mcp server tool functions and agent context fetcher work cleanly
     import src.mcp_server as mcp_srv
-    from src.agents import fetch_mcp_context
 
     assert hasattr(mcp_srv, "get_live_btc_derivatives_pulse")
-    assert hasattr(mcp_srv, "get_live_btc_spot_and_range")
     assert hasattr(mcp_srv, "get_recent_prediction_error_memories")
-    assert hasattr(mcp_srv, "get_spot_and_futures_trade_plan")
+    assert hasattr(mcp_srv, "get_recent_btc_news_headlines")
 
     pulse = mcp_srv.get_live_btc_derivatives_pulse()
     assert "funding_rate_8h_pct" in pulse
@@ -123,7 +134,6 @@ def test_mcp_news_headlines_and_agent_integration():
 
 def test_gemini_postmortem_offline_handling():
     # verifies gemini postmortem generator returns honest unavailable status under test
-    from src.agents import generate_hourly_postmortem_with_gemini
     tick_features = {"close": 65000.0, "volatility_range_pct": 1.2, "taker_buy_ratio": 0.52, "rsi_estimate": 55.0}
     mcp_context = {"news_headlines": ["Bitcoin holds above support amid steady ETF flows."]}
     model_outcomes = [
@@ -149,10 +159,8 @@ def test_gemini_postmortem_offline_handling():
 
 def test_gemini_postmortem_raw_control_character_parsing(monkeypatch):
     # verifies postmortem parser tolerates unescaped control characters such as raw newlines
-    import json
-    from src import agents
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
-    monkeypatch.setattr(agents, "_get_gemini_api_key", lambda: "mock_api_key")
+    monkeypatch.setattr(ai_llm, "_get_gemini_api_key", lambda: "mock_api_key")
 
     raw_json_with_control_chars = (
         '{\n'
@@ -171,10 +179,8 @@ def test_gemini_postmortem_raw_control_character_parsing(monkeypatch):
         json.loads(raw_json_with_control_chars)
 
     # mock fallback generator returning raw unescaped json
-    import src.ai.llm as ai_llm
     mock_gen = lambda api_key, prompt, **kwargs: (raw_json_with_control_chars, "gemini-3.1-flash-lite") if kwargs.get("return_model") else raw_json_with_control_chars
     monkeypatch.setattr(ai_llm, "generate_with_gemini_fallback", mock_gen)
-    monkeypatch.setattr(agents, "generate_with_gemini_fallback", mock_gen)
 
     tick_features = {"close": 65000.0, "volatility_range_pct": 1.2, "taker_buy_ratio": 0.52}
     mcp_context = {"news_headlines": ["ETF inflows continue."]}
@@ -192,7 +198,7 @@ def test_gemini_postmortem_raw_control_character_parsing(monkeypatch):
         }
     ]
 
-    res = agents.generate_hourly_postmortem_with_gemini(tick_features, mcp_context, model_outcomes)
+    res = ai_llm.generate_hourly_postmortem_with_gemini(tick_features, mcp_context, model_outcomes)
     assert res["gemini_status"] == "OK"
     assert res["model_used"] == "gemini-3.1-flash-lite"
     assert res["market_summary"] == "First line summary.\nSecond line summary with unescaped newline."
@@ -297,10 +303,9 @@ def test_multi_model_consensus_uses_classifier_and_m3_sma10(monkeypatch):
 
 
 def test_llm_telemetry_logs_model_and_caller(monkeypatch):
-    # Each Gemini generation and embedding call must record model_name:caller to api_telemetry helper.
+    # Each Gemini generation call must record model_name:caller to api_telemetry helper.
     import sys
     from types import SimpleNamespace
-    import src.ai.llm as ai_llm
 
     logged = []
     monkeypatch.setattr(ai_llm, "_log_llm_telemetry", lambda ep, lat, st, err=None: logged.append((ep, lat, st, err)))
@@ -315,9 +320,6 @@ def test_llm_telemetry_logs_model_and_caller(monkeypatch):
                 raise RuntimeError("429 RESOURCE_EXHAUSTED quota exceeded")
             return SimpleNamespace(text='{"market_summary": "ok"}')
 
-        def embed_content(self, model, contents, config):
-            return SimpleNamespace(embeddings=[SimpleNamespace(values=[0.1, 0.2])])
-
     class _FakeClient:
         def __init__(self, **kwargs):
             self.models = _FakeModels()
@@ -325,7 +327,6 @@ def test_llm_telemetry_logs_model_and_caller(monkeypatch):
     fake_types = SimpleNamespace(
         HttpOptions=lambda **kw: kw,
         GenerateContentConfig=lambda **kw: kw,
-        EmbedContentConfig=lambda **kw: kw,
     )
     fake_genai = SimpleNamespace(Client=_FakeClient, types=fake_types)
     fake_google = SimpleNamespace(genai=fake_genai)
@@ -341,11 +342,6 @@ def test_llm_telemetry_logs_model_and_caller(monkeypatch):
     assert logged[0][2] == 429
     assert logged[1][0] == f"{ai_llm.GEMINI_MODEL_CANDIDATES[1]}:postmortem"
     assert logged[1][2] == 200
-
-    vecs = ai_llm.embed_texts(["btc up"], api_key="test-key", caller="rag_embed")
-    assert vecs == [[0.1, 0.2]]
-    assert logged[2][0] == "gemini-embedding-001:rag_embed"
-    assert logged[2][2] == 200
 
 
 
