@@ -40,4 +40,4 @@ jobs:
           LANGSMITH_PROJECT: ${{ secrets.LANGSMITH_PROJECT }}
           PYTHONPATH: .
         run: |
-          python scripts/run_hourly_worker.py
+          python scripts/run_hourly_worker.py --require-postgres
