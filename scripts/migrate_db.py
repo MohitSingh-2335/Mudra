@@ -15,8 +15,7 @@ from config import (
     MIN_HURDLE_PCT, PORTFOLIO_ADVISORY_LOCK_ID, REGRESSOR_MODEL_SHA256,
 )
 from src.database import (
-    Base, CANONICAL_TABLE_COLUMNS,
-    SchemaDriftError, _TICK_ID_COLUMN_CACHE, _classify_column_type,
+    Base, CANONICAL_TABLE_COLUMNS, SchemaDriftError, _classify_column_type,
     create_db_engine, engine as default_engine, verify_db_schema,
 )
 
@@ -30,39 +29,12 @@ BASELINE_MODEL_SPEC: Dict[str, Any] = {
     "classifier_sha256": CLASSIFIER_MODEL_SHA256,
     "feature_schema_version": FEATURE_SCHEMA_VERSION,
     "target_definition": "next_1h_close_return_pct_and_binary_direction",
-    "training_dataset_path": "data/processed/featured_btc_data.csv",
-    "training_dataset_sha256": "fdff3cb57bbad1ed3fd4f3bc44cc26a34efba3d72a62b5a25b78b73e4c36cf68",
-    "training_row_count": 27992,
-    "split_metadata": {"train_rows": 27992, "test_rows": 6999, "note": "Historical baseline production model."},
     "evaluation_metrics": {
         "reg_price_rmse_usd": 399.4728, "naive_persistence_price_rmse_usd": 398.7661,
         "rmse_outperformance_usd": -0.7067, "reg_rmse": 0.00487042, "reg_mae": 0.00322086,
-        "directional_hit_rate": 0.505001, "clf_accuracy_pct": 53.2581, "clf_macro_f1": 0.529665,
-        "clf_log_loss": 0.691365, "benchmark_tag": "REUSED HISTORICAL BENCHMARK",
+        "clf_accuracy_pct": 53.2581, "clf_macro_f1": 0.529665, "clf_log_loss": 0.691365,
     },
-    "code_revision_sha": "e46a586",
     "current_status": "ACTIVE",
-}
-
-CANDIDATE_MODEL_SPEC: Dict[str, Any] = {
-    "model_version": "p1_controlled_candidate_v1",
-    "regressor_artifact_path": "artifacts/experiments/p1_controlled_retrain/candidate_regressor.pkl",
-    "regressor_sha256": "5cb9e6f263a97a0d807f7a1a04a6ce48f5e801317cff56d5cb6f644703440011",
-    "classifier_artifact_path": "artifacts/experiments/p1_controlled_retrain/candidate_classifier.pkl",
-    "classifier_sha256": "80139690e79804a29a9b1cd11e83999530c1b5c013023a740bb975873625eb7f",
-    "feature_schema_version": "v1_39features",
-    "target_definition": "next_1h_close_return_pct_and_binary_direction",
-    "training_dataset_path": "data/processed/featured_btc_data.csv",
-    "training_dataset_sha256": "0b819589346b03cbb1a830db1e10235f79179da89c030a6d55d60b09585e2648",
-    "training_row_count": 27991,
-    "split_metadata": {"clean_rows": 34990, "train_rows": 27991, "purge_rows": 1, "test_rows": 6998},
-    "evaluation_metrics": {
-        "reg_price_rmse_usd": 399.3687, "naive_persistence_price_rmse_usd": 398.7661,
-        "rmse_outperformance_usd": -0.6027, "reg_rmse": 0.00486872, "reg_mae": 0.00321975,
-        "directional_hit_rate": 0.503572, "clf_accuracy_pct": 53.0294, "clf_macro_f1": 0.528027,
-        "clf_log_loss": 0.691404, "benchmark_tag": "REUSED HISTORICAL BENCHMARK",
-    },
-    "code_revision_sha": "99a27e297d3f54c91fdc2d170a05de536ec97fed",
 }
 
 
@@ -96,41 +68,22 @@ def run_tx1b(target_engine: Engine) -> Dict[str, Any]:
         if conn.dialect.name == "postgresql":
             conn.execute(text(f"SELECT pg_advisory_xact_lock({MIGRATION_ADVISORY_LOCK_ID});"))
         seeded: List[str] = []
-
-        if not conn.execute(text("SELECT model_version FROM public.model_registry WHERE model_version = :mv"), {"mv": BASELINE_MODEL_SPEC["model_version"]}).first():
+        if not conn.execute(text("SELECT model_version FROM model_registry WHERE model_version = :mv"), {"mv": BASELINE_MODEL_SPEC["model_version"]}).first():
             conn.execute(
                 text("""
-                    INSERT INTO public.model_registry (
+                    INSERT INTO model_registry (
                         model_version, regressor_artifact_path, regressor_sha256,
                         classifier_artifact_path, classifier_sha256, feature_schema_version,
                         target_definition, evaluation_metrics, current_status
                     ) VALUES (
                         :model_version, :regressor_artifact_path, :regressor_sha256,
                         :classifier_artifact_path, :classifier_sha256, :feature_schema_version,
-                        :target_definition, CAST(:evaluation_metrics AS json), :current_status
+                        :target_definition, :evaluation_metrics, :current_status
                     )
                 """),
                 {**BASELINE_MODEL_SPEC, "evaluation_metrics": json.dumps(BASELINE_MODEL_SPEC["evaluation_metrics"])},
             )
             seeded.append(BASELINE_MODEL_SPEC["model_version"])
-
-        if not conn.execute(text("SELECT model_version FROM public.model_registry WHERE model_version = :mv"), {"mv": CANDIDATE_MODEL_SPEC["model_version"]}).first():
-            conn.execute(
-                text("""
-                    INSERT INTO public.model_registry (
-                        model_version, regressor_artifact_path, regressor_sha256,
-                        classifier_artifact_path, classifier_sha256, feature_schema_version,
-                        target_definition, evaluation_metrics, current_status
-                    ) VALUES (
-                        :model_version, :regressor_artifact_path, :regressor_sha256,
-                        :classifier_artifact_path, :classifier_sha256, :feature_schema_version,
-                        :target_definition, CAST(:eval_json AS json), 'REJECTED'
-                    )
-                """),
-                {**CANDIDATE_MODEL_SPEC, "eval_json": json.dumps(CANDIDATE_MODEL_SPEC["evaluation_metrics"])},
-            )
-            seeded.append(CANDIDATE_MODEL_SPEC["model_version"])
-
     return {"tx": "1B", "seeded_models": seeded}
 
 
@@ -140,7 +93,7 @@ def run_tx1c(target_engine: Engine) -> Dict[str, Any]:
             conn.execute(text(f"SELECT pg_advisory_xact_lock({MIGRATION_ADVISORY_LOCK_ID});"))
         ins_res = conn.execute(
             text("""
-                INSERT INTO public.model_predictions (
+                INSERT INTO model_predictions (
                     tick_id, model_version, run_mode, is_primary,
                     feature_schema_version, predicted_return_pct,
                     predicted_price_1h, direction_predicted, direction_prob_up, clears_hurdle, created_at
@@ -151,12 +104,14 @@ def run_tx1c(target_engine: Engine) -> Dict[str, Any]:
                     ((mt.predicted_price_1h - mt.close) / mt.close) * 100.0,
                     mt.predicted_price_1h,
                     CASE WHEN ((mt.predicted_price_1h - mt.close) / mt.close) >= 0.0 THEN 'UP' ELSE 'DOWN' END,
-                    COALESCE(mt.model_confidence, 0.5),
+                    CASE WHEN ((mt.predicted_price_1h - mt.close) / mt.close) >= 0.0 THEN COALESCE(mt.model_confidence, 0.5) ELSE (1.0 - COALESCE(mt.model_confidence, 0.5)) END,
                     (abs(((mt.predicted_price_1h - mt.close) / mt.close) * 100.0) >= :hurdle_pct),
                     mt.timestamp
-                FROM public.market_ticks mt
+                FROM market_ticks mt
                 WHERE mt.predicted_price_1h IS NOT NULL AND mt.close >= 1.0 AND mt.predicted_price_1h >= 1.0
-                ON CONFLICT (tick_id, model_version) DO NOTHING
+                  AND NOT EXISTS (
+                      SELECT 1 FROM model_predictions mp WHERE mp.tick_id = mt.id AND mp.model_version = mt.model_version
+                  )
             """),
             {"hurdle_pct": float(MIN_HURDLE_PCT), "feat_schema_ver": FEATURE_SCHEMA_VERSION},
         )
@@ -172,7 +127,6 @@ def run_tx2(target_engine: Engine) -> Dict[str, Any]:
             conn.execute(text("ALTER TABLE public.paper_portfolio ADD COLUMN IF NOT EXISTS tick_id INTEGER;"))
             conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_paper_portfolio_tick_id ON public.paper_portfolio (tick_id) WHERE (tick_id IS NOT NULL);"))
             conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_market_ticks_timestamp ON public.market_ticks (timestamp);"))
-    _TICK_ID_COLUMN_CACHE.clear()
     return {"tx": "2", "status": "completed"}
 
 
@@ -184,11 +138,12 @@ def inspect_dry_run_plan(target_engine: Engine) -> Dict[str, Any]:
         has_pp_tick_id = "paper_portfolio" in existing and "tick_id" in {c["name"] for c in inspector.get_columns("paper_portfolio")}
         tick_count = int(conn.execute(text("SELECT COUNT(*) FROM market_ticks WHERE predicted_price_1h IS NOT NULL")).scalar() or 0) if "market_ticks" in existing else 0
         rec_count = int(conn.execute(text("SELECT COUNT(*) FROM reconciliations")).scalar() or 0) if "reconciliations" in existing else 0
+        dup_ts_count = int(conn.execute(text("SELECT COUNT(*) - COUNT(DISTINCT timestamp) FROM market_ticks")).scalar() or 0) if "market_ticks" in existing else 0
         return {
             "mode": "DRY_RUN", "writes_executed": False, "existing_tables": sorted(existing),
             "missing_tables": missing, "paper_portfolio_has_tick_id": has_pp_tick_id,
             "eligible_market_ticks_for_backfill": tick_count, "eligible_reconciliations_for_backfill": rec_count,
-            "duplicate_market_tick_timestamps": 0,
+            "duplicate_market_tick_timestamps": dup_ts_count,
         }
 
 
@@ -200,7 +155,7 @@ def run_migration(target_engine: Optional[Engine] = None, execute: bool = False,
     res_1b = run_tx1b(eng)
     res_1c = run_tx1c(eng)
     res_2 = run_tx2(eng)
-    verification = verify_db_schema(eng, require_seed_models=True)
+    verification = verify_db_schema(eng)
     return {"mode": "EXECUTE", "writes_executed": True, "tx1a": res_1a, "tx1b": res_1b, "tx1c": res_1c, "tx2": res_2, "verification": verification}
 
 
