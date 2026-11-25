@@ -6,7 +6,7 @@ Across **34,990 hours** of Binance market data under a strict leak-free chronolo
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://mudra-trading.streamlit.app)
 [![CI/CD Pipeline](https://github.com/MohitSingh-2335/Mudra/actions/workflows/ci.yml/badge.svg)](https://github.com/MohitSingh-2335/Mudra/actions/workflows/ci.yml)
 [![Hourly Worker](https://github.com/MohitSingh-2335/Mudra/actions/workflows/hourly_worker.yml/badge.svg)](https://github.com/MohitSingh-2335/Mudra/actions/workflows/hourly_worker.yml)
-[![Tests Passing](https://img.shields.io/badge/pytest-98%20passed-00C087?logo=pytest&logoColor=white)](https://github.com/MohitSingh-2335/Mudra)
+[![Tests Passing](https://img.shields.io/badge/pytest-93%20passed-00C087?logo=pytest&logoColor=white)](https://github.com/MohitSingh-2335/Mudra)
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![LangGraph](https://img.shields.io/badge/Orchestration-LangGraph-8A2BE2)](https://langchain-ai.github.io/langgraph/)
 [![PostgreSQL](https://img.shields.io/badge/Database-Neon%20PostgreSQL-00E599?logo=postgresql&logoColor=white)](https://neon.tech/)
@@ -73,7 +73,7 @@ flowchart LR
 - **Layer 1 — LLM & Structured Post-Mortems ([`src/ai/llm.py`](src/ai/llm.py)):** Official `google-genai` SDK candidate fallback (`gemini-3.1-flash-lite` chain), strict Pydantic schemas (`HourlyPostmortemOutput`, `MarketAnalystReport`), LangSmith `@traceable` secret bridging, HTTP `429` cooldowns, and per-model `api_telemetry` tracking.
 - **Layer 2 — Real FastMCP `stdio` Client ([`src/ai/mcp_client.py`](src/ai/mcp_client.py), [`src/mcp_server.py`](src/mcp_server.py)):** Spawns the FastMCP server over `mcp_stdio` with isolated per-tool timeouts (`6s` for Deribit/Kraken perpetual funding & 6h CryptoCompare/RSS headlines; `8s` for Neon error memories) so slow DB wakes never starve live market feeds.
 - **Layer 3 — Quota-Free Local RAG ([`src/ai/rag.py`](src/ai/rag.py)):** ChromaDB (`mudra_rag_minilm_v1`) powered by CPU ONNX MiniLM embeddings (`DefaultEmbeddingFunction()`, zero remote embedding quota burn) storing quantitative regime rules hydrated with reconciled Neon prediction episodes.
-- **Layer 4 — 2-Node LangGraph Council ([`src/ai/workflow.py`](src/ai/workflow.py)):** `StateGraph` (`strategist_node` -> `risk_critic_node`) with deterministic fee-hurdle and `3.8%` volatility risk gates. Uses `use_llm=False` in automated hourly cycles to preserve quota and `use_llm=True` with multi-model classifier consensus for on-demand UI/API deliberations ([`src/agents.py`](src/agents.py) acts as a backward-compatible shim).
+- **Layer 4 — 2-Node LangGraph Council ([`src/ai/workflow.py`](src/ai/workflow.py)):** `StateGraph` (`strategist_node` -> `risk_critic_node`) with deterministic fee-hurdle and `3.8%` volatility risk gates. Uses `use_llm=False` in automated hourly cycles to preserve quota and `use_llm=True` with multi-model classifier consensus for on-demand UI/API deliberations.
 
 ### Production MLOps Invariants & Neon Schema
 - **Artifact & Feature Integrity:** Fail-closed SHA-256 verification before `joblib` deserialization ([`src/model_loader.py`](src/model_loader.py)) and strict schema/NaN/order enforcement prior to inference ([`src/feature_engineering.py`](src/feature_engineering.py)).
@@ -90,7 +90,7 @@ git clone https://github.com/MohitSingh-2335/Mudra.git
 cd Mudra
 
 pip install -r requirements.txt
-pytest tests/ -q                     # 98 passed (causality, SHA-256, engine, DB, AI layers)
+pytest tests/ -q                     # 93 passed (causality, SHA-256, engine, DB, AI layers)
 streamlit run app.py                 # Dashboard at http://localhost:8501
 uvicorn src.api:app --port 8000      # FastAPI endpoints (/health, /predict, /explain, /analyze, /agents/trade)
 python scripts/run_hourly_worker.py  # Single ingestion, M1/M2/M3 inference, T+1h reconciliation & audit cycle
@@ -104,7 +104,7 @@ Mudra/
 ├── Dockerfile / docker-compose.yml
 ├── requirements.txt
 ├── .github/workflows/
-│   ├── ci.yml                    # Pytest suite (PostgreSQL 16 service) + Docker build check
+│   ├── ci.yml                    # Pytest suite + Docker image build validation
 │   ├── hourly_worker.yml         # Autonomous :15 UTC ingestion, reconciliation & post-mortem cron
 │   └── keep_streamlit_awake.yml  # Periodic health ping for hosted dashboard
 ├── artifacts/models/             # SHA-256 verified M1/M2/M3 artifacts & JSON manifests
@@ -115,13 +115,12 @@ Mudra/
 │   ├── reports/                  # Phase evaluations & Model Evolution Ledger
 │   └── images/                   # Proof figures
 ├── scripts/
-│   ├── run_hourly_worker.py      # Production hourly worker CLI + local outbox flush
+│   ├── run_hourly_worker.py      # Production hourly worker CLI
 │   ├── run_pipeline.py           # Training, evaluation & SHAP generation pipeline
 │   ├── migrate_db.py             # Schema verification & model registry seeder
 │   └── generate_readme_figures.py
 ├── src/
 │   ├── ai/                       # Modular 4-layer stack: llm.py, mcp_client.py, rag.py, workflow.py
-│   ├── agents.py                 # Backward-compatible re-export shim for src.ai
 │   ├── mcp_server.py             # FastMCP stdio tool server (Deribit/Kraken, CryptoCompare/RSS, Neon)
 │   ├── engine.py                 # Exchange ingestion, T+1h reconciliation, consensus & paper ledger
 │   ├── explainability.py         # Global & per-row TreeSHAP attribution (CalibratedClassifierCV unwrapping)
@@ -131,7 +130,7 @@ Mudra/
 │   ├── model_loader.py           # Fail-closed SHA-256 verification & multi-model registry discovery
 │   ├── backtesting.py            # Chronological backtest & fee-hurdle sweep simulator
 │   └── api.py                    # FastAPI REST service & Pydantic v2 schemas
-└── tests/                        # 98 automated unit & integration tests (pytest)
+└── tests/                        # 93 automated unit & integration tests (pytest)
 ```
 
 ---
