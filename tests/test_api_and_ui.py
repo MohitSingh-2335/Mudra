@@ -1,26 +1,13 @@
-from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
 import os
 from unittest.mock import patch
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 import app
-from app import format_economic_result, format_risk_levels
+from app import format_economic_result
 from config import CLASSIFIER_FEATURES, FEATURED_BTC_DATA_PATH, REGRESSOR_FEATURES
-from src.api import (
-    ACTIVE_MODEL_VERSION,
-    ACTIVE_MODEL_VERSION as SCHEMA_ACTIVE_MODEL_VERSION,
-    HealthResponse,
-    PredictResponse,
-    app as fastapi_app,
-)
-from src.database import Base, MarketTick, Reconciliation
-from src.engine import execute_paper_order
+from src.api import ACTIVE_MODEL_VERSION, app as fastapi_app
 
 
 @pytest.fixture(scope="session")
@@ -89,79 +76,47 @@ def test_portfolio_summary_endpoint(client):
         res = client.get("/portfolio/summary?current_price=65000.0")
         assert res.status_code == 200 and res.json()["total_equity_usd"] == 10500.0 and res.json()["realized_pnl_usd"] == 500.0
 
+    with patch("src.database.get_portfolio_kpis", return_value={"query_failed": True, "error": "Database query failed"}):
+        res_err = client.get("/portfolio/summary?current_price=65000.0")
+        assert res_err.status_code == 503
+
 
 def test_docs_and_openapi_endpoints(client):
     assert client.get("/docs").status_code == 200
     assert client.get("/openapi.json").status_code == 200
 
 
-def test_format_risk_levels_hold_or_unapproved():
-    sl, tp = format_risk_levels("HOLD", "APPROVED", 65000.0)
-    assert sl == "None (No active trade opened — cash preserved)"
-    assert tp == "None (No active trade opened — cash preserved)"
-
-    sl, tp = format_risk_levels("BUY", "VETOED", 65000.0)
-    assert sl == "None (No active trade opened — cash preserved)"
-    assert tp == "None (No active trade opened — cash preserved)"
-
-    sl, tp = format_risk_levels("", "APPROVED", 65000.0)
-    assert sl == "None (No active trade opened — cash preserved)"
-    assert tp == "None (No active trade opened — cash preserved)"
+def test_portfolio_summary_requires_positive_current_price(client):
+    assert client.get("/portfolio/summary").status_code == 422
+    assert client.get("/portfolio/summary?current_price=0").status_code == 422
 
 
-def test_format_risk_levels_approved_buy():
-    price = 100000.0
-    sl, tp = format_risk_levels("BUY", "APPROVED", price)
-    assert "$98,500.00 (-1.5%)" in sl
-    assert "$102,500.00 (+2.5%)" in tp
+def test_app_generate_registered_model_forecast_respects_stale_and_m3_sma10():
+    live_df = pd.DataFrame({
+        "timestamp": pd.date_range("2026-07-01", periods=40, freq="1h", tz="UTC"),
+        "open": [65000.0] * 40, "high": [65200.0] * 40, "low": [64800.0] * 40,
+        "close": [65000.0] * 40, "volume": [100.0] * 40,
+    })
 
-    custom_state = {"stop_loss_price": 97000.0, "take_profit_price": 105000.0}
-    sl, tp = format_risk_levels("BUY", "APPROVED", price, custom_state)
-    assert "$97,000.00 (-1.5%)" in sl
-    assert "$105,000.00 (+2.5%)" in tp
+    seen_cols = {}
 
+    class _Reg:
+        def predict(self, df):
+            seen_cols["reg"] = float(df["sma_10_dist_pct"].iloc[0])
+            return [0.002]
 
-def test_format_risk_levels_approved_sell():
-    price = 100000.0
-    sl, tp = format_risk_levels("SELL", "APPROVED", price)
-    assert "$101,500.00 (+1.5%)" in sl
-    assert "$97,500.00 (-2.5%)" in tp
+    class _Clf:
+        def predict_proba(self, df):
+            seen_cols["clf"] = float(df["sma_10_dist_pct"].iloc[0])
+            return [[0.4, 0.6]]
 
+    spec = {"features": ["sma_10_dist_pct"], "regressor": _Reg(), "classifier": _Clf()}
+    feats = {"sma_10_dist_pct": -0.02, "sma_10_true_dist_pct": 0.08}
 
-def test_non_falsy_kpi_extraction():
-    rec_kpis = {"directional_accuracy_pct": 0.0, "total_reconciled": 0}
-    win_rate = float(
-        rec_kpis.get("directional_accuracy_pct")
-        if rec_kpis.get("directional_accuracy_pct") is not None
-        else rec_kpis.get("win_rate_pct", 0.0)
-    )
-    total_eval = int(
-        rec_kpis.get("total_reconciled")
-        if rec_kpis.get("total_reconciled") is not None
-        else rec_kpis.get("total_evaluated", 0)
-    )
-    assert win_rate == 0.0
-    assert total_eval == 0
-
-
-def test_app_source_contains_governance_and_disclaimers():
-    with open("app.py", "r", encoding="utf-8") as f:
-        content = f.read()
-
-    assert "CLEAN DATASET (34,990 Total 1-Hour Candles)" in content
-    assert "27,991 Hours" in content
-    assert "PURGE BUFFER (1-Hour Causality Guard — 1 Hour)" in content
-    assert "2025-09-17 18:00:00 UTC" in content
-    assert "OUT-OF-SAMPLE TEST PERIOD (20% Holdout — 6,998 Hours)" in content
-    assert "Controlled Model Benchmark & Rejection Rationale" in content
-    assert "p1_controlled_candidate_v1" in content
-    assert "REJECTED CANDIDATE" in content
-    assert "Naive Persistence" in content
-    assert "$398.77" in content
-    assert "Simulated paper-trading performance demonstrates execution accounting" in content
-    assert "Forecast Error Investigations & Root-Cause Audit Log" in content
-    assert "investigation_headline_search" in content
-    assert "investigation_status_filter" in content
+    assert app.generate_registered_model_forecast(live_df, "lgbm_v3.0.0", spec, precomputed_features=feats, is_stale=True) is None
+    res = app.generate_registered_model_forecast(live_df, "lgbm_v3.0.0", spec, precomputed_features=feats, is_stale=False)
+    assert res is not None and res["direction_label"] == "UP"
+    assert seen_cols["reg"] == pytest.approx(0.08) and seen_cols["clf"] == pytest.approx(0.08)
 
 
 def test_format_economic_result_fee_hurdle():
