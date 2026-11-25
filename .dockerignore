@@ -25,15 +25,22 @@ ENV/
 .vscode/
 .idea/
 
-# Large Experiment Logs & Research Notes
+# Large Experiment Logs, Scratch Data & Private Notes
 mlruns/
 archive/
 reports/
+discussions/
 experiments/
+AGENTS.md
+data/chromadb/
+data/chromadb*/
+data/proof/
+data/results/
 
 # Temporary files & Logs
 *.log
 scratch/
+scripts/scratch/
 test_*.py
 
 # Raw Market Dumps (Keep only processed data)
