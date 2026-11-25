@@ -5,24 +5,19 @@ Contains SQLAlchemy ORM models, resilient connection pooling, schema drift verif
 and analytical queries for the quantitative trading engine and audit council.
 """
 from contextlib import contextmanager
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import logging
-import math
 import os
 from pathlib import Path
-import re
-import sys
 import time
 import tomllib
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
-import numpy as np
 import pandas as pd
 from sqlalchemy import (
     Boolean, CheckConstraint, Column, DateTime, Engine, Float, ForeignKey,
     ForeignKeyConstraint, Index, Integer, JSON, String, Text, UniqueConstraint,
-    create_engine, desc, inspect, select, text,
+    create_engine, desc, func, inspect, select, text,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
 
@@ -69,10 +64,6 @@ class MarketTick(Base):
     paper_portfolios = relationship("PaperPortfolio", back_populates="tick", foreign_keys="PaperPortfolio.tick_id", uselist=True)
     predictions = relationship("ModelPrediction", back_populates="tick", foreign_keys="ModelPrediction.tick_id", uselist=True)
     outcome_predictions = relationship("ModelPrediction", back_populates="outcome_tick", foreign_keys="ModelPrediction.outcome_tick_id", uselist=True)
-
-    @property
-    def council_audit(self) -> Optional["CouncilAudit"]:
-        return self.council_audits[-1] if self.council_audits else None
 
 
 class ApiTelemetry(Base):
@@ -303,26 +294,7 @@ CANONICAL_TABLE_COLUMNS: Dict[str, List[Tuple[str, str, bool]]] = {
     "hourly_postmortems": [("id", "integer", False), ("tick_id", "integer", False), ("news_headlines", "json", True), ("feature_snapshot", "json", True), ("gemini_full_analysis", "json", True), ("gemini_status", "varchar", False), ("error_detail", "text", True), ("created_at", "timestamp", False)],
 }
 
-CANONICAL_FOREIGN_KEYS = [
-    ("fk_council_audits_tick_id", "council_audits", "tick_id", "market_ticks", "id"),
-    ("fk_reconciliations_tick_id", "reconciliations", "tick_id", "market_ticks", "id"),
-    ("fk_paper_portfolio_tick_id", "paper_portfolio", "tick_id", "market_ticks", "id"),
-    ("fk_hourly_postmortems_tick_id", "hourly_postmortems", "tick_id", "market_ticks", "id"),
-]
-
-CANONICAL_CONSTRAINTS = [
-    ("chk_council_audits_action", "council_audits", "c", None, "strategist_action in ('BUY', 'SELL', 'HOLD')"),
-    ("chk_council_audits_verdict", "council_audits", "c", None, "risk_verdict in ('APPROVED', 'VETOED')"),
-    ("chk_model_registry_status", "model_registry", "c", None, "current_status in ('CANDIDATE', 'ACTIVE', 'REJECTED', 'ARCHIVED', 'ROLLED_BACK')"),
-]
-
-CANONICAL_INDEXES = [
-    ("uq_model_registry_single_active", "model_registry", True, ["current_status"], "WHERE current_status = 'ACTIVE'"),
-    ("uq_paper_portfolio_tick_id", "paper_portfolio", True, ["tick_id"], "WHERE tick_id IS NOT NULL"),
-]
-
-
-def verify_db_schema(target_engine_or_conn: Optional[Any] = None, require_seed_models: bool = False) -> Dict[str, Any]:
+def verify_db_schema(target_engine_or_conn: Optional[Any] = None) -> Dict[str, Any]:
     target = target_engine_or_conn or engine
 
     @contextmanager
@@ -450,12 +422,7 @@ def get_db() -> Generator[Session, None, None]:
         session.close()
 
 
-_TICK_ID_COLUMN_CACHE: Dict[int, bool] = {}
-
-
-def has_tick_id_column(session: Any = None) -> bool:
-    # returns True as paper_portfolio table includes the canonical tick_id column
-    return True
+_TICK_ID_UNUSED = None
 
 
 def init_db(target_engine: Optional[Engine] = None) -> None:
@@ -482,9 +449,6 @@ def test_connection() -> Tuple[bool, str, float]:
 # 4. ANALYTICAL QUERIES & ROOT-CAUSE INVESTIGATIONS
 # ---------------------------------------------------------------------------
 
-ALLOWED_VERIFICATION_STATUSES = frozenset({"UNVERIFIED_HYPOTHESIS", "CONFIRMED_CAUSE", "REFUTED", "APPROVED_FOR_TRAINING"})
-
-
 def get_latest_market_ticks(limit: int = 100) -> pd.DataFrame:
     try:
         with get_db() as session:
@@ -499,65 +463,60 @@ def get_latest_market_ticks(limit: int = 100) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _prediction_to_reconciliation_dict(cp: ModelPrediction, tick_ts: Any, start_price: Any) -> Dict[str, Any]:
+    ts = cp.reconciled_at or tick_ts
+    fallback_start = (
+        float(cp.predicted_price_1h) / (1.0 + float(cp.predicted_return_pct or 0.0) / 100.0)
+        if cp.predicted_price_1h else None
+    )
+    return {
+        "id": cp.id,
+        "timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+        "tick_id": cp.tick_id,
+        "start_price": float(start_price) if start_price is not None else fallback_start,
+        "predicted_price": cp.predicted_price_1h,
+        "actual_price_at_t_plus_1": cp.actual_price_at_t_plus_1,
+        "predicted_return_pct": cp.predicted_return_pct,
+        "actual_return_pct": cp.actual_return_pct,
+        "residual_error": cp.residual_error,
+        "absolute_error_usd": cp.absolute_error_usd,
+        "percentage_error": cp.percentage_error,
+        "direction_predicted": cp.direction_predicted,
+        "direction_realized": cp.direction_realized,
+        "direction_correct": cp.direction_correct,
+        "is_black_swan": (cp.error_attribution_tag == "BLACK_SWAN_OUTLIER"),
+        "error_attribution_tag": cp.error_attribution_tag,
+        "model_version": cp.model_version,
+        "diagnosis_summary": cp.diagnosis_summary,
+    }
+
+
 def get_reconciliation_history(limit: int = 500, model_version: Optional[str] = None) -> pd.DataFrame:
-    # returns unified ground-truth evaluations across all registered models
+    # Returns unified ground-truth evaluations across all registered models
     try:
         with get_db() as session:
-            raw_data = []
+            raw_data: List[Dict[str, Any]] = []
 
-            # 1. query unified model predictions (primary and candidate models)
             try:
                 cand_stmt = (
-                    select(
-                        ModelPrediction,
-                        MarketTick.timestamp.label("tick_ts"),
-                        MarketTick.close.label("start_price"),
-                    )
+                    select(ModelPrediction, MarketTick.timestamp.label("tick_ts"), MarketTick.close.label("start_price"))
                     .join(MarketTick, ModelPrediction.tick_id == MarketTick.id)
                     .where(ModelPrediction.outcome_tick_id.isnot(None))
                 )
                 if model_version and model_version != "All Models":
                     cand_stmt = cand_stmt.where(ModelPrediction.model_version == model_version)
-                for cp, tick_ts, start_price in session.execute(
-                    cand_stmt.order_by(desc(ModelPrediction.reconciled_at)).limit(limit)
-                ).all():
-                    ts = cp.reconciled_at or tick_ts
-                    raw_data.append({
-                        "id": cp.id,
-                        "timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
-                        "tick_id": cp.tick_id,
-                        "start_price": float(start_price) if start_price is not None else (float(cp.predicted_price_1h) / (1.0 + float(cp.predicted_return_pct or 0.0) / 100.0) if cp.predicted_price_1h else None),
-                        "predicted_price": cp.predicted_price_1h,
-                        "actual_price_at_t_plus_1": cp.actual_price_at_t_plus_1,
-                        "predicted_return_pct": cp.predicted_return_pct,
-                        "actual_return_pct": cp.actual_return_pct,
-                        "residual_error": cp.residual_error,
-                        "absolute_error_usd": cp.absolute_error_usd,
-                        "percentage_error": cp.percentage_error,
-                        "direction_predicted": cp.direction_predicted,
-                        "direction_realized": cp.direction_realized,
-                        "direction_correct": cp.direction_correct,
-                        "is_black_swan": (cp.error_attribution_tag == "BLACK_SWAN_OUTLIER"),
-                        "error_attribution_tag": cp.error_attribution_tag,
-                        "model_version": cp.model_version,
-                        "diagnosis_summary": getattr(cp, "diagnosis_summary", None),
-                    })
+                for cp, tick_ts, start_price in session.execute(cand_stmt.order_by(desc(ModelPrediction.reconciled_at)).limit(limit)).all():
+                    raw_data.append(_prediction_to_reconciliation_dict(cp, tick_ts, start_price))
             except Exception as c_err:
                 logger.warning("Failed to query model predictions: %s", c_err)
 
-            # 2. query historical reconciliations archive (model 1 historical records)
             try:
-                stmt = select(
-                    Reconciliation,
-                    MarketTick.model_version,
-                    MarketTick.close.label("start_price"),
-                ).outerjoin(MarketTick, Reconciliation.tick_id == MarketTick.id)
+                stmt = select(Reconciliation, MarketTick.model_version, MarketTick.close.label("start_price")).outerjoin(MarketTick, Reconciliation.tick_id == MarketTick.id)
                 if model_version and model_version != "All Models":
                     stmt = stmt.where(MarketTick.model_version == model_version)
-                rows = session.execute(stmt.order_by(desc(Reconciliation.timestamp)).limit(limit)).all()
-                for r, m_ver, start_price in rows:
+                for r, m_ver, start_price in session.execute(stmt.order_by(desc(Reconciliation.timestamp)).limit(limit)).all():
                     item = r.to_dict()
-                    item["model_version"] = m_ver or "xgb_onnx_v1.0.0"
+                    item["model_version"] = m_ver or ACTIVE_MODEL_VERSION
                     item["start_price"] = float(start_price) if start_price is not None else None
                     item["diagnosis_summary"] = None
                     raw_data.append(item)
@@ -567,15 +526,13 @@ def get_reconciliation_history(limit: int = 500, model_version: Optional[str] = 
             if not raw_data:
                 return pd.DataFrame()
 
-            # 3. deduplicate by (tick_id, model_version), keeping model_predictions preference
             seen = set()
             deduped = []
             for item in raw_data:
                 key = (item.get("tick_id"), item.get("model_version"))
-                if key in seen:
-                    continue
-                seen.add(key)
-                deduped.append(item)
+                if key not in seen:
+                    seen.add(key)
+                    deduped.append(item)
 
             df = pd.DataFrame(deduped)
             df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -607,10 +564,7 @@ def get_reconciliation_kpis(lookback_hours: Optional[int] = 168, model_version: 
 def get_portfolio_history(limit: Optional[int] = 500) -> pd.DataFrame:
     try:
         with get_db() as session:
-            if limit:
-                stmt = select(PaperPortfolio).order_by(desc(PaperPortfolio.id)).limit(limit)
-            else:
-                stmt = select(PaperPortfolio).order_by(PaperPortfolio.id.asc())
+            stmt = select(PaperPortfolio).order_by(desc(PaperPortfolio.id)).limit(limit) if limit else select(PaperPortfolio).order_by(PaperPortfolio.id.asc())
             records = session.execute(stmt).scalars().all()
             if not records:
                 return pd.DataFrame()
@@ -629,12 +583,8 @@ def get_portfolio_kpis(current_price: float) -> Dict[str, Any]:
             return get_portfolio_summary(session, current_price=current_price)
     except Exception as exc:
         logger.warning("Failed to fetch portfolio KPIs: %s", type(exc).__name__)
-        return {
-            "cash_balance": 10000.0, "btc_balance": 0.0, "current_btc_price": round(current_price, 2),
-            "btc_position_value_usd": 0.0, "total_equity_usd": 10000.0, "cumulative_return_pct": 0.0,
-            "benchmark_btc_equity": 10000.0, "alpha_usd": 0.0, "alpha_pct": 0.0, "realized_pnl_usd": 0.0,
-            "total_fees_usd": 0.0, "drawdown_pct": 0.0, "total_trades": 0,
-        }
+        # Omit fake $10k fields so callers display Unavailable instead of fabricated equity
+        return {"query_failed": True, "error": "Database query failed"}
 
 
 def get_latest_council_audit() -> Optional[Dict[str, Any]]:
@@ -648,14 +598,10 @@ def get_latest_council_audit() -> Optional[Dict[str, Any]]:
 
 
 def log_telemetry(
-    session: Optional[Session],
-    service: str,
-    endpoint: str,
-    latency_ms: float,
-    status_code: int,
-    error_msg: Optional[str] = None,
+    session: Optional[Session], service: str, endpoint: str,
+    latency_ms: float, status_code: int, error_msg: Optional[str] = None,
 ) -> None:
-    # logs external service call latency and status code into api_telemetry table
+    # Logs external service call latency and status code into api_telemetry table
     if "PYTEST_CURRENT_TEST" in os.environ or session is None:
         return
     try:
@@ -669,22 +615,18 @@ def log_telemetry(
                 error_message=str(error_msg) if error_msg else None,
             ))
             session.flush()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Telemetry write skipped (%s/%s): %s", service, endpoint, type(exc).__name__)
 
 
 def get_api_telemetry_summary(hours: int = 24) -> Dict[str, Any]:
-    # calculates api telemetry call counts, success rate, and average latency over rolling window
-    default_res = {"total_calls": 0, "success_rate_pct": 100.0, "avg_latency_ms": 0.0}
+    # Computes 24h external API health without claiming 100% when 0 calls or query fails
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         with get_db() as s:
-            rows = s.execute(
-                select(ApiTelemetry.status_code, ApiTelemetry.latency_ms)
-                .where(ApiTelemetry.timestamp >= cutoff)
-            ).all()
+            rows = s.execute(select(ApiTelemetry.status_code, ApiTelemetry.latency_ms).where(ApiTelemetry.timestamp >= cutoff)).all()
             if not rows:
-                return default_res
+                return {"total_calls": 0, "success_rate_pct": None, "avg_latency_ms": 0.0, "query_failed": False}
             total = len(rows)
             successes = sum(1 for r in rows if 200 <= int(r[0] or 0) < 400)
             avg_lat = sum(float(r[1] or 0.0) for r in rows) / total
@@ -692,13 +634,14 @@ def get_api_telemetry_summary(hours: int = 24) -> Dict[str, Any]:
                 "total_calls": total,
                 "success_rate_pct": round((successes / total) * 100.0, 1),
                 "avg_latency_ms": round(avg_lat, 1),
+                "query_failed": False,
             }
     except Exception:
-        return default_res
+        return {"total_calls": 0, "success_rate_pct": None, "avg_latency_ms": 0.0, "query_failed": True}
 
 
 def get_model_reconciled_counts() -> Dict[str, int]:
-    # Returns true lifetime reconciled hour counts per registered model from Neon.
+    # Returns true lifetime reconciled hour counts per registered model from Neon
     try:
         with get_db() as s:
             rows = s.execute(
@@ -707,17 +650,17 @@ def get_model_reconciled_counts() -> Dict[str, int]:
                 .group_by(ModelPrediction.model_version)
             ).all()
             counts = {str(ver): int(cnt) for ver, cnt in rows if ver}
-            if ACTIVE_MODEL_VERSION not in counts:
-                rec_cnt = int(s.execute(select(func.count(Reconciliation.id))).scalar() or 0)
-                if rec_cnt > 0:
-                    counts[ACTIVE_MODEL_VERSION] = rec_cnt
+            rec_cnt = int(s.execute(select(func.count(Reconciliation.id))).scalar() or 0)
+            if rec_cnt > counts.get(ACTIVE_MODEL_VERSION, 0):
+                counts[ACTIVE_MODEL_VERSION] = rec_cnt
             return counts
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to count model reconciliations: %s", type(exc).__name__)
         return {}
 
 
 def get_latest_hourly_postmortems(limit: int = 3) -> List[Dict[str, Any]]:
-    # Fetches recent Gemini post-mortem diagnoses, headlines, and per-row TreeSHAP drivers.
+    # Fetches recent Gemini post-mortem diagnoses, headlines, and per-row TreeSHAP drivers
     try:
         with get_db() as s:
             rows = s.execute(
@@ -726,9 +669,8 @@ def get_latest_hourly_postmortems(limit: int = 3) -> List[Dict[str, Any]]:
                 .order_by(desc(HourlyPostmortem.id))
                 .limit(max(1, min(int(limit), 20)))
             ).all()
-            out: List[Dict[str, Any]] = []
-            for pm, tick_ts in rows:
-                out.append({
+            return [
+                {
                     "id": pm.id,
                     "tick_id": pm.tick_id,
                     "tick_timestamp": tick_ts.isoformat() if hasattr(tick_ts, "isoformat") else str(tick_ts or ""),
@@ -737,24 +679,21 @@ def get_latest_hourly_postmortems(limit: int = 3) -> List[Dict[str, Any]]:
                     "news_headlines": pm.news_headlines or [],
                     "gemini_full_analysis": pm.gemini_full_analysis or {},
                     "error_detail": pm.error_detail,
-                })
-            return out
+                }
+                for pm, tick_ts in rows
+            ]
     except Exception:
         return []
 
 
 def get_api_telemetry_breakdown(hours: int = 24) -> List[Dict[str, Any]]:
-    # Summarizes rolling 24h external API calls by service, endpoint, and HTTP status code.
+    # Summarizes rolling 24h external API calls by service, endpoint, and HTTP status code
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         with get_db() as s:
             rows = s.execute(
-                select(
-                    ApiTelemetry.service_name,
-                    ApiTelemetry.endpoint,
-                    ApiTelemetry.status_code,
-                    ApiTelemetry.latency_ms,
-                ).where(ApiTelemetry.timestamp >= cutoff)
+                select(ApiTelemetry.service_name, ApiTelemetry.endpoint, ApiTelemetry.status_code, ApiTelemetry.latency_ms)
+                .where(ApiTelemetry.timestamp >= cutoff)
             ).all()
             if not rows:
                 return []
@@ -762,38 +701,21 @@ def get_api_telemetry_breakdown(hours: int = 24) -> List[Dict[str, Any]]:
             for svc, ep, code, lat in rows:
                 buckets.setdefault((str(svc), str(ep), int(code or 0)), []).append(float(lat or 0.0))
             return [
-                {
-                    "Service": svc,
-                    "Endpoint": ep,
-                    "Status": code,
-                    "Calls": len(lats),
-                    "Avg ms": round(sum(lats) / len(lats), 1),
-                }
+                {"Service": svc, "Endpoint": ep, "Status": code, "Calls": len(lats), "Avg ms": round(sum(lats) / len(lats), 1)}
                 for (svc, ep, code), lats in sorted(buckets.items(), key=lambda kv: (-len(kv[1]), kv[0]))
             ]
     except Exception:
         return []
 
 
-# ---------------------------------------------------------------------------
-# 5. RETRO-COMPATIBILITY MAPPINGS
-# ---------------------------------------------------------------------------
-# internal module aliases for backward compatibility within this module
-this_mod = sys.modules.get(__name__)
-if this_mod is not None:
-    connection = this_mod
-    models = this_mod
-    queries = this_mod
-
 __all__ = [
     "Base", "MarketTick", "ApiTelemetry", "CouncilAudit", "Reconciliation",
     "PaperPortfolio", "ModelRegistry", "ModelPrediction", "HourlyPostmortem",
-    "SchemaDriftError", "CANONICAL_TABLE_COLUMNS", "CANONICAL_FOREIGN_KEYS",
-    "CANONICAL_CONSTRAINTS", "CANONICAL_INDEXES", "verify_db_schema",
+    "SchemaDriftError", "CANONICAL_TABLE_COLUMNS", "verify_db_schema",
     "get_database_url", "create_db_engine", "engine", "SessionLocal", "get_db",
-    "has_tick_id_column", "init_db", "test_connection", "_classify_column_type",
-    "_TICK_ID_COLUMN_CACHE", "get_latest_market_ticks", "get_reconciliation_history",
-    "get_reconciliation_kpis", "get_portfolio_history", "get_portfolio_kpis",
-    "get_latest_council_audit", "log_telemetry", "get_api_telemetry_summary",
-    "get_model_reconciled_counts", "get_latest_hourly_postmortems", "get_api_telemetry_breakdown",
+    "init_db", "test_connection", "_classify_column_type", "get_latest_market_ticks",
+    "get_reconciliation_history", "get_reconciliation_kpis", "get_portfolio_history",
+    "get_portfolio_kpis", "get_latest_council_audit", "log_telemetry",
+    "get_api_telemetry_summary", "get_model_reconciled_counts",
+    "get_latest_hourly_postmortems", "get_api_telemetry_breakdown",
 ]
