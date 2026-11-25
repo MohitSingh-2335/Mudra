@@ -57,7 +57,7 @@ from config import (
     ROUND_TRIP_FRICTION_PCT, TOTAL_FRICTION_PER_SIDE_PCT,
 )
 from src.ai.mcp_client import fetch_mcp_context
-from src.ai.rag import get_rag_collection, get_rag_embedding_mode, query_similar_error_memories
+from src.ai.rag import get_rag_collection, get_rag_cooldown_remaining_sec, get_rag_embedding_mode, query_similar_error_memories
 from src.ai.workflow import fetch_historical_candles, get_multi_model_consensus, run_trading_graph
 from src.database import (
     get_api_telemetry_breakdown, get_api_telemetry_summary, get_latest_council_audit,
@@ -887,6 +887,88 @@ def format_ground_truth_diagnosis(row) -> str:
     return f"Noise Filtered: Sub-hurdle move ({act_ret:+.2f}%); correctly held cash."
 
 
+def render_ground_truth_html_table(df_subset: pd.DataFrame) -> None:
+    # Render dark-theme HTML table so multi-line AI diagnoses wrap in full without ellipsis clipping.
+    if df_subset.empty:
+        st.info("No records to display.")
+        return
+
+    def _badge(text: str, bg: str, color: str, border: str, bold: bool = False) -> str:
+        weight = "700" if bold else "600"
+        return (
+            f'<span style="background: {bg}; color: {color}; border: 1px solid {border}; '
+            f'padding: 2px 8px; border-radius: 4px; font-weight: {weight}; font-size: 0.72rem; '
+            f'white-space: nowrap;">{html.escape(text)}</span>'
+        )
+
+    rows_html = []
+    for idx, (_, row) in enumerate(df_subset.iterrows()):
+        bg_color = "#0D1117" if idx % 2 == 0 else "#111620"
+        pred_dir = str(row.get("Pred Dir", "—")).upper()
+        actual_dir = str(row.get("Actual Dir", "—")).upper()
+        result_val = str(row.get("Result", "—"))
+        diag_val = str(row.get("AI Diagnosis (1-Line)", row.get("AI Diagnosis", "—")))
+
+        dir_map = {
+            "UP": ("rgba(46, 160, 67, 0.15)", "#3FB950", "rgba(46, 160, 67, 0.3)"),
+            "DOWN": ("rgba(248, 81, 73, 0.15)", "#F85149", "rgba(248, 81, 73, 0.3)"),
+        }
+        pdir_badge = _badge(pred_dir, *dir_map[pred_dir], bold=True) if pred_dir in dir_map else f'<span style="color: #8B949E; font-size: 0.72rem;">{html.escape(pred_dir)}</span>'
+        adir_badge = _badge(actual_dir, *dir_map[actual_dir], bold=True) if actual_dir in dir_map else f'<span style="color: #8B949E; font-size: 0.72rem;">{html.escape(actual_dir)}</span>'
+
+        if "WIN" in result_val or "MATCH" in result_val or "Correct" in result_val:
+            res_badge = _badge(result_val, "rgba(46, 160, 67, 0.15)", "#3FB950", "rgba(46, 160, 67, 0.3)")
+        elif "LOSS" in result_val or "MISMATCH" in result_val or "Wrong" in result_val:
+            res_badge = _badge(result_val, "rgba(248, 81, 73, 0.15)", "#F85149", "rgba(248, 81, 73, 0.3)")
+        elif "CASH" in result_val:
+            res_badge = _badge(result_val, "rgba(139, 148, 158, 0.15)", "#8B949E", "rgba(139, 148, 158, 0.3)")
+        else:
+            res_badge = _badge(result_val, "rgba(210, 153, 34, 0.15)", "#D29922", "rgba(210, 153, 34, 0.3)")
+
+        diag_color = "#8B949E" if "unavailable" in diag_val.lower() else "#E6EDF3"
+        diag_style = "italic" if "unavailable" in diag_val.lower() else "normal"
+        rows_html.append(
+            f'<tr style="background: {bg_color}; border-bottom: 1px solid #21262D;">'
+            f'<td style="padding: 10px 12px; white-space: nowrap; font-size: 0.78rem; color: #8B949E;">{html.escape(str(row.get("Time (UTC)", "—")))}</td>'
+            f'<td style="padding: 10px 12px; white-space: nowrap; font-weight: 600; font-size: 0.8rem; color: #58A6FF;">{html.escape(str(row.get("Model", "—")))}</td>'
+            f'<td style="padding: 10px 12px; white-space: nowrap; font-family: monospace; font-size: 0.82rem; text-align: right; color: #8B949E;">{html.escape(str(row.get("Start Price", "—")))}</td>'
+            f'<td style="padding: 10px 12px; white-space: nowrap; font-family: monospace; font-size: 0.82rem; text-align: right; color: #C9D1D9;">{html.escape(str(row.get("Pred Target", "—")))}</td>'
+            f'<td style="padding: 10px 12px; white-space: nowrap; font-family: monospace; font-size: 0.82rem; text-align: right; font-weight: 600; color: #F0F6FC;">{html.escape(str(row.get("Actual (T+1h)", "—")))}</td>'
+            f'<td style="padding: 10px 12px; white-space: nowrap; font-family: monospace; font-size: 0.82rem; text-align: right; color: #E6EDF3;">{html.escape(str(row.get("Error ($)", "—")))}</td>'
+            f'<td style="padding: 10px 12px; text-align: center; vertical-align: middle;">{pdir_badge}</td>'
+            f'<td style="padding: 10px 12px; text-align: center; vertical-align: middle;">{adir_badge}</td>'
+            f'<td style="padding: 10px 12px; text-align: center; vertical-align: middle;">{res_badge}</td>'
+            f'<td style="padding: 10px 12px; white-space: normal !important; word-wrap: break-word !important; overflow-wrap: break-word !important; line-height: 1.45; min-width: 280px; max-width: 480px; font-size: 0.81rem; color: {diag_color}; font-style: {diag_style}; vertical-align: middle;">{html.escape(diag_val)}</td>'
+            f'</tr>'
+        )
+
+    th_base = 'padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap;'
+    full_table_html = (
+        '<div style="max-height: 540px; overflow-y: auto; overflow-x: auto; border: 1px solid #30363D; border-radius: 8px; background: #0D1117; margin-bottom: 12px;">\n'
+        '  <table style="width: 100%; border-collapse: collapse; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, sans-serif; font-size: 0.82rem; text-align: left;">\n'
+        '    <thead>\n'
+        '      <tr style="position: sticky; top: 0; background: #161B22; z-index: 10; border-bottom: 2px solid #30363D;">\n'
+        f'        <th style="{th_base}">Time (UTC)</th>\n'
+        f'        <th style="{th_base}">Model</th>\n'
+        f'        <th style="{th_base} text-align: right;">Start Price</th>\n'
+        f'        <th style="{th_base} text-align: right;">Pred Target</th>\n'
+        f'        <th style="{th_base} text-align: right;">Actual (T+1h)</th>\n'
+        f'        <th style="{th_base} text-align: right;">Error ($)</th>\n'
+        f'        <th style="{th_base} text-align: center;">Pred Dir</th>\n'
+        f'        <th style="{th_base} text-align: center;">Actual Dir</th>\n'
+        f'        <th style="{th_base} text-align: center;">Result</th>\n'
+        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; min-width: 280px; max-width: 480px;">AI Diagnosis (Full)</th>\n'
+        '      </tr>\n'
+        '    </thead>\n'
+        '    <tbody>\n'
+        f'{chr(10).join(rows_html)}\n'
+        '    </tbody>\n'
+        '  </table>\n'
+        '</div>'
+    )
+    st.markdown(full_table_html, unsafe_allow_html=True)
+
+
 # ---------------------------------------------------------------------------
 # 3. DATA FETCHING (NEON POSTGRESQL & BINANCE VISION)
 # ---------------------------------------------------------------------------
@@ -958,14 +1040,14 @@ def fetch_cached_mcp_context(limit: int = 3) -> Dict[str, Any]:
 
 @st.cache_data(ttl=300)
 def fetch_cached_rag_proof(query_text: str, n_results: int = 3) -> Dict[str, Any]:
-    # Cache ChromaDB collection stats and semantic error-memory matches for 5 minutes.
+    # Query first so any Gemini 429 cooldown fallback settles before reading active collection counts.
+    retrieved = query_similar_error_memories(query_text, n_results=n_results)
     rag_col = get_rag_collection()
     if not rag_col:
         return {"available": False}
     total_docs = rag_col.count()
     all_ids = rag_col.get().get("ids", [])
     neon_docs = len([i for i in all_ids if str(i).startswith("neon_pred_")])
-    retrieved = query_similar_error_memories(query_text, n_results=n_results)
     return {
         "available": True,
         "total_docs": total_docs,
@@ -973,6 +1055,7 @@ def fetch_cached_rag_proof(query_text: str, n_results: int = 3) -> Dict[str, Any
         "rule_docs": max(0, total_docs - neon_docs),
         "retrieved": retrieved,
         "embedding_mode": get_rag_embedding_mode(),
+        "cooldown_remaining_sec": get_rag_cooldown_remaining_sec(),
     }
 
 
@@ -1197,6 +1280,7 @@ with tab_models:
                     br = f"{met['holdout_brier_score']:.4f}" if "holdout_brier_score" in met else "N/A"
                     auc = f"{met['holdout_roc_auc']:.4f}" if "holdout_roc_auc" in met else "N/A"
                     ic = f"{met['holdout_spearman_ic']:+.4f}" if "holdout_spearman_ic" in met else "N/A"
+                    rmse = f"${met['model_price_rmse']:.2f}" if "model_price_rmse" in met else "N/A"
                     status = m_data.get("status", "ACTIVE_PRODUCTION")
                     feat_count = len(m_data.get("features", []))
                     schema_lbl = f"{m_data.get('feature_schema_version', 'v1')} ({feat_count} feat)"
@@ -1208,6 +1292,7 @@ with tab_models:
                         "Brier": br,
                         "ROC-AUC": auc,
                         "Spearman IC": ic,
+                        "Price RMSE": rmse,
                         "Status": status,
                     })
                 except Exception:
@@ -1356,7 +1441,10 @@ with tab_ground_truth:
             table_df["AI Diagnosis (1-Line)"] = table_df.apply(format_ground_truth_diagnosis, axis=1)
 
             show_cols = ["Time (UTC)", "Model", "Start Price", "Pred Target", "Actual (T+1h)", "Error ($)", "Pred Dir", "Actual Dir", "Result", "AI Diagnosis (1-Line)"]
-            st.dataframe(table_df[show_cols].head(50), use_container_width=True, hide_index=True)
+            render_ground_truth_html_table(table_df[show_cols].head(50))
+
+            with st.expander("View Raw Compact Data Grid", expanded=False):
+                st.dataframe(table_df[show_cols].head(50), use_container_width=True, hide_index=True)
 
             with st.expander("View Forecast Target vs. Realized Market Scatter Plot", expanded=True):
                 st.plotly_chart(create_reconciliation_scatter(scatter_df), use_container_width=True)
@@ -1553,14 +1641,24 @@ with tab_agent:
                 rule_docs = int(rag_proof.get("rule_docs", 0))
                 retrieved_memories = rag_proof.get("retrieved", [])
                 embedding_mode = str(rag_proof.get("embedding_mode", "local_minilm"))
-                mode_color = "#3FB950" if embedding_mode == "local_minilm" else "#D29922"
+                cooldown_sec = int(rag_proof.get("cooldown_remaining_sec") or 0)
+                if embedding_mode == "gemini-embedding-001":
+                    provider_label = "Provider: gemini-embedding-001"
+                    mode_color = "#3FB950"
+                elif cooldown_sec > 0:
+                    retry_mins = max(1, (cooldown_sec + 59) // 60)
+                    provider_label = f"Provider: {embedding_mode} (Gemini retry in {retry_mins}m)"
+                    mode_color = "#D29922"
+                else:
+                    provider_label = f"Provider: {embedding_mode}"
+                    mode_color = "#58A6FF"
 
                 with st.container(border=True):
                     st.markdown(
                         f"""
                         <div style="font-size: 0.9rem; font-weight: 700; color: #58A6FF; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center;">
                             <span>Live Episodic RAG Memory Proof (ChromaDB Vector Store)</span>
-                            <span style="font-size: 0.72rem; font-weight: 600; color: {mode_color}; background: rgba(56, 139, 253, 0.1); border: 1px solid {mode_color}; padding: 2px 8px; border-radius: 4px;">Provider: {embedding_mode}</span>
+                            <span style="font-size: 0.72rem; font-weight: 600; color: {mode_color}; background: rgba(56, 139, 253, 0.1); border: 1px solid {mode_color}; padding: 2px 8px; border-radius: 4px;">{html.escape(provider_label)}</span>
                         </div>
                         <div style="font-size: 0.8rem; color: #8B949E; margin-bottom: 8px;">
                             ChromaDB episodic memory: <strong style="color: #F0F6FC;">{total_docs} total vectors indexed</strong> 
