@@ -68,10 +68,12 @@ def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LI
             now_ms = datetime.now(timezone.utc).timestamp() * 1000.0
             closed = [c for c in resp.json() if float(c[6]) <= now_ms]
             if len(closed) >= 35:
+                # Preserve Binance kline c[9] (taker_buy_base_volume) for Model 2 and Model 3 volume features.
                 df_b = pd.DataFrame([{
                     "timestamp": pd.to_datetime(c[0], unit="ms", utc=True),
                     "open": float(c[1]), "high": float(c[2]), "low": float(c[3]), "close": float(c[4]),
                     "volume": float(c[5]), "number_of_trades": int(c[8]),
+                    "taker_buy_base_volume": float(c[9]),
                     "taker_buy_ratio": round(float(c[9]) / float(c[5]), 4) if float(c[5]) > 0 else 0.50,
                 } for c in closed[-limit:]])
                 try:
@@ -91,7 +93,8 @@ def fetch_historical_candles(symbol: str = "BTCUSDT", limit: int = LIVE_FETCH_LI
                 df_cb = pd.DataFrame([{
                     "timestamp": pd.to_datetime(c[0], unit="s", utc=True),
                     "low": float(c[1]), "high": float(c[2]), "open": float(c[3]), "close": float(c[4]),
-                    "volume": float(c[5]), "number_of_trades": None, "taker_buy_ratio": 0.50,
+                    "volume": float(c[5]), "number_of_trades": None,
+                    "taker_buy_base_volume": round(float(c[5]) * 0.50, 4), "taker_buy_ratio": 0.50,
                 } for c in reversed(closed[:limit])])
                 try:
                     return enrich_candles_with_macro(df_cb)
@@ -147,6 +150,15 @@ def calculate_technical_signals(
             candles_df.at[idx, "taker_buy_ratio"] = float(taker_buy_ratio)
         elif "taker_buy_ratio" not in candles_df.columns:
             candles_df["taker_buy_ratio"] = 0.50
+        # Derive base taker buy volume across rows only when missing without overwriting Binance c[9].
+        if "taker_buy_base_volume" not in candles_df.columns:
+            vol_s = pd.to_numeric(candles_df["volume"], errors="coerce").fillna(0.0)
+            ratio_s = pd.to_numeric(candles_df["taker_buy_ratio"], errors="coerce").fillna(0.50)
+            candles_df["taker_buy_base_volume"] = (vol_s * ratio_s).round(4)
+        elif pd.isna(candles_df.at[idx, "taker_buy_base_volume"]):
+            v_val = float(candles_df.at[idx, "volume"] or 0.0)
+            r_val = float(candles_df.at[idx, "taker_buy_ratio"] or 0.50)
+            candles_df.at[idx, "taker_buy_base_volume"] = round(v_val * r_val, 4)
         if timestamp:
             candles_df.at[idx, "timestamp"] = pd.to_datetime(timestamp)
         # Populate cached Fear & Greed and on-chain features if the input candles lack them.
