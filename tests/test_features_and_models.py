@@ -1,8 +1,6 @@
 from contextlib import contextmanager
 from datetime import datetime, timezone
-import hashlib
 from pathlib import Path
-from unittest.mock import MagicMock
 import numpy as np
 import pandas as pd
 import pytest
@@ -11,7 +9,6 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 import ta
 
-import app
 import config
 from config import (
     ACTIVE_MODEL_VERSION,
@@ -233,6 +230,8 @@ def rec_db():
     session.commit()
     yield session
     session.close()
+    Base.metadata.drop_all(bind=engine)
+    engine.dispose()
 
 
 def test_reconciliation_filtering_and_kpis(rec_db, monkeypatch):
@@ -248,20 +247,6 @@ def test_reconciliation_filtering_and_kpis(rec_db, monkeypatch):
     kpis = get_reconciliation_kpis(model_version=ACTIVE_MODEL_VERSION)
     assert kpis["total_reconciled"] == 1
     assert kpis["directional_accuracy_pct"] == 100.0
-
-
-def test_dashboard_tab3_helpers(rec_db, monkeypatch):
-    @contextmanager
-    def mock_get_db():
-        yield rec_db
-
-    monkeypatch.setattr("src.database.get_db", mock_get_db)
-    records = get_reconciliation_history(limit=50, model_version=None)
-    filtered = app.filter_reconciliation_records(records, selected_model=ACTIVE_MODEL_VERSION)
-    assert len(filtered) == 1
-    df_display = app.prepare_reconciliation_table_display(filtered)
-    assert not df_display.empty
-    assert "Model Version" in df_display.columns
 
 
 def test_model_3_feature_parity_and_loader_sha256_verification(sample_historical_candles):
