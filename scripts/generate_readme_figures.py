@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
+import src  # noqa: F401
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -70,9 +71,9 @@ def generate_benchmark_figure():
     accs = {}
     for label, path in manifest_map.items():
         if path.exists():
-            m = json.loads(path.read_text(encoding="utf-8")).get("holdout_metrics", {})
-            if "classifier_accuracy" in m:
-                accs[label] = float(m["classifier_accuracy"]) * 100.0
+            m = json.loads(path.read_text(encoding="utf-8")).get("metrics", {})
+            if "holdout_accuracy" in m:
+                accs[label] = float(m["holdout_accuracy"]) * 100.0
 
     models = [
         "Naive\nPersistence", "Chronos-2\n(Zero-Shot)", "TimesFM 2.5\n(Zero-Shot)",
