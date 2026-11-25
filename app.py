@@ -1,6 +1,11 @@
 import os
 import sys
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+# Pre-load onnxruntime before pandas/numpy on Windows to prevent OpenMP DLL collisions.
+try:
+    import onnxruntime  # noqa: F401
+except Exception:
+    pass
 
 # Linux / Streamlit Cloud SQLite upgrade hook for ChromaDB
 try:
@@ -11,9 +16,10 @@ except Exception:
     pass
 
 import html
+import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 ROOT_DIR = Path(__file__).resolve().parent
 if str(ROOT_DIR) not in sys.path:
@@ -22,138 +28,46 @@ if str(ROOT_DIR) not in sys.path:
 if hasattr(sys.stdout, "reconfigure") and sys.stdout.isatty():
     sys.stdout.reconfigure(encoding="utf-8")
 
-import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Mudra — Bitcoin AI/ML Forecasting Engine", layout="wide", initial_sidebar_state="expanded")
 
-# Polished custom dark theme and component styling
 CUSTOM_DASHBOARD_CSS = """
 <style>
-/* Main app dark theme background and clean typography */
-.main, .stApp {
-    background-color: #0E1117;
-    color: #E6EDF3;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-}
-
-/* Polished Metric Cards */
-div[data-testid="stMetric"] {
-    background: linear-gradient(180deg, #161B22 0%, #0F141C 100%);
-    border: 1px solid #30363D;
-    border-radius: 8px;
-    padding: 12px 14px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
-    transition: border-color 0.15s ease, transform 0.15s ease;
-}
-div[data-testid="stMetric"]:hover {
-    border-color: #58A6FF;
-    transform: translateY(-1px);
-}
-div[data-testid="stMetric"] label {
-    font-size: 0.76rem !important;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 600 !important;
-    color: #8B949E !important;
-}
-div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
-    font-size: 1.45rem !important;
-    font-weight: 700 !important;
-    color: #F0F6FC !important;
-    letter-spacing: -0.02em;
-}
-div[data-testid="stMetric"] div[data-testid="stMetricDelta"] {
-    font-size: 0.82rem !important;
-    font-weight: 600 !important;
-}
-
-/* Bordered Container Polishing */
-div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapper"] {
-    background: #11151C;
-    border-color: #30363D !important;
-    border-radius: 10px !important;
-    padding: 4px !important;
-    margin-bottom: 0.5rem;
-}
-
-/* Section Header Badges */
-.section-badge {
-    display: inline-block;
-    font-size: 0.72rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: #58A6FF;
-    background: rgba(56, 189, 248, 0.12);
-    border: 1px solid rgba(56, 189, 248, 0.25);
-    border-radius: 4px;
-    padding: 2px 8px;
-    margin-bottom: 6px;
-}
-
-/* Multi-Agent Council Highlight Card */
-.deliberation-card {
-    background: linear-gradient(135deg, #161B22 0%, #1A2333 100%);
-    border: 1px solid #30363D;
-    border-left: 4px solid #58A6FF;
-    border-radius: 8px;
-    padding: 14px 16px;
-    margin-bottom: 12px;
-}
-
-/* Streamlit Dataframe Borders & Polish */
-div[data-testid="stDataFrame"] {
-    border: 1px solid #30363D;
-    border-radius: 8px;
-    overflow: hidden;
-}
-
-/* Buttons Styling */
-button[kind="primary"], button[kind="secondary"] {
-    border-radius: 6px !important;
-    font-weight: 600 !important;
-    transition: all 0.15s ease;
-}
-
-/* Sidebar Custom Styling */
-section[data-testid="stSidebar"] {
-    background-color: #0B0E14 !important;
-    border-right: 1px solid #21262D;
-}
-.sidebar-footer {
-    font-size: 0.75rem;
-    color: #6E7681;
-    margin-top: 1.5rem;
-    text-align: center;
-    border-top: 1px solid #21262D;
-    padding-top: 0.75rem;
-}
+.main, .stApp { background-color: #0E1117; color: #E6EDF3; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+div[data-testid="stMetric"] { background: linear-gradient(180deg, #161B22 0%, #0F141C 100%); border: 1px solid #30363D; border-radius: 8px; padding: 12px 14px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28); }
+div[data-testid="stMetric"] label { font-size: 0.76rem !important; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600 !important; color: #8B949E !important; }
+div[data-testid="stMetric"] div[data-testid="stMetricValue"] { font-size: 1.45rem !important; font-weight: 700 !important; color: #F0F6FC !important; letter-spacing: -0.02em; }
+.section-badge { display: inline-block; font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #58A6FF; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 4px; padding: 2px 8px; margin-bottom: 6px; }
+.deliberation-card { background: linear-gradient(135deg, #161B22 0%, #1A2333 100%); border: 1px solid #30363D; border-left: 4px solid #58A6FF; border-radius: 8px; padding: 14px 16px; margin-bottom: 12px; }
+section[data-testid="stSidebar"] { background-color: #0B0E14 !important; border-right: 1px solid #21262D; }
+.sidebar-footer { font-size: 0.75rem; color: #6E7681; margin-top: 1.5rem; text-align: center; border-top: 1px solid #21262D; padding-top: 0.75rem; }
 </style>
 """
 st.markdown(CUSTOM_DASHBOARD_CSS, unsafe_allow_html=True)
 
 from config import (
-    ACTIVE_MODEL_VERSION, APP_SUBTITLE, APP_TITLE,
-    CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256,
+    CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256, INITIAL_CAPITAL_USD,
     MIN_HURDLE_PCT, REGRESSOR_MODEL_PATH, REGRESSOR_MODEL_SHA256,
     ROUND_TRIP_FRICTION_PCT, TOTAL_FRICTION_PER_SIDE_PCT,
 )
-from src.agents import fetch_historical_candles, run_trading_graph
+from src.ai.mcp_client import fetch_mcp_context
+from src.ai.rag import get_rag_collection, get_rag_embedding_mode, query_similar_error_memories
+from src.ai.workflow import fetch_historical_candles, get_multi_model_consensus, run_trading_graph
 from src.database import (
-    get_api_telemetry_breakdown, get_api_telemetry_summary, get_db, get_latest_council_audit,
+    get_api_telemetry_breakdown, get_api_telemetry_summary, get_latest_council_audit,
     get_latest_hourly_postmortems, get_latest_market_ticks, get_model_reconciled_counts,
     get_portfolio_history, get_portfolio_kpis, get_reconciliation_history,
     get_reconciliation_kpis, test_connection,
 )
 from src.engine import sync_hourly_quant_cycle
-from src.model_loader import load_verified_model
-
-INITIAL_CAPITAL_USD = 10000.0
+import src.feature_engineering as fe
+import src.model_loader as model_loader
 
 
 # ---------------------------------------------------------------------------
@@ -290,33 +204,20 @@ def create_reconciliation_scatter(df: pd.DataFrame) -> go.Figure:
 
 @st.cache_resource
 def load_models():
+    # Cache active M1 artifacts and all SHA-256 verified shadow models once per session.
     try:
-        reg = load_verified_model(REGRESSOR_MODEL_PATH, REGRESSOR_MODEL_SHA256)
-        clf = load_verified_model(CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256)
-        reg.set_params(device="cpu")
-        clf.set_params(device="cpu")
-
-        # Load Model 2 (Stationary) and Model 3 (LightGBM) if available in registered models
-        m2_reg, m2_clf = None, None
-        m3_reg, m3_clf = None, None
+        reg = model_loader.load_verified_model(REGRESSOR_MODEL_PATH, REGRESSOR_MODEL_SHA256)
+        clf = model_loader.load_verified_model(CLASSIFIER_MODEL_PATH, CLASSIFIER_MODEL_SHA256)
         try:
-            from src.model_loader import get_registered_models
-            reg_dict = get_registered_models()
-            if "xgb_v2.0.0" in reg_dict:
-                m2_reg = reg_dict["xgb_v2.0.0"]["regressor"]
-                m2_clf = reg_dict["xgb_v2.0.0"]["classifier"]
-            if "lgbm_v3.0.0" in reg_dict:
-                m3_reg = reg_dict["lgbm_v3.0.0"]["regressor"]
-                m3_clf = reg_dict["lgbm_v3.0.0"]["classifier"]
+            registered = model_loader.get_registered_models()
         except Exception:
-            pass
-
-        return reg, clf, m2_reg, m2_clf, m3_reg, m3_clf
+            registered = {}
+        return reg, clf, registered
     except Exception:
-        return None, None, None, None, None, None
+        return None, None, {}
 
 
-reg_model, clf_model, m2_reg_model, m2_clf_model, m3_reg_model, m3_clf_model = load_models()
+reg_model, clf_model, registered_models = load_models()
 
 
 def format_signed_usd(val: Optional[float], decimals: int = 2) -> str:
@@ -334,22 +235,26 @@ def check_feed_staleness(df: pd.DataFrame, max_lag_hours: float = 3.0) -> Tuple[
     return (lag > max_lag_hours or df.attrs.get("source") == "local_fallback", lag)
 
 
-def generate_live_forecast(live_df: pd.DataFrame, reg_model: Any, clf_model: Any, is_stale: bool = False) -> Optional[Dict[str, Any]]:
+def generate_live_forecast(
+    live_df: pd.DataFrame,
+    reg_model: Any,
+    clf_model: Any,
+    is_stale: bool = False,
+    precomputed_features: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    # Run active M1 regressor and classifier on the latest confirmed candle.
     if is_stale or live_df is None or live_df.empty or reg_model is None or len(live_df) < 35:
         return None
-    from src.feature_engineering import (
-        extract_features_for_inference, predict_proba_with_validation,
-        predict_with_validation, validate_inference_features,
-    )
     try:
-        sample_input = extract_features_for_inference(live_df)
+        sample_input = precomputed_features if precomputed_features is not None else fe.extract_features_for_inference(live_df)
         recent = live_df.iloc[-1]
         curr_price = float(recent["close"])
         candle_range = float(recent["high"] - recent["low"])
         spread = (candle_range / curr_price) * 100.0 if curr_price > 0 else 0.0
-        taker = float(recent.get("taker_buy_ratio", 0.5))
+        taker_raw = recent.get("taker_buy_ratio")
+        taker = float(taker_raw) if pd.notna(taker_raw) else None
 
-        raw_pred_ret = float(predict_with_validation(reg_model, sample_input, model_type="regressor")[0])
+        raw_pred_ret = float(fe.predict_with_validation(reg_model, sample_input, model_type="regressor")[0])
         pred_ret_pct = raw_pred_ret * 100.0
         pred_move = curr_price * raw_pred_ret
         cleared = abs(pred_ret_pct) >= MIN_HURDLE_PCT
@@ -357,11 +262,11 @@ def generate_live_forecast(live_df: pd.DataFrame, reg_model: Any, clf_model: Any
         prob_up, prob_down = 50.0, 50.0
         direction = "UP" if pred_ret_pct >= 0 else "DOWN"
         if clf_model:
-            clf_df = validate_inference_features(sample_input, model_type="classifier")
-            code = int(predict_with_validation(clf_model, clf_df, model_type="classifier")[0])
+            clf_df = fe.validate_inference_features(sample_input, model_type="classifier")
+            code = int(fe.predict_with_validation(clf_model, clf_df, model_type="classifier")[0])
             direction = "UP" if code == 1 else "DOWN"
             if hasattr(clf_model, "predict_proba"):
-                probs = predict_proba_with_validation(clf_model, clf_df)[0]
+                probs = fe.predict_proba_with_validation(clf_model, clf_df)[0]
                 prob_down, prob_up = float(probs[0]) * 100.0, float(probs[1]) * 100.0
 
         badge = "SIDEWAYS (CHOP)" if not cleared else ("BULLISH (UP)" if direction == "UP" else "BEARISH (DOWN)")
@@ -377,13 +282,12 @@ def generate_live_forecast(live_df: pd.DataFrame, reg_model: Any, clf_model: Any
 
 
 def fetch_live_btc_ticker_price(fallback_price: Optional[float] = None) -> Optional[float]:
-    # fetches live real-time spot price for BTCUSDT querying data-api.binance.vision first then api.binance.com
+    # Fetch live spot BTCUSDT price from Binance Vision then Binance spot REST.
     for url in (
         "https://data-api.binance.vision/api/v3/ticker/price?symbol=BTCUSDT",
         "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
     ):
         try:
-            import requests
             resp = requests.get(url, timeout=3.0)
             if resp.status_code == 200:
                 data = resp.json()
@@ -394,7 +298,7 @@ def fetch_live_btc_ticker_price(fallback_price: Optional[float] = None) -> Optio
     return float(fallback_price) if (fallback_price is not None and float(fallback_price) > 0) else None
 
 
-def render_live_btc_websocket_ticker(fallback_price: Optional[float] = None, fallback_24h_pct: Optional[float] = None) -> None:
+def render_live_btc_websocket_ticker(fallback_price: Optional[float] = None) -> None:
     # renders live self-updating WebSocket ticker bar for BTC/USDT with Binance and Coinbase fallback
     has_fallback = fallback_price is not None and float(fallback_price) > 0
     init_price_val = float(fallback_price) if has_fallback else None
@@ -739,107 +643,26 @@ def render_live_btc_websocket_ticker(fallback_price: Optional[float] = None, fal
     components.html(html_code, height=96)
 
 
-def generate_m2_forecast(live_df: pd.DataFrame, m2_reg: Any, m2_clf: Any) -> Optional[Dict[str, Any]]:
-    # generates live next-hour target and direction for Model 2 (Stationary)
-    if live_df is None or live_df.empty or m2_reg is None or len(live_df) < 35:
+def generate_registered_model_forecast(
+    live_df: pd.DataFrame,
+    model_version: str,
+    model_spec: Dict[str, Any],
+    precomputed_features: Optional[Dict[str, Any]] = None,
+    is_stale: bool = False,
+) -> Optional[Dict[str, Any]]:
+    # Generate next-hour target and direction probability for a registered model spec.
+    if is_stale or live_df is None or live_df.empty or not model_spec or len(live_df) < 35:
+        return None
+    reg_model = model_spec.get("regressor")
+    clf_model = model_spec.get("classifier")
+    if reg_model is None:
         return None
     try:
-        from src.model_loader import get_registered_models
-        from src.feature_engineering import extract_features_for_inference
-        reg_dict = get_registered_models()
-        if "xgb_v2.0.0" not in reg_dict:
-            return None
-        c_feats = reg_dict["xgb_v2.0.0"].get("features", [])
-        f_dict = extract_features_for_inference(live_df)
-        if not c_feats or not all(k in f_dict for k in c_feats):
-            return None
-        inp = pd.DataFrame([{k: f_dict[k] for k in c_feats}])
-        m2_ret = float(m2_reg.predict(inp)[0])
-        curr_price = float(live_df["close"].iloc[-1])
-        m2_move = curr_price * m2_ret
-
-        prob_up, prob_down = 50.0, 50.0
-        m2_dir = "UP" if m2_ret >= 0.0 else "DOWN"
-        if m2_clf is not None:
-            if hasattr(m2_clf, "predict_proba"):
-                probs = m2_clf.predict_proba(inp)[0]
-                prob_down, prob_up = float(probs[0]) * 100.0, float(probs[1]) * 100.0
-                m2_dir = "UP" if prob_up >= 50.0 else "DOWN"
-            elif hasattr(m2_clf, "predict"):
-                pred_c = int(m2_clf.predict(inp)[0])
-                m2_dir = "UP" if pred_c == 1 else "DOWN"
-                prob_up, prob_down = (60.0, 40.0) if pred_c == 1 else (40.0, 60.0)
-
-        return {
-            "pred_target": curr_price + m2_move,
-            "pred_dollar_move": m2_move,
-            "pred_ret_pct": m2_ret * 100.0,
-            "direction_label": m2_dir,
-            "prob_up": prob_up,
-            "prob_down": prob_down,
-        }
-    except Exception:
-        return None
-
-
-def generate_m3_forecast(live_df: pd.DataFrame, m3_reg: Any, m3_clf: Any) -> Optional[Dict[str, Any]]:
-    # generates live next-hour target and direction for Model 3 (LightGBM)
-    if live_df is None or live_df.empty or m3_reg is None or len(live_df) < 35:
-        return None
-    try:
-        from src.model_loader import get_registered_models
-        from src.feature_engineering import extract_features_for_inference
-        reg_dict = get_registered_models()
-        if "lgbm_v3.0.0" not in reg_dict:
-            return None
-        c_feats = reg_dict["lgbm_v3.0.0"].get("features", [])
-        f_dict = dict(extract_features_for_inference(live_df))
-        # Model 3 uses true 10-period SMA distance while keeping the 5-period feature intact for Model 2.
-        if "sma_10_true_dist_pct" in f_dict:
-            f_dict["sma_10_dist_pct"] = f_dict["sma_10_true_dist_pct"]
-        if not c_feats or not all(k in f_dict for k in c_feats):
-            return None
-        inp = pd.DataFrame([{k: f_dict[k] for k in c_feats}])
-        m3_ret = float(m3_reg.predict(inp)[0])
-        curr_price = float(live_df["close"].iloc[-1])
-        m3_move = curr_price * m3_ret
-
-        prob_up, prob_down = 50.0, 50.0
-        m3_dir = "UP" if m3_ret >= 0.0 else "DOWN"
-        if m3_clf is not None:
-            if hasattr(m3_clf, "predict_proba"):
-                probs = m3_clf.predict_proba(inp)[0]
-                prob_down, prob_up = float(probs[0]) * 100.0, float(probs[1]) * 100.0
-                m3_dir = "UP" if prob_up >= 50.0 else "DOWN"
-            elif hasattr(m3_clf, "predict"):
-                pred_c = int(m3_clf.predict(inp)[0])
-                m3_dir = "UP" if pred_c == 1 else "DOWN"
-                prob_up, prob_down = (60.0, 40.0) if pred_c == 1 else (40.0, 60.0)
-
-        return {
-            "pred_target": curr_price + m3_move,
-            "pred_dollar_move": m3_move,
-            "pred_ret_pct": m3_ret * 100.0,
-            "direction_label": m3_dir,
-            "prob_up": prob_up,
-            "prob_down": prob_down,
-        }
-    except Exception:
-        return None
-
-
-def generate_candidate_forecast(live_df: pd.DataFrame, model_spec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    # generates live next-hour target and direction for any registered model spec
-    if live_df is None or live_df.empty or not model_spec or len(live_df) < 35:
-        return None
-    try:
-        from src.feature_engineering import extract_features_for_inference
-        reg_model = model_spec.get("regressor")
-        clf_model = model_spec.get("classifier")
-        if reg_model is None:
-            return None
         c_feats = model_spec.get("features", [])
-        f_dict = extract_features_for_inference(live_df)
+        f_dict = dict(precomputed_features if precomputed_features is not None else fe.extract_features_for_inference(live_df))
+        # Model 3 uses true 10-period SMA distance while keeping the 5-period feature intact for Model 2.
+        if str(model_version).startswith("lgbm_v3") and "sma_10_true_dist_pct" in f_dict:
+            f_dict["sma_10_dist_pct"] = f_dict["sma_10_true_dist_pct"]
         if not c_feats or not all(k in f_dict for k in c_feats):
             return None
         inp = pd.DataFrame([{k: f_dict[k] for k in c_feats}])
@@ -927,71 +750,60 @@ def get_model_card_title(model_version: str, spec: Dict[str, Any]) -> str:
 
 
 def get_model_benchmark_caption(model_version: str, spec: Dict[str, Any]) -> str:
-    # returns holdout benchmark caption line matching each model manifest schema
+    # Build holdout benchmark summary directly from each signed model manifest.
     ver = str(model_version).strip()
-    if ver in ("xgb_onnx_v1.0.0", "xgb_v1"):
-        return "Benchmark: **53.26%** Accuracy · 0.6914 Log-Loss · 39 Classifier / 26 Regressor Features"
-    if ver == "xgb_v2.0.0":
-        return "Benchmark: **52.07%** Accuracy · 0.6926 Log-Loss · 36 Stationary Features"
-    if ver == "lgbm_v3.0.0":
-        return "Benchmark: **52.89%** Accuracy · 0.6913 Log-Loss · 29 Stationary Features + Platt"
     met = spec.get("metrics", {})
-    n_feats = len(spec.get("features", []))
+    clf_feats = spec.get("classifier_features") or spec.get("features", [])
+    reg_feats = spec.get("regressor_features") or spec.get("features", [])
+    if len(clf_feats) != len(reg_feats):
+        feat_str = f"{len(clf_feats)} Classifier / {len(reg_feats)} Regressor Features"
+    elif ver.startswith("lgbm_v3"):
+        feat_str = f"{len(clf_feats)} Stationary Features + Platt"
+    elif "v2" in ver:
+        feat_str = f"{len(clf_feats)} Stationary Features"
+    else:
+        feat_str = f"{len(clf_feats)} Features"
+
     acc = f"{met['holdout_accuracy']*100:.2f}%" if "holdout_accuracy" in met else None
     ll = f"{met['holdout_log_loss']:.4f}" if "holdout_log_loss" in met else None
     if acc and ll:
-        return f"Benchmark: **{acc}** Accuracy · {ll} Log-Loss · {n_feats} Features"
-    return f"Candidate Model · {n_feats} Features"
+        return f"Benchmark: **{acc}** Accuracy · {ll} Log-Loss · {feat_str}"
+    return f"Registered Model · {feat_str}"
 
 
-def format_risk_levels(action: str, verdict: str, current_price: float, council_state: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
-    c_state = council_state or {}
-    act = str(action).upper().strip()
-    vrd = str(verdict).upper().strip()
-    if vrd != "APPROVED" or act == "HOLD" or not act:
-        no_trade = "None (No active trade opened — cash preserved)"
-        return no_trade, no_trade
-
-    if act == "BUY":
-        sl = float(c_state.get("stop_loss_price") or (current_price * 0.985))
-        tp = float(c_state.get("take_profit_price") or (current_price * 1.025))
-        return f"${sl:,.2f} (-1.5%)", f"${tp:,.2f} (+2.5%)"
-    if act == "SELL":
-        sl = float(c_state.get("stop_loss_price") or (current_price * 1.015))
-        tp = float(c_state.get("take_profit_price") or (current_price * 0.975))
-        return f"${sl:,.2f} (+1.5%)", f"${tp:,.2f} (-2.5%)"
-
-    no_trade = "None (No active trade opened — cash preserved)"
-    return no_trade, no_trade
-
-
-def build_council_scenario_payload(scenario_selected: str, current_price: float, live_forecast: Optional[Dict[str, Any]] = None, live_df: Optional[pd.DataFrame] = None):
+def build_live_council_payload(current_price: float, live_forecast: Dict[str, Any], live_df: Optional[pd.DataFrame] = None):
+    # Assemble live candle telemetry and active M1 forecast into LangGraph council inputs.
     current_price = float(current_price)
-    if scenario_selected == "live" and live_forecast:
-        expected_ret = float(live_forecast.get("pred_ret_pct", 0.08))
-        c_dir = live_forecast.get("direction_label", "UP")
-        confidence = float(live_forecast.get("prob_up", 50.0)) / 100.0 if c_dir == "UP" else float(live_forecast.get("prob_down", 50.0)) / 100.0
-        vol_spread = max(0.002, float(live_forecast.get("spread_pct", 1.8)) / 100.0)
-        taker = float(live_forecast.get("taker", 0.51))
-        order_bias = "BUYER_AGGRESSION" if taker > 0.52 else ("SELLER_AGGRESSION" if taker < 0.48 else "NEUTRAL")
-        volume = float(live_df["volume"].iloc[-1]) if live_df is not None and not live_df.empty and "volume" in live_df.columns else 1200.0
-        rsi = float(live_df["rsi"].iloc[-1]) if live_df is not None and not live_df.empty and "rsi" in live_df.columns else 50.0
-    elif scenario_selected == "bullish":
-        vol_spread, volume, taker, order_bias, rsi, expected_ret, confidence = 0.015, 5000.0, 0.65, "STRONG_BUYER_AGGRESSION", 62.0, 0.42, 0.88
-    elif scenario_selected == "vol_spike":
-        vol_spread, volume, taker, order_bias, rsi, expected_ret, confidence = 0.052, 12000.0, 0.35, "EXTREME_LIQUIDATION", 28.0, -0.20, 0.60
-    elif scenario_selected == "chop":
-        vol_spread, volume, taker, order_bias, rsi, expected_ret, confidence = 0.004, 400.0, 0.49, "FLAT_CHOP", 50.0, 0.02, 0.45
+    expected_ret = float(live_forecast.get("pred_ret_pct", 0.0))
+    c_dir = live_forecast.get("direction_label", "UP")
+    confidence = float(live_forecast.get("prob_up", 50.0)) / 100.0 if c_dir == "UP" else float(live_forecast.get("prob_down", 50.0)) / 100.0
+    vol_spread = max(0.002, float(live_forecast.get("spread_pct") or 0.2) / 100.0)
+    taker_raw = live_forecast.get("taker")
+    taker = float(taker_raw) if taker_raw is not None else None
+    if taker is None:
+        order_bias = "UNAVAILABLE"
+    elif taker > 0.52:
+        order_bias = "BUYER_AGGRESSION"
+    elif taker < 0.48:
+        order_bias = "SELLER_AGGRESSION"
     else:
-        vol_spread, volume, taker, order_bias, rsi, expected_ret, confidence = 0.018, 1200.0, 0.51, "NEUTRAL", 51.0, 0.08, 0.65
+        order_bias = "NEUTRAL"
+
+    feat_dict = live_forecast.get("features") if isinstance(live_forecast.get("features"), dict) else {}
+    volume = float(live_df["volume"].iloc[-1]) if live_df is not None and not live_df.empty and "volume" in live_df.columns else feat_dict.get("volume")
+    rsi = feat_dict.get("rsi")
+    if rsi is None and live_df is not None and not live_df.empty and "rsi" in live_df.columns:
+        rsi = float(live_df["rsi"].iloc[-1])
 
     clears = bool(abs(expected_ret) >= MIN_HURDLE_PCT)
     direction = "SIDEWAYS" if not clears else ("UP" if expected_ret >= 0 else "DOWN")
     m_data = {"close": current_price, "high": current_price * (1 + vol_spread / 2), "low": current_price * (1 - vol_spread / 2), "volume": volume, "taker_buy_ratio": taker}
-    t_data = {"volatility_spread": vol_spread, "volatility_range_pct": round(vol_spread * 100, 3), "order_flow_bias": order_bias, "rsi_estimate": rsi}
-    # Merge full engineered features for live scenario runs so LangGraph computes real multi-model consensus.
-    if scenario_selected == "live" and isinstance(live_forecast, dict) and isinstance(live_forecast.get("features"), dict):
-        t_data = {**live_forecast["features"], **t_data}
+    t_data = {"volatility_spread": vol_spread, "volatility_range_pct": round(vol_spread * 100, 3), "order_flow_bias": order_bias}
+    if rsi is not None:
+        t_data["rsi_estimate"] = float(rsi)
+    # Keep live engineered features authoritative while preserving formatted council fields.
+    if feat_dict:
+        t_data = {**feat_dict, **t_data}
     f_data = {"expected_return_pct": expected_ret, "predicted_dollar_move": round(current_price * (expected_ret / 100.0), 2), "clears_hurdle": clears, "confidence": confidence, "direction": direction}
     return m_data, t_data, f_data
 
@@ -1030,29 +842,6 @@ def build_model_pedigree_markdown() -> str:
         f"| **Model 2** (`xgb_v2.0.0`) | XGBoost Stationary | Live Shadow | 36 (Leak-free stationary) | 52.07% | 0.6926 | Evaluated under canonical `{ROUND_TRIP_FRICTION_PCT:.2f}%` hurdle |\n"
         f"| **Model 3** (`lgbm_v3.0.0`) | LightGBM GBDT | Shadow Candidate | 29 (Stationary + Platt) | 52.89% | 0.6913 | Evaluated under canonical `{ROUND_TRIP_FRICTION_PCT:.2f}%` hurdle |"
     )
-
-
-def classify_ground_truth_result(row) -> str:
-    # classifies ground truth outcomes into tradable matches, noise, directional errors, or opportunity losses
-    pred_ret = float(row.get("predicted_return_pct", 0.0) or 0.0)
-    act_ret = float(row.get("actual_return_pct", 0.0) or 0.0)
-    diff = float(row.get("absolute_error_usd", 0.0) or 0.0)
-    dir_ok = bool(row.get("direction_correct", False))
-    hurdle = MIN_HURDLE_PCT
-
-    if not dir_ok:
-        if diff < 100.0 or abs(act_ret) < hurdle:
-            return "DRIFT (CHOP)"
-        return "MISMATCH (DIR)"
-
-    # Opportunity Loss: Direction matched, but model under-predicted range below hurdle while actual exploded
-    if abs(pred_ret) < hurdle and abs(act_ret) >= hurdle and diff >= 150.0:
-        return "MISSED MOVE (RANGE)"
-
-    if abs(pred_ret) >= hurdle and abs(act_ret) >= hurdle:
-        return "MATCH (TRADABLE)"
-
-    return "MATCH (CHOP)"
 
 
 def format_economic_result(row, friction_pct: float = ROUND_TRIP_FRICTION_PCT) -> str:
@@ -1098,118 +887,6 @@ def format_ground_truth_diagnosis(row) -> str:
     return f"Noise Filtered: Sub-hurdle move ({act_ret:+.2f}%); correctly held cash."
 
 
-def filter_reconciliation_records(df: pd.DataFrame, selected_model: str) -> pd.DataFrame:
-    if df.empty or "model_version" not in df.columns or selected_model in ("All Models", ""):
-        return df.copy()
-    return df[df["model_version"] == selected_model].copy()
-
-
-def prepare_reconciliation_table_display(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df.copy()
-    disp = df.copy()
-    disp["Model Version"] = disp["model_version"].fillna("UNKNOWN") if "model_version" in disp.columns else "UNKNOWN"
-    return disp
-
-
-def render_ground_truth_html_table(df_subset: pd.DataFrame) -> None:
-    # renders styled html table with multi-line word-wrapped ai diagnosis descriptions
-    if df_subset.empty:
-        st.info("No records to display.")
-        return
-
-    rows_html = []
-    for idx, (_, row) in enumerate(df_subset.iterrows()):
-        bg_color = "#0D1117" if idx % 2 == 0 else "#111620"
-
-        time_val = html.escape(str(row.get("Time (UTC)", "—")))
-        model_val = html.escape(str(row.get("Model", "—")))
-        start_price = html.escape(str(row.get("Start Price", "—")))
-        pred_target = html.escape(str(row.get("Pred Target", "—")))
-        actual_val = html.escape(str(row.get("Actual (T+1h)", "—")))
-        error_val = html.escape(str(row.get("Error ($)", "—")))
-        pred_dir = str(row.get("Pred Dir", "—")).upper()
-        actual_dir = str(row.get("Actual Dir", "—")).upper()
-        result_val = str(row.get("Result", "—"))
-        diag_val = html.escape(str(row.get("AI Diagnosis (1-Line)", row.get("AI Diagnosis", "—"))))
-
-        # direction badges with color coding
-        if pred_dir == "UP":
-            pdir_badge = '<span style="background: rgba(46, 160, 67, 0.15); color: #3FB950; border: 1px solid rgba(46, 160, 67, 0.3); padding: 2px 7px; border-radius: 4px; font-weight: 700; font-size: 0.72rem; letter-spacing: 0.04em;">UP</span>'
-        elif pred_dir == "DOWN":
-            pdir_badge = '<span style="background: rgba(248, 81, 73, 0.15); color: #F85149; border: 1px solid rgba(248, 81, 73, 0.3); padding: 2px 7px; border-radius: 4px; font-weight: 700; font-size: 0.72rem; letter-spacing: 0.04em;">DOWN</span>'
-        else:
-            pdir_badge = f'<span style="color: #8B949E; font-size: 0.72rem;">{html.escape(pred_dir)}</span>'
-
-        if actual_dir == "UP":
-            adir_badge = '<span style="background: rgba(46, 160, 67, 0.15); color: #3FB950; border: 1px solid rgba(46, 160, 67, 0.3); padding: 2px 7px; border-radius: 4px; font-weight: 700; font-size: 0.72rem; letter-spacing: 0.04em;">UP</span>'
-        elif actual_dir == "DOWN":
-            adir_badge = '<span style="background: rgba(248, 81, 73, 0.15); color: #F85149; border: 1px solid rgba(248, 81, 73, 0.3); padding: 2px 7px; border-radius: 4px; font-weight: 700; font-size: 0.72rem; letter-spacing: 0.04em;">DOWN</span>'
-        else:
-            adir_badge = f'<span style="color: #8B949E; font-size: 0.72rem;">{html.escape(actual_dir)}</span>'
-
-        # outcome result badges
-        esc_res = html.escape(result_val)
-        if "WIN" in result_val:
-            res_badge = f'<span style="background: rgba(46, 160, 67, 0.15); color: #3FB950; border: 1px solid rgba(46, 160, 67, 0.3); padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.72rem; white-space: nowrap;">{esc_res}</span>'
-        elif "LOSS" in result_val:
-            res_badge = f'<span style="background: rgba(248, 81, 73, 0.15); color: #F85149; border: 1px solid rgba(248, 81, 73, 0.3); padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.72rem; white-space: nowrap;">{esc_res}</span>'
-        elif "CASH" in result_val:
-            res_badge = f'<span style="background: rgba(139, 148, 158, 0.15); color: #8B949E; border: 1px solid rgba(139, 148, 158, 0.3); padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.72rem; white-space: nowrap;">{esc_res}</span>'
-        elif "Correct" in result_val or "MATCH" in result_val:
-            res_badge = f'<span style="background: rgba(46, 160, 67, 0.15); color: #3FB950; border: 1px solid rgba(46, 160, 67, 0.3); padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.72rem; white-space: nowrap;">{esc_res}</span>'
-        elif "Wrong" in result_val or "MISMATCH" in result_val:
-            res_badge = f'<span style="background: rgba(248, 81, 73, 0.15); color: #F85149; border: 1px solid rgba(248, 81, 73, 0.3); padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.72rem; white-space: nowrap;">{esc_res}</span>'
-        else:
-            res_badge = f'<span style="background: rgba(210, 153, 34, 0.15); color: #D29922; border: 1px solid rgba(210, 153, 34, 0.3); padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.72rem; white-space: nowrap;">{esc_res}</span>'
-
-        # diagnosis styling with wrap across 2 to 3 lines
-        diag_color = "#8B949E" if "unavailable" in diag_val.lower() else "#E6EDF3"
-        diag_font_style = "italic" if "unavailable" in diag_val.lower() else "normal"
-
-        row_html = (
-            f'<tr style="background: {bg_color}; border-bottom: 1px solid #21262D;">'
-            f'<td style="padding: 10px 12px; white-space: nowrap; font-size: 0.78rem; color: #8B949E;">{time_val}</td>'
-            f'<td style="padding: 10px 12px; white-space: nowrap; font-weight: 600; font-size: 0.8rem; color: #58A6FF;">{model_val}</td>'
-            f'<td style="padding: 10px 12px; white-space: nowrap; font-family: monospace; font-size: 0.82rem; text-align: right; color: #8B949E;">{start_price}</td>'
-            f'<td style="padding: 10px 12px; white-space: nowrap; font-family: monospace; font-size: 0.82rem; text-align: right; color: #C9D1D9;">{pred_target}</td>'
-            f'<td style="padding: 10px 12px; white-space: nowrap; font-family: monospace; font-size: 0.82rem; text-align: right; font-weight: 600; color: #F0F6FC;">{actual_val}</td>'
-            f'<td style="padding: 10px 12px; white-space: nowrap; font-family: monospace; font-size: 0.82rem; text-align: right; color: #E6EDF3;">{error_val}</td>'
-            f'<td style="padding: 10px 12px; text-align: center; vertical-align: middle;">{pdir_badge}</td>'
-            f'<td style="padding: 10px 12px; text-align: center; vertical-align: middle;">{adir_badge}</td>'
-            f'<td style="padding: 10px 12px; text-align: center; vertical-align: middle;">{res_badge}</td>'
-            f'<td style="padding: 10px 12px; white-space: normal !important; word-wrap: break-word !important; overflow-wrap: break-word !important; line-height: 1.45; min-width: 280px; max-width: 480px; font-size: 0.81rem; color: {diag_color}; font-style: {diag_font_style}; vertical-align: middle;">{diag_val}</td>'
-            f'</tr>'
-        )
-        rows_html.append(row_html)
-
-    table_body = "\n".join(rows_html)
-    full_table_html = (
-        '<div style="max-height: 540px; overflow-y: auto; overflow-x: auto; border: 1px solid #30363D; border-radius: 8px; background: #0D1117; margin-bottom: 12px;">\n'
-        '  <table style="width: 100%; border-collapse: collapse; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, sans-serif; font-size: 0.82rem; text-align: left;">\n'
-        '    <thead>\n'
-        '      <tr style="position: sticky; top: 0; background: #161B22; z-index: 10; border-bottom: 2px solid #30363D;">\n'
-        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap;">Time (UTC)</th>\n'
-        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap;">Model</th>\n'
-        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; text-align: right;">Start Price</th>\n'
-        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; text-align: right;">Pred Target</th>\n'
-        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; text-align: right;">Actual (T+1h)</th>\n'
-        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; text-align: right;">Error ($)</th>\n'
-        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; text-align: center;">Pred Dir</th>\n'
-        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; text-align: center;">Actual Dir</th>\n'
-        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; text-align: center;">Result</th>\n'
-        '        <th style="padding: 10px 12px; color: #8B949E; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; min-width: 280px; max-width: 480px;">AI Diagnosis (Full)</th>\n'
-        '      </tr>\n'
-        '    </thead>\n'
-        '    <tbody>\n'
-        f'{table_body}\n'
-        '    </tbody>\n'
-        '  </table>\n'
-        '</div>'
-    )
-    st.markdown(full_table_html, unsafe_allow_html=True)
-
-
 # ---------------------------------------------------------------------------
 # 3. DATA FETCHING (NEON POSTGRESQL & BINANCE VISION)
 # ---------------------------------------------------------------------------
@@ -1245,14 +922,18 @@ def fetch_cloud_database_state(current_price: Optional[float]):
         db_ok, db_ver, db_lat = test_connection()
         if not db_ok:
             return fallback
+        ticks_df = get_latest_market_ticks(limit=500)
+        port_price = current_price if (current_price is not None and float(current_price) > 0) else (
+            float(ticks_df["close"].iloc[-1]) if not ticks_df.empty else None
+        )
         return {
             "db_ok": True, "db_ver": db_ver, "db_lat": db_lat, "db_error": None,
-            "ticks_df": get_latest_market_ticks(limit=500),
+            "ticks_df": ticks_df,
             "rec_df": get_reconciliation_history(limit=300),
             "rec_kpis": get_reconciliation_kpis(lookback_hours=168),
             "latest_audit": get_latest_council_audit(),
             "port_df": get_portfolio_history(limit=500),
-            "port_kpis": get_portfolio_kpis(current_price=float(current_price)) if (current_price is not None and float(current_price) > 0) else {},
+            "port_kpis": get_portfolio_kpis(current_price=float(port_price)) if port_price else {},
             "api_telemetry": get_api_telemetry_summary(hours=24),
             "model_counts": get_model_reconciled_counts(),
             "postmortems": get_latest_hourly_postmortems(limit=3),
@@ -1265,21 +946,19 @@ def fetch_cloud_database_state(current_price: Optional[float]):
 
 @st.cache_data(ttl=60)
 def fetch_model_reconciliation_kpis(model_version: str) -> Dict[str, Any]:
-    # Fetches 168h and lifetime KPIs filtered to a single registered model version.
+    # Fetch 168h and lifetime KPIs filtered to a single registered model version.
     return get_reconciliation_kpis(lookback_hours=168, model_version=model_version)
 
 
 @st.cache_data(ttl=300)
 def fetch_cached_mcp_context(limit: int = 3) -> Dict[str, Any]:
-    # Caches live MCP derivatives and news context across Streamlit reruns for 5 minutes.
-    from src.agents import fetch_mcp_context
+    # Cache live MCP derivatives and news context across Streamlit reruns for 5 minutes.
     return fetch_mcp_context(limit=limit)
 
 
 @st.cache_data(ttl=300)
 def fetch_cached_rag_proof(query_text: str, n_results: int = 3) -> Dict[str, Any]:
-    # Caches ChromaDB collection stats and semantic error-memory matches for 5 minutes.
-    from src.agents import get_rag_collection, get_rag_embedding_mode, query_similar_error_memories
+    # Cache ChromaDB collection stats and semantic error-memory matches for 5 minutes.
     rag_col = get_rag_collection()
     if not rag_col:
         return {"available": False}
@@ -1377,31 +1056,41 @@ st.sidebar.markdown(
 st.title("Mudra — Bitcoin 1-Hour AI Forecasting & Ground Truth Evaluation")
 st.caption("Multi-Model Inference (XGBoost v1/v2 & LightGBM v3) • Multi-Agent LangGraph Reasoning • Live Neon PostgreSQL Ground-Truth Verification")
 
-m2_forecast_result = generate_m2_forecast(live_df=live_market_df, m2_reg=m2_reg_model, m2_clf=m2_clf_model)
-m3_forecast_result = generate_m3_forecast(live_df=live_market_df, m3_reg=m3_reg_model, m3_clf=m3_clf_model)
+# Compute engineered features once and reuse across M1, M2, and M3 models.
+live_features = None
+if not is_stale_fallback and live_market_df is not None and len(live_market_df) >= 35:
+    try:
+        live_features = fe.extract_features_for_inference(live_market_df)
+    except Exception:
+        live_features = None
+
+forecast_result = generate_live_forecast(
+    live_df=live_market_df,
+    reg_model=reg_model,
+    clf_model=clf_model,
+    is_stale=is_stale_fallback,
+    precomputed_features=live_features,
+)
+forecasts_by_ver: Dict[str, Optional[Dict[str, Any]]] = {}
+for m_ver, m_spec in registered_models.items():
+    if (m_ver in ("xgb_onnx_v1.0.0", "xgb_v1") or m_spec.get("status") == "ACTIVE") and forecast_result is not None:
+        forecasts_by_ver[m_ver] = forecast_result
+    else:
+        forecasts_by_ver[m_ver] = generate_registered_model_forecast(
+            live_market_df,
+            m_ver,
+            m_spec,
+            precomputed_features=live_features,
+            is_stale=is_stale_fallback,
+        )
 
 # Section 1: Top Headline Metric Cards (Live Telemetry & Real-Time Targets)
 with st.container(border=True):
     st.markdown('<span class="section-badge">Section 1 · Live Telemetry & Model Targets</span>', unsafe_allow_html=True)
-    p_24h = float(live_market_df["close"].iloc[-24]) if len(live_market_df) >= 24 else None
     live_spot_price = fetch_live_btc_ticker_price(fallback_price=current_price)
-    spot_d_24h = (live_spot_price - p_24h) if live_spot_price and p_24h else None
-
-    forecast_result = generate_live_forecast(live_df=live_market_df, reg_model=reg_model, clf_model=clf_model, is_stale=is_stale_fallback)
-
-    fallback_24h_pct = ((spot_d_24h / p_24h) * 100.0) if (spot_d_24h is not None and p_24h and p_24h > 0) else None
 
     # Live Real-Time WebSocket Ticker Box (Self-updating every second via browser-native WebSocket)
-    render_live_btc_websocket_ticker(fallback_price=live_spot_price, fallback_24h_pct=fallback_24h_pct)
-
-    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
-
-    # Dynamic Dual-Output Model Predictions Row (Discovered dynamically across all registered models)
-    try:
-        from src.model_loader import get_registered_models
-        registered_models = get_registered_models()
-    except Exception:
-        registered_models = {}
+    render_live_btc_websocket_ticker(fallback_price=live_spot_price)
 
     if registered_models:
         sorted_models = sort_models_for_display(registered_models)
@@ -1410,14 +1099,7 @@ with st.container(border=True):
             with col:
                 card_title = get_model_card_title(m_ver, m_spec)
                 bench_caption = get_model_benchmark_caption(m_ver, m_spec)
-                if (m_ver in ("xgb_onnx_v1.0.0", "xgb_v1") or m_spec.get("status") == "ACTIVE") and forecast_result:
-                    f_res = forecast_result
-                elif m_ver == "xgb_v2.0.0" and m2_forecast_result:
-                    f_res = m2_forecast_result
-                elif m_ver == "lgbm_v3.0.0" and m3_forecast_result:
-                    f_res = m3_forecast_result
-                else:
-                    f_res = generate_candidate_forecast(live_market_df, m_spec)
+                f_res = forecasts_by_ver.get(m_ver)
 
                 if f_res:
                     f_dir = f_res.get("direction_label", "HOLD")
@@ -1433,20 +1115,13 @@ with st.container(border=True):
                     st.metric(card_title, "Standby", "Awaiting Data", help=f"{card_title} forecast is on standby.")
                 st.caption(bench_caption)
 
-        # table 1: current live predictions across all registered models
-        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+        # Table 1: Current live predictions across all registered models
         t1_rows = []
         rec_df_cache = db_state.get("rec_df", pd.DataFrame())
+        model_counts = db_state.get("model_counts", {})
+        candle_close_str = f"${current_price:,.2f}" if current_price else "—"
         for m_ver, m_spec in sorted_models:
-            if (m_ver in ("xgb_onnx_v1.0.0", "xgb_v1") or m_spec.get("status") == "ACTIVE") and forecast_result:
-                f_res = forecast_result
-            elif m_ver == "xgb_v2.0.0" and m2_forecast_result:
-                f_res = m2_forecast_result
-            elif m_ver == "lgbm_v3.0.0" and m3_forecast_result:
-                f_res = m3_forecast_result
-            else:
-                f_res = generate_candidate_forecast(live_market_df, m_spec)
-
+            f_res = forecasts_by_ver.get(m_ver)
             if m_spec.get("status") == "ACTIVE":
                 role = "Active Production"
             elif "v2" in m_ver:
@@ -1456,15 +1131,12 @@ with st.container(border=True):
             else:
                 role = "Registered Model"
 
-            model_counts = db_state.get("model_counts", {})
             if m_ver in model_counts:
                 m_eval_count = int(model_counts[m_ver])
             elif not rec_df_cache.empty and "model_version" in rec_df_cache.columns:
                 m_eval_count = int((rec_df_cache["model_version"] == m_ver).sum())
             else:
                 m_eval_count = 0
-            if m_ver in ("xgb_onnx_v1.0.0", "xgb_v1") and m_eval_count == 0:
-                m_eval_count = len(rec_df_cache)
 
             if m_eval_count >= 168:
                 track_str = f"{m_eval_count:,} hrs"
@@ -1481,7 +1153,7 @@ with st.container(border=True):
             t1_rows.append({
                 "Model": format_model_display_name(m_ver),
                 "Role": role,
-                "BTC at Forecast": f"${live_spot_price:,.2f}" if live_spot_price else "—",
+                "Candle Close (UTC)": candle_close_str,
                 "Predicted Target ($)": target_val,
                 "Pred Return (%)": ret_val,
                 "Classifier Dir": dir_val,
@@ -1492,21 +1164,7 @@ with st.container(border=True):
         if t1_rows:
             st.dataframe(pd.DataFrame(t1_rows), use_container_width=True, hide_index=True)
     else:
-        # Fallback to single Active Model 1 card
-        with st.container():
-            if forecast_result:
-                m1_dir = forecast_result.get("direction_label", "HOLD")
-                m1_p_up = forecast_result.get("prob_up", 50.0)
-                m1_ret = forecast_result.get("pred_ret_pct", 0.0)
-                st.metric(
-                    "Model 1 (Active XGBoost v1)",
-                    f"${forecast_result['pred_target']:,.2f}",
-                    f"{m1_dir} ({m1_ret:+.2f}%) • P(UP): {m1_p_up:.1f}%",
-                    help="Active XGBoost v1 model: Regressor next-hour target price and classifier direction probability."
-                )
-            else:
-                st.metric("Model 1 (Active XGBoost v1)", "Computing...", "Awaiting Candle", help="Model 1 forecast is calculating.")
-            st.caption("Benchmark: **53.26%** Accuracy · 0.6914 Log-Loss · 39 Classifier / 26 Regressor Features")
+        st.info("No signed production or shadow models passed SHA-256 verification.")
 
 st.divider()
 
@@ -1523,7 +1181,7 @@ with tab_models:
     with st.container(border=True):
         st.markdown('<span class="section-badge">Model Evolution & Governance</span>', unsafe_allow_html=True)
         st.subheader("Model Benchmark Comparison (Active vs. Shadow Candidates)")
-        st.caption("Empirical holdout validation metrics comparing Active Model 1 (53.26%) alongside Shadow Models 2 (52.07%) & 3 (52.89%).")
+        st.caption("Empirical holdout validation metrics loaded directly from each signed model manifest.")
 
         manifest_rows = []
         models_dir = ROOT_DIR / "artifacts" / "models"
@@ -1559,7 +1217,6 @@ with tab_models:
 
         shap_path = ROOT_DIR / "docs" / "images" / "shap_classifier_summary.png"
         if shap_path.exists():
-            st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
             st.subheader("TreeSHAP Feature Importance & Interpretability")
             st.image(str(shap_path), use_column_width=True)
             st.caption("Static Holdout TreeSHAP Summary (Offline Test Split) — live hourly per-row TreeSHAP drivers are displayed in Tab 2 under Hourly Post-Mortems.")
@@ -1615,17 +1272,9 @@ with tab_models:
                 └── End:   2026-07-06 08:00:00 UTC (Pure out-of-sample forward evaluation)
                 ```
 
-                #### Controlled Model Benchmark & Rejection Rationale
-                | Model Version | Regressor RMSE (USD) | Direction Hit Rate | Classifier Accuracy | Classifier Macro F1 | Governance Status |
-                | :--- | :--- | :--- | :--- | :--- | :--- |
-                | **Naive Persistence** | **$398.77** | *Baseline* | *Baseline* | *Baseline* | Reference Benchmark |
-                | **`xgb_onnx_v1.0.0`** *(Active)* | $399.47 | **50.50%** | **53.26%** | **0.5297** | **ACTIVE PRODUCTION** |
-                | **`p1_controlled_candidate_v1`** | $399.37 | 50.36% | 53.03% | 0.5280 | **REJECTED CANDIDATE** |
-
                 *Note: Simulated paper-trading performance demonstrates execution accounting and fee-hurdle discipline.*
                 """
             )
-            st.caption("Forecast Error Investigations & Root-Cause Audit Log (investigation_headline_search, investigation_status_filter available)")
 
 # Tab 2: Ground Truth (T+1h)
 with tab_ground_truth:
@@ -1697,8 +1346,6 @@ with tab_ground_truth:
                     help="Average absolute dollar gap between predicted target and actual close."
                 )
 
-            st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
-
             table_df["Start Price"] = table_df.get("start_price", table_df.get("close", table_df["predicted_price"])).apply(lambda x: f"${float(x):,.2f}" if pd.notna(x) and float(x or 0) > 0 else "—")
             table_df["Pred Target"] = table_df["predicted_price"].apply(lambda x: f"${float(x or 0):,.2f}")
             table_df["Actual (T+1h)"] = table_df["actual_price_at_t_plus_1"].apply(lambda x: f"${float(x or 0):,.2f}")
@@ -1709,12 +1356,8 @@ with tab_ground_truth:
             table_df["AI Diagnosis (1-Line)"] = table_df.apply(format_ground_truth_diagnosis, axis=1)
 
             show_cols = ["Time (UTC)", "Model", "Start Price", "Pred Target", "Actual (T+1h)", "Error ($)", "Pred Dir", "Actual Dir", "Result", "AI Diagnosis (1-Line)"]
-            render_ground_truth_html_table(table_df[show_cols].head(50))
+            st.dataframe(table_df[show_cols].head(50), use_container_width=True, hide_index=True)
 
-            with st.expander("View Raw Compact Data Grid (Glide Table)", expanded=False):
-                st.dataframe(table_df[show_cols].head(50), use_container_width=True, hide_index=True)
-
-            st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
             with st.expander("View Forecast Target vs. Realized Market Scatter Plot", expanded=True):
                 st.plotly_chart(create_reconciliation_scatter(scatter_df), use_container_width=True)
 
@@ -1805,10 +1448,8 @@ with tab_portfolio:
                     st.metric(title, "Unavailable", "Awaiting DB data", help=hlp)
 
         if not port_df.empty:
-            st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
             st.plotly_chart(create_alpha_equity_curve(port_df), use_container_width=True)
 
-            st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
             st.markdown("**Recent Paper Trading Order Log & Strategy Rationale (Past 24 Hours / 24 Decisions):**")
             t_disp = port_df.iloc[::-1].copy().head(24)
             t_disp["Time (UTC)"] = pd.to_datetime(t_disp["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
@@ -1827,7 +1468,11 @@ with tab_portfolio:
             show_port_cols = ["Time (UTC)", "Order Action", "Market Price (BTC)", "Position / Trade", "Fee Deducted ($)", "Portfolio Equity ($)", "Strategy Rationale"]
             st.dataframe(t_disp[show_port_cols], use_container_width=True, hide_index=True)
         else:
-            st.info("Portfolio initialized with $10,000.00 USDT virtual bankroll.")
+            st.info(
+                "Portfolio initialized with $10,000.00 USDT virtual bankroll."
+                if db_state.get("db_ok")
+                else "Portfolio history unavailable while database is offline."
+            )
 
     with st.container(border=True):
         st.markdown('<span class="section-badge">Live Market Charts</span>', unsafe_allow_html=True)
@@ -1848,7 +1493,6 @@ with tab_portfolio:
             """,
             height=550,
         )
-        st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
         st.caption("Python Plotly Technical Analysis (Hourly Candles with EMA 20, EMA 50 & Volume):")
         st.plotly_chart(create_tradingview_candlestick(live_market_df), use_container_width=True)
 
@@ -1868,7 +1512,6 @@ with tab_agent:
         except Exception:
             mcp_ctx = {"funding_rate_8h_pct": None, "derivatives_regime": "Unavailable", "futures_basis_usd": None, "derivatives_source": "none", "recent_error_memories": []}
 
-        from src.agents import get_multi_model_consensus
         mp1, mp2, mp3 = st.columns(3)
         fr_val = mcp_ctx.get("funding_rate_8h_pct")
         fr_text = f"{fr_val:+.4f}%" if fr_val is not None else "Unavailable"
@@ -1890,8 +1533,6 @@ with tab_agent:
             else:
                 st.metric("Multi-Model Consensus", "Awaiting Data", "Standby")
 
-        st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
-
         # Live Episodic RAG Memory Proof Panel (cached 5m using local MiniLM embeddings)
         try:
             vol_sp = float((forecast_result or {}).get("spread_pct") or 1.0)
@@ -1912,7 +1553,7 @@ with tab_agent:
                 rule_docs = int(rag_proof.get("rule_docs", 0))
                 retrieved_memories = rag_proof.get("retrieved", [])
                 embedding_mode = str(rag_proof.get("embedding_mode", "local_minilm"))
-                mode_color = "#3FB950" if embedding_mode in ("local_minilm", "gemini-embedding-001") else "#D29922"
+                mode_color = "#3FB950" if embedding_mode == "local_minilm" else "#D29922"
 
                 with st.container(border=True):
                     st.markdown(
@@ -1938,99 +1579,95 @@ with tab_agent:
         except Exception:
             pass
 
-        st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+        live_council = st.session_state.get("council_state")
+        audit_data = db_state.get("latest_audit") or {}
+        if isinstance(live_council, dict) and live_council:
+            source_badge = "LIVE ON-DEMAND GEMINI COUNCIL" if not live_council.get("circuit_breaker_active") else "LIVE ON-DEMAND RULE COUNCIL (GEMINI FALLBACK)"
+            last_thesis = str(live_council.get("thesis") or live_council.get("strategist_thesis") or "Deliberation complete.")
+            last_action = str(live_council.get("final_decision") or "HOLD")
+            last_verdict = str(live_council.get("risk_verdict") or "APPROVED")
+            conviction = int(live_council.get("strategist_conviction") or 5)
+            extra_detail = f"Risk Critic: {live_council.get('risk_critic_critique', '')} | Consensus: {live_council.get('model_consensus', 'N/A')}"
+        else:
+            source_badge = "AUTOMATED HOURLY RULE ENGINE (use_llm=False)"
+            # Fall back to execution_notes because CouncilAudit ORM exposes notes rather than a thesis column.
+            last_thesis = str(audit_data.get("thesis") or audit_data.get("execution_notes") or "Awaiting deliberation.")
+            last_action = str(audit_data.get("final_decision") or "HOLD")
+            last_verdict = str(audit_data.get("risk_verdict") or "APPROVED")
+            conviction = int(audit_data.get("strategist_conviction") or 5)
+            rag_note = str(audit_data.get("rag_context_summary") or "").strip()
+            extra_detail = f"RAG Context: {rag_note[:220]}" if rag_note else ""
 
-        if current_price is not None and forecast_result is not None:
-            live_council = st.session_state.get("council_state")
-            audit_data = db_state.get("latest_audit") or {}
-            if isinstance(live_council, dict) and live_council:
-                source_badge = "LIVE ON-DEMAND GEMINI COUNCIL" if not live_council.get("circuit_breaker_active") else "LIVE ON-DEMAND RULE COUNCIL (GEMINI FALLBACK)"
-                last_thesis = str(live_council.get("thesis") or live_council.get("strategist_thesis") or "Deliberation complete.")
-                last_action = str(live_council.get("final_decision") or "HOLD")
-                last_verdict = str(live_council.get("risk_verdict") or "APPROVED")
-                conviction = int(live_council.get("strategist_conviction") or 5)
-                extra_detail = f"Risk Critic: {live_council.get('risk_critic_critique', '')} | Consensus: {live_council.get('model_consensus', 'N/A')}"
-            else:
-                source_badge = "AUTOMATED HOURLY RULE ENGINE (use_llm=False)"
-                # Fall back to execution_notes because CouncilAudit ORM exposes notes rather than a thesis column
-                last_thesis = str(audit_data.get("thesis") or audit_data.get("execution_notes") or "Awaiting deliberation.")
-                last_action = str(audit_data.get("final_decision") or "HOLD")
-                last_verdict = str(audit_data.get("risk_verdict") or "APPROVED")
-                conviction = int(audit_data.get("strategist_conviction") or 5)
-                rag_note = str(audit_data.get("rag_context_summary") or "").strip()
-                extra_detail = f"RAG Context: {rag_note[:220]}" if rag_note else ""
-
-            r_col1, r_col2 = st.columns([2.5, 1])
-            with r_col1:
-                st.markdown(
-                    f"""
-                    <div class="deliberation-card">
-                        <div style="font-size: 0.72rem; font-weight: 700; color: #58A6FF; letter-spacing: 0.05em; margin-bottom: 4px;">
-                            {html.escape(source_badge)}
-                        </div>
-                        <div style="font-size: 0.95rem; font-weight: 700; color: #F0F6FC; margin-bottom: 6px;">
-                            Multi-Agent Decision: <span style="color: #58A6FF;">{html.escape(last_action)}</span> &nbsp;|&nbsp; 
-                            Risk Gate: <span style="color: {'#00C087' if last_verdict == 'APPROVED' else '#FF3B69'};">{html.escape(last_verdict)}</span> &nbsp;|&nbsp; 
-                            Model Conviction: <span style="color: #F7931A;">{conviction}/10</span>
-                        </div>
-                        <div style="font-size: 0.85rem; color: #C9D1D9; line-height: 1.45; margin-bottom: 8px;">
-                            <strong>Council Reasoning:</strong> {html.escape(last_thesis)}
-                        </div>
-                        {f'<div style="font-size: 0.78rem; color: #8B949E;">{html.escape(extra_detail)}</div>' if extra_detail else ''}
+        r_col1, r_col2 = st.columns([2.5, 1])
+        with r_col1:
+            st.markdown(
+                f"""
+                <div class="deliberation-card">
+                    <div style="font-size: 0.72rem; font-weight: 700; color: #58A6FF; letter-spacing: 0.05em; margin-bottom: 4px;">
+                        {html.escape(source_badge)}
                     </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                    <div style="font-size: 0.95rem; font-weight: 700; color: #F0F6FC; margin-bottom: 6px;">
+                        Multi-Agent Decision: <span style="color: #58A6FF;">{html.escape(last_action)}</span> &nbsp;|&nbsp; 
+                        Risk Gate: <span style="color: {'#00C087' if last_verdict == 'APPROVED' else '#FF3B69'};">{html.escape(last_verdict)}</span> &nbsp;|&nbsp; 
+                        Model Conviction: <span style="color: #F7931A;">{conviction}/10</span>
+                    </div>
+                    <div style="font-size: 0.85rem; color: #C9D1D9; line-height: 1.45; margin-bottom: 8px;">
+                        <strong>Council Reasoning:</strong> {html.escape(last_thesis)}
+                    </div>
+                    {f'<div style="font-size: 0.78rem; color: #8B949E;">{html.escape(extra_detail)}</div>' if extra_detail else ''}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            if forecast_result is not None:
                 st.info(f"**Market Features Analyzed:** Volatility Spread: `{forecast_result['spread_pct']:.2f}%` | 1h Price Range: `${forecast_result['candle_range_usd']:,.2f}` | Expected Return: `{forecast_result['pred_ret_pct']:+.2f}%`")
-            with r_col2:
-                st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
-                if st.button("Run Live Multi-Agent Deliberation Now", use_container_width=True, help="Executes LangGraph agentic loop across Strategist, Risk Critic, ChromaDB memory, and Execution agents."):
-                    with st.spinner("Deliberating through LangGraph council..."):
-                        m_data, t_data, f_data = build_council_scenario_payload("live", current_price, forecast_result, live_market_df)
-                        res = run_trading_graph("BTCUSDT", current_price, m_data, t_data, f_data, use_llm=True)
-                        st.session_state["council_state"] = res
-                        st.success("Council Deliberation Complete!")
-                        st.rerun()
-                if isinstance(live_council, dict) and live_council:
-                    if st.button("Reset to Latest Hourly Audit", use_container_width=True):
-                        st.session_state.pop("council_state", None)
-                        st.rerun()
+        with r_col2:
+            can_deliberate = current_price is not None and forecast_result is not None
+            if st.button("Run Live Multi-Agent Deliberation Now", use_container_width=True, disabled=not can_deliberate, help="Executes LangGraph agentic loop across Strategist, Risk Critic, ChromaDB memory, and Execution agents."):
+                with st.spinner("Deliberating through LangGraph council..."):
+                    m_data, t_data, f_data = build_live_council_payload(current_price, forecast_result, live_market_df)
+                    res = run_trading_graph("BTCUSDT", current_price, m_data, t_data, f_data, use_llm=True)
+                    st.session_state["council_state"] = res
+                    st.success("Council Deliberation Complete!")
+                    st.rerun()
+            if isinstance(live_council, dict) and live_council:
+                if st.button("Reset to Latest Hourly Audit", use_container_width=True):
+                    st.session_state.pop("council_state", None)
+                    st.rerun()
 
-            st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
-            # 4-Agent Architecture Breakdown for Recruiters / Technical Interviews
-            st.markdown("##### Multi-Agent Responsibilities (LangGraph Architecture)")
-            ag1, ag2, ag3, ag4 = st.columns(4)
-            with ag1:
-                with st.container(border=True):
-                    st.markdown(
-                        "**1. Strategist Agent**  \n"
-                        "*Role:* Evaluates multi-model signals (XGBoost v1/v2 & LightGBM v3). Proposes a trade ONLY when expected move exceeds the exchange fee hurdle."
-                    )
-            with ag2:
-                with st.container(border=True):
-                    st.markdown(
-                        "**2. Risk Critic Agent**  \n"
-                        "*Role:* Evaluates volatility spread, range expansion, and liquidation risk. Has absolute veto power over the Strategist during choppy or adverse market regimes."
-                    )
-            with ag3:
-                with st.container(border=True):
-                    st.markdown(
-                        "**3. ChromaDB RAG Memory**  \n"
-                        "*Role:* Episodic vector memory. Embeds past market hours and retrieves historical mispredictions to stop the council from repeating past false-breakout mistakes."
-                    )
-            with ag4:
-                with st.container(border=True):
-                    st.markdown(
-                        "**4. Execution Agent**  \n"
-                        f"*Role:* Deterministic accounting. Deducts exchange taker fees and slippage ({ROUND_TRIP_FRICTION_PCT:.2f}% round-trip friction), managing cash and BTC balances in the paper portfolio."
-                    )
-
-            st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
-            with st.expander("Technical Interview Notes: Why Machine Learning Alone Is Not Enough In Quant Trading", expanded=False):
+        # 4-Agent Architecture Breakdown for Recruiters / Technical Interviews
+        st.markdown("##### Multi-Agent Responsibilities (LangGraph Architecture)")
+        ag1, ag2, ag3, ag4 = st.columns(4)
+        with ag1:
+            with st.container(border=True):
                 st.markdown(
-                    f"""
-                    - **The Fee Hurdle Reality:** On 1-hour Bitcoin candles, standard binary prediction accuracy of ~53% is statistically significant (baseline random walk is 50%). However, Binance charges maker/taker fees (~{ROUND_TRIP_FRICTION_PCT:.2f}% round-trip friction with slippage). Trading every hour on slight edges results in negative PnL due to fee drag.
-                    - **Why LangGraph Multi-Agent Architecture Was Chosen:** Pure ML outputs raw numbers. The LangGraph council separates *signal generation* (XGBoost/LightGBM) from *capital preservation* (Risk Critic). If the market is in sideways chop, the Risk Critic forces a `HOLD`, saving capital.
-                    - **Episodic RAG Retrieval:** By vectorizing past hourly features into ChromaDB, the council checks: *"Did we previously lose money under this exact volatility and order-flow profile?"* If yes, the council reduces conviction or rejects the trade.
-                    """
+                    "**1. Strategist Agent**  \n"
+                    "*Role:* Evaluates multi-model signals (XGBoost v1/v2 & LightGBM v3). Proposes a trade ONLY when expected move exceeds the exchange fee hurdle."
                 )
+        with ag2:
+            with st.container(border=True):
+                st.markdown(
+                    "**2. Risk Critic Agent**  \n"
+                    "*Role:* Evaluates volatility spread, range expansion, and liquidation risk. Has absolute veto power over the Strategist during choppy or adverse market regimes."
+                )
+        with ag3:
+            with st.container(border=True):
+                st.markdown(
+                    "**3. ChromaDB RAG Memory**  \n"
+                    "*Role:* Episodic vector memory. Embeds past market hours and retrieves historical mispredictions to stop the council from repeating past false-breakout mistakes."
+                )
+        with ag4:
+            with st.container(border=True):
+                st.markdown(
+                    "**4. Execution Agent**  \n"
+                    f"*Role:* Deterministic accounting. Deducts exchange taker fees and slippage ({ROUND_TRIP_FRICTION_PCT:.2f}% round-trip friction), managing cash and BTC balances in the paper portfolio."
+                )
+
+        with st.expander("Technical Interview Notes: Why Machine Learning Alone Is Not Enough In Quant Trading", expanded=False):
+            st.markdown(
+                f"""
+                - **The Fee Hurdle Reality:** On 1-hour Bitcoin candles, standard binary prediction accuracy of ~53% is statistically significant (baseline random walk is 50%). However, Binance charges maker/taker fees (~{ROUND_TRIP_FRICTION_PCT:.2f}% round-trip friction with slippage). Trading every hour on slight edges results in negative PnL due to fee drag.
+                - **Why LangGraph Multi-Agent Architecture Was Chosen:** Pure ML outputs raw numbers. The LangGraph council separates *signal generation* (XGBoost/LightGBM) from *capital preservation* (Risk Critic). If the market is in sideways chop, the Risk Critic forces a `HOLD`, saving capital.
+                - **Episodic RAG Retrieval:** By vectorizing past hourly features into ChromaDB, the council checks: *"Did we previously lose money under this exact volatility and order-flow profile?"* If yes, the council reduces conviction or rejects the trade.
+                """
+            )
