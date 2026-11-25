@@ -6,7 +6,7 @@ Across **34,990 hours** of Binance market data under a strict leak-free chronolo
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://mudra-trading.streamlit.app)
 [![CI/CD Pipeline](https://github.com/MohitSingh-2335/Mudra/actions/workflows/ci.yml/badge.svg)](https://github.com/MohitSingh-2335/Mudra/actions/workflows/ci.yml)
 [![Hourly Worker](https://github.com/MohitSingh-2335/Mudra/actions/workflows/hourly_worker.yml/badge.svg)](https://github.com/MohitSingh-2335/Mudra/actions/workflows/hourly_worker.yml)
-[![Tests Passing](https://img.shields.io/badge/pytest-93%20passed-00C087?logo=pytest&logoColor=white)](https://github.com/MohitSingh-2335/Mudra)
+[![Tests Passing](https://img.shields.io/badge/pytest-94%20passed-00C087?logo=pytest&logoColor=white)](https://github.com/MohitSingh-2335/Mudra)
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![LangGraph](https://img.shields.io/badge/Orchestration-LangGraph-8A2BE2)](https://langchain-ai.github.io/langgraph/)
 [![PostgreSQL](https://img.shields.io/badge/Database-Neon%20PostgreSQL-00E599?logo=postgresql&logoColor=white)](https://neon.tech/)
@@ -37,6 +37,8 @@ CLEAN DATASET (34,990 Validated 1-Hour BTC/USDT Candles, 2022-07-08 to 2026-07-0
 
 ## 2. Model Evolution & Research Benchmarks
 
+![Model Benchmark Comparison](docs/images/model_benchmark_comparison.png)
+
 | Model / Baseline | Role | Features & Calibration | Regressor RMSE (USD) | Return MAE | Dir. Accuracy | Log-Loss | Details |
 | :--- | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Naive Persistence** | Baseline | $\hat{P}_{t+1} = P_t$ | **$398.77** | **0.003198** | 50.39% | 0.6931 | [Model Evolution Ledger](docs/reports/model_evolution_ledger.md) |
@@ -49,9 +51,23 @@ CLEAN DATASET (34,990 Validated 1-Hour BTC/USDT Candles, 2022-07-08 to 2026-07-0
 
 **Phase Evaluation Reports:** [Classical Model Backtesting](docs/reports/classical_model_backtesting.md) · [Foundation Model Zero-Shot Evaluation](docs/reports/foundation_model_zero_shot_evaluation.md) · [Fear & Greed Feature Evaluation](docs/reports/fear_greed_feature_evaluation.md) · [On-Chain Metrics Evaluation](docs/reports/onchain_metrics_evaluation.md)
 
-![TreeSHAP Classifier Feature Importance](docs/images/shap_classifier_summary.png)
+### TreeSHAP Attribution & Fee-Hurdle Backtest Proof
 
-*Holdout TreeSHAP summary (`v1_39features`): short-horizon order flow (`taker_buy_ratio`), intra-candle volatility, and momentum dominate signal; Model 2 and Model 3 progressively strip drifting dollar scales into scale-invariant ratios and log z-scores.*
+| Classifier Feature Importance (Direction) | Regressor Feature Importance (Return) |
+| :---: | :---: |
+| ![TreeSHAP Classifier Feature Importance](docs/images/shap_classifier_summary.png) | ![TreeSHAP Regressor Feature Importance](docs/images/shap_regressor_summary.png) |
+
+*Holdout TreeSHAP summaries (`v1_39features`): short-horizon order flow (`taker_buy_ratio`), intra-candle volatility, and momentum dominate signal; Model 2 and Model 3 progressively strip drifting dollar scales into scale-invariant ratios and log z-scores.*
+
+![Holdout Strategy Backtest Performance](docs/images/backtest_performance.png)
+
+*6,998-hour chronological holdout backtest (`$10,000` initial capital): trading every classifier signal loses `-92.47%` over 1,196 trades under round-trip exchange friction, whereas expected-return hurdle gating preserves capital (`-17.66%` vs. `-45.41%` BTC buy-and-hold).*
+
+### Live Ground-Truth Reconciliation Proof (Neon PostgreSQL)
+
+![Live Ground Truth Reconciliation](docs/images/ground_truth_reconciliation.png)
+
+*Live trailing `T+1h` reconciliation queried directly from Neon PostgreSQL (`market_ticks` vs. `reconciliations`): green markers indicate correct directional calls (`UP`/`DOWN`) and red markers indicate directional mismatches.*
 
 ---
 
@@ -63,7 +79,7 @@ flowchart LR
     Ingest --> Feat["Causal Feature Pipeline\nsrc/feature_engineering.py\n& SHA-256 Loader"]
     Feat --> Models["Multi-Model Inference\nM1 (Active) + M2/M3 (Shadow)"]
     Models --> Reconcile["T+1h Ground Truth + TreeSHAP\nsrc/explainability.py -> Gemini Post-Mortem"]
-    Models --> Council["4-Layer src/ai/ Stack\nMCP stdio · Local MiniLM RAG · LangGraph · Gemini"]
+    Models --> Council["4-Layer src/ai/ Stack\nMCP stdio · Gemini/MiniLM RAG · LangGraph · Gemini"]
     Reconcile --> DB["Neon Serverless PostgreSQL\n8 Production Audit Tables"]
     Council --> DB
     DB --> Apps["Streamlit Dashboard & FastAPI\napp.py · src/api.py"]
@@ -72,7 +88,7 @@ flowchart LR
 ### Modular 4-Layer Agent Stack (`src/ai/`)
 - **Layer 1 — LLM & Structured Post-Mortems ([`src/ai/llm.py`](src/ai/llm.py)):** Official `google-genai` SDK candidate fallback (`gemini-3.1-flash-lite` chain), strict Pydantic schemas (`HourlyPostmortemOutput`, `MarketAnalystReport`), LangSmith `@traceable` secret bridging, HTTP `429` cooldowns, and per-model `api_telemetry` tracking.
 - **Layer 2 — Real FastMCP `stdio` Client ([`src/ai/mcp_client.py`](src/ai/mcp_client.py), [`src/mcp_server.py`](src/mcp_server.py)):** Spawns the FastMCP server over `mcp_stdio` with isolated per-tool timeouts (`6s` for Deribit/Kraken perpetual funding & 6h CryptoCompare/RSS headlines; `8s` for Neon error memories) so slow DB wakes never starve live market feeds.
-- **Layer 3 — Quota-Free Local RAG ([`src/ai/rag.py`](src/ai/rag.py)):** ChromaDB (`mudra_rag_minilm_v1`) powered by CPU ONNX MiniLM embeddings (`DefaultEmbeddingFunction()`, zero remote embedding quota burn) storing quantitative regime rules hydrated with reconciled Neon prediction episodes.
+- **Layer 3 — Hybrid Dual-Collection RAG ([`src/ai/rag.py`](src/ai/rag.py)):** Uses Google `gemini-embedding-001` (`768`-dim, `mudra_rag_gemini_v1`) as primary semantic retriever and automatically falls back to local CPU ONNX MiniLM (`384`-dim `local_minilm`, `mudra_rag_minilm_v1`) under a 15-minute cooldown if Gemini hits HTTP `429`, recovering automatically once quota resets without mixing vector dimensions.
 - **Layer 4 — 2-Node LangGraph Council ([`src/ai/workflow.py`](src/ai/workflow.py)):** `StateGraph` (`strategist_node` -> `risk_critic_node`) with deterministic fee-hurdle and `3.8%` volatility risk gates. Uses `use_llm=False` in automated hourly cycles to preserve quota and `use_llm=True` with multi-model classifier consensus for on-demand UI/API deliberations.
 
 ### Production MLOps Invariants & Neon Schema
@@ -90,7 +106,7 @@ git clone https://github.com/MohitSingh-2335/Mudra.git
 cd Mudra
 
 pip install -r requirements.txt
-pytest tests/ -q                     # 93 passed (causality, SHA-256, engine, DB, AI layers)
+pytest tests/ -q                     # 94 passed (causality, SHA-256, engine, DB, AI layers)
 streamlit run app.py                 # Dashboard at http://localhost:8501
 uvicorn src.api:app --port 8000      # FastAPI endpoints (/health, /predict, /explain, /analyze, /agents/trade)
 python scripts/run_hourly_worker.py  # Single ingestion, M1/M2/M3 inference, T+1h reconciliation & audit cycle
@@ -130,7 +146,7 @@ Mudra/
 │   ├── model_loader.py           # Fail-closed SHA-256 verification & multi-model registry discovery
 │   ├── backtesting.py            # Chronological backtest & fee-hurdle sweep simulator
 │   └── api.py                    # FastAPI REST service & Pydantic v2 schemas
-└── tests/                        # 93 automated unit & integration tests (pytest)
+└── tests/                        # 94 automated unit & integration tests (pytest)
 ```
 
 ---
