@@ -14,7 +14,6 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from email.utils import parsedate_to_datetime
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -26,7 +25,6 @@ from sqlalchemy.orm import Session
 
 from config import (
     ACTIVE_MODEL_VERSION,
-    CLASSIFIER_MODEL_PATH,
     EXCHANGE_CONNECT_TIMEOUT,
     EXCHANGE_MAX_RETRY_AFTER_CAP,
     EXCHANGE_READ_TIMEOUT,
@@ -39,24 +37,19 @@ from config import (
     INITIAL_CAPITAL_USD,
     MIN_HURDLE_PCT,
     PORTFOLIO_ADVISORY_LOCK_ID,
-    REGRESSOR_MODEL_PATH,
-    ROUND_TRIP_FRICTION_PCT,
-    SLIPPAGE_PCT,
     SLIPPAGE_RATE,
-    TAKER_FEE_PCT,
     TAKER_FEE_RATE,
-    TOTAL_FRICTION_PER_SIDE_PCT,
 )
-from src.agents import (
+from src.ai.llm import generate_hourly_postmortem_with_gemini
+from src.ai.mcp_client import fetch_mcp_context
+from src.ai.workflow import (
     calculate_technical_signals,
-    fetch_mcp_context,
-    generate_hourly_postmortem_with_gemini,
     get_model_return_forecast,
     run_trading_graph,
 )
 from src.database import (
     CouncilAudit, HourlyPostmortem, MarketTick, ModelPrediction, ModelRegistry, PaperPortfolio, Reconciliation,
-    get_db, has_tick_id_column, log_telemetry, test_connection,
+    get_db, log_telemetry, test_connection,
 )
 
 logger = logging.getLogger("mudra.engine")
@@ -109,7 +102,7 @@ def execute_paper_order(session: Session, action: str, current_price: float, kel
     if bind and "postgresql" in bind.dialect.name:
         session.execute(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": PORTFOLIO_ADVISORY_LOCK_ID})
 
-    if tick_id is not None and has_tick_id_column(session):
+    if tick_id is not None:
         existing = session.execute(select(PaperPortfolio).where(PaperPortfolio.tick_id == tick_id)).scalar_one_or_none()
         if existing is not None:
             return existing
@@ -183,7 +176,7 @@ def execute_paper_order(session: Session, action: str, current_price: float, kel
             session.add(record)
             session.flush()
     except IntegrityError:
-        if tick_id is not None and has_tick_id_column(session):
+        if tick_id is not None:
             existing = session.execute(select(PaperPortfolio).where(PaperPortfolio.tick_id == tick_id)).scalar_one_or_none()
             if existing is not None:
                 return existing
@@ -320,9 +313,13 @@ def backfill_missing_candles(session, candle: Dict[str, Any]) -> int:
     gap_hours = (latest_ts - prior_ts).total_seconds() / 3600.0
     if gap_hours > BACKFILL_LARGE_GAP_WARNING_HOURS:
         sync_logger.warning("Detected large candle gap of %.1f hours (%s -> %s).", gap_hours, prior_ts, latest_ts)
-    existing_rows = session.execute(select(MarketTick.timestamp).where(MarketTick.timestamp < latest_ts)).scalars().all()
+    oldest_ts_raw = session.execute(select(func.min(MarketTick.timestamp))).scalar()
+    anchor_ts = min(_normalize_utc_timestamp(oldest_ts_raw), prior_ts) if oldest_ts_raw else prior_ts
+    min_cand_ts = sorted_candidates[0]["timestamp"]
+    existing_rows = session.execute(
+        select(MarketTick.timestamp).where(MarketTick.timestamp >= min_cand_ts, MarketTick.timestamp < latest_ts)
+    ).scalars().all()
     existing_ts = {_normalize_utc_timestamp(r) for r in existing_rows if r is not None}
-    anchor_ts = min(existing_ts | {prior_ts})
 
     inserted = 0
     for c_data in sorted_candidates:
@@ -391,9 +388,6 @@ def parse_retry_after(retry_after_header: Optional[str], now_dt_fn: Optional[Cal
     except Exception:
         pass
     return None
-
-
-_parse_retry_after_header = parse_retry_after
 
 
 def _validate_candle_payload(payload: Any, min_row_len: int = BINANCE_MIN_ROW_LEN) -> bool:
@@ -478,12 +472,34 @@ def _fetch_feed_with_retry(
     return None
 
 
+def _build_ohlcv_records(selected: List[Any], is_binance: bool) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    for k in selected:
+        if is_binance:
+            vol = float(k[5])
+            taker_vol = float(k[9])
+            records.append({
+                "timestamp": pd.to_datetime(float(k[0]), unit="ms", utc=True),
+                "open": float(k[1]), "high": float(k[2]), "low": float(k[3]), "close": float(k[4]),
+                "volume": vol, "number_of_trades": _parse_trade_count(k[8]),
+                "taker_buy_base_volume": taker_vol,
+                "taker_buy_ratio": round(taker_vol / vol, 4) if vol > 0 else None,
+            })
+        else:
+            records.append({
+                "timestamp": pd.to_datetime(float(k[0]), unit="s", utc=True),
+                "low": float(k[1]), "high": float(k[2]), "open": float(k[3]), "close": float(k[4]),
+                "volume": float(k[5]), "number_of_trades": None,
+            })
+    return records
+
+
 def fetch_latest_confirmed_candle(
     symbol: str = "BTCUSDT", sleep_fn: Optional[Callable[[float], None]] = None,
     jitter_fn: Optional[Callable[[float, float], float]] = None, clock_fn: Optional[Callable[[], float]] = None,
     now_dt_fn: Optional[Callable[[], datetime]] = None, total_deadline: Optional[float] = None,
 ) -> Dict[str, Any]:
-    # fetches confirmed 1-hour candle from Binance Vision with Coinbase fallback
+    # Fetches confirmed 1h candle from Binance Vision (preserving c[9] taker buy volume) with Coinbase fallback
     _sleep_fn, _jitter_fn = sleep_fn or time.sleep, jitter_fn or random.uniform
     _clock_fn, _budget = clock_fn or time.perf_counter, total_deadline or EXCHANGE_RETRY_TOTAL_DEADLINE
 
@@ -499,25 +515,14 @@ def fetch_latest_confirmed_candle(
         confirmed = [k for k in binance_klines if float(k[6]) < now_ms]
         if len(confirmed) >= 35:
             selected = confirmed[-100:]
-            c = selected[-1]
-            # Preserve Binance kline c[9] (taker_buy_base_volume) for Model 2 and Model 3 parity.
-            records = [
-                {
-                    "timestamp": pd.to_datetime(float(k[0]), unit="ms", utc=True),
-                    "open": float(k[1]), "high": float(k[2]), "low": float(k[3]), "close": float(k[4]),
-                    "volume": float(k[5]), "number_of_trades": _parse_trade_count(k[8]),
-                    "taker_buy_base_volume": float(k[9]),
-                    "taker_buy_ratio": round(float(k[9]) / float(k[5]), 4) if float(k[5]) > 0 else 0.5,
-                }
-                for k in selected
-            ]
+            records = _build_ohlcv_records(selected, is_binance=True)
+            last_rec = records[-1]
             return {
-                "timestamp": datetime.fromtimestamp(float(c[0]) / 1000.0, tz=timezone.utc),
-                "open": float(c[1]), "high": float(c[2]), "low": float(c[3]), "close": float(c[4]),
-                "volume": float(c[5]), "taker_buy_base_volume": float(c[9]),
-                "taker_buy_ratio": records[-1]["taker_buy_ratio"],
-                "number_of_trades": _parse_trade_count(c[8]), "candles": records,
-                "feed_name": "binance_vision", "feed_endpoint": "/api/v3/klines",
+                "timestamp": datetime.fromtimestamp(float(selected[-1][0]) / 1000.0, tz=timezone.utc),
+                "open": last_rec["open"], "high": last_rec["high"], "low": last_rec["low"], "close": last_rec["close"],
+                "volume": last_rec["volume"], "taker_buy_base_volume": last_rec["taker_buy_base_volume"],
+                "taker_buy_ratio": last_rec["taker_buy_ratio"], "number_of_trades": last_rec["number_of_trades"],
+                "candles": records, "feed_name": "binance_vision", "feed_endpoint": "/api/v3/klines",
                 "feed_latency_ms": b_lat, "feed_status": 200, "feed_error": None,
             }
 
@@ -534,55 +539,45 @@ def fetch_latest_confirmed_candle(
         confirmed = [k for k in cb_candles if (float(k[0]) + 3600.0) <= now_sec]
         if len(confirmed) >= 35:
             selected = list(reversed(confirmed[:100]))
-            c = selected[-1]
-            records = [
-                {
-                    "timestamp": pd.to_datetime(float(k[0]), unit="s", utc=True),
-                    "low": float(k[1]), "high": float(k[2]), "open": float(k[3]), "close": float(k[4]),
-                    "volume": float(k[5]), "taker_buy_base_volume": round(float(k[5]) * 0.50, 4),
-                    "taker_buy_ratio": 0.50, "number_of_trades": None,
-                }
-                for k in selected
-            ]
+            records = _build_ohlcv_records(selected, is_binance=False)
+            last_rec = records[-1]
             return {
-                "timestamp": datetime.fromtimestamp(float(c[0]), tz=timezone.utc),
-                "open": float(c[3]), "high": float(c[2]), "low": float(c[1]), "close": float(c[4]),
-                "volume": float(c[5]), "taker_buy_base_volume": round(float(c[5]) * 0.50, 4),
-                "taker_buy_ratio": 0.50, "number_of_trades": None, "candles": records,
-                "feed_name": "binance_vision", "feed_endpoint": "/api/v3/klines",
-                "feed_latency_ms": b_lat, "feed_status": 503, "feed_error": "BINANCE_UNAVAILABLE_FALLBACK_TO_COINBASE",
+                "timestamp": datetime.fromtimestamp(float(selected[-1][0]), tz=timezone.utc),
+                "open": last_rec["open"], "high": last_rec["high"], "low": last_rec["low"], "close": last_rec["close"],
+                "volume": last_rec["volume"], "taker_buy_base_volume": None, "taker_buy_ratio": None,
+                "number_of_trades": None, "candles": records,
+                "feed_name": "coinbase", "feed_endpoint": "/products/BTC-USD/candles",
+                "feed_latency_ms": cb_lat, "feed_status": 200,
+                "binance_failed_latency_ms": b_lat,
+                "feed_error": "BINANCE_UNAVAILABLE_FALLBACK_TO_COINBASE",
             }
 
     raise MarketFeedExhaustedError("Failed to fetch confirmed 1-hour candle from all market feeds.")
 
 
 def is_paper_trade_executed_for_tick(session: Session, tick_id: int) -> bool:
-    # prevents duplicate paper trading execution on the same market tick
-    if has_tick_id_column(session) and session.execute(select(PaperPortfolio.id).where(PaperPortfolio.tick_id == tick_id)).scalar_one_or_none():
+    # Prevents duplicate paper trading execution on the same market tick
+    if session.execute(select(PaperPortfolio.id).where(PaperPortfolio.tick_id == tick_id)).scalar_one_or_none():
         return True
     audit = session.execute(select(CouncilAudit).where(CouncilAudit.tick_id == tick_id).order_by(CouncilAudit.id.asc())).scalars().first()
     return audit is not None and (not audit.execution_notes or "[FORCED_REANALYSIS]" not in audit.execution_notes)
 
 
 def ensure_model_registered(session: Session, model_version: str, cand_spec: Optional[Dict[str, Any]] = None) -> None:
-    # ensures discovered candidate model is registered in model_registry table before inserting predictions
+    # Ensures discovered model is registered in model_registry before inserting predictions
     if not model_version:
         return
-    existing = session.execute(
-        select(ModelRegistry).where(ModelRegistry.model_version == model_version)
-    ).scalars().first()
-    if existing:
+    if session.execute(select(ModelRegistry).where(ModelRegistry.model_version == model_version)).scalars().first():
         return
 
     spec = cand_spec if isinstance(cand_spec, dict) else {}
     manifest = spec.get("manifest_data", {}) if isinstance(spec.get("manifest_data"), dict) else spec
     status = "ACTIVE" if model_version == ACTIVE_MODEL_VERSION else "CANDIDATE"
-
     new_reg = ModelRegistry(
         model_version=model_version,
-        regressor_artifact_path=str(manifest.get("regressor_artifact_path") or REGRESSOR_MODEL_PATH),
+        regressor_artifact_path=str(manifest.get("regressor_artifact_path") or ""),
         regressor_sha256=str(manifest.get("regressor_sha256") or ""),
-        classifier_artifact_path=str(manifest.get("classifier_artifact_path") or CLASSIFIER_MODEL_PATH),
+        classifier_artifact_path=str(manifest.get("classifier_artifact_path") or ""),
         classifier_sha256=str(manifest.get("classifier_sha256") or ""),
         feature_schema_version=str(manifest.get("feature_schema_version") or "unknown"),
         target_definition="next_1h_btc_return_and_direction",
@@ -597,8 +592,175 @@ def ensure_model_registered(session: Session, model_version: str, cand_spec: Opt
         pass
 
 
+def _log_feed_telemetry(session: Session, candle: Dict[str, Any]) -> None:
+    # Logs real exchange latency only when candle includes measured feed telemetry
+    if "feed_latency_ms" not in candle:
+        return
+    if candle.get("feed_error") == "BINANCE_UNAVAILABLE_FALLBACK_TO_COINBASE":
+        b_lat = float(candle.get("binance_failed_latency_ms") or 0.0)
+        log_telemetry(session, "binance_vision", "/api/v3/klines", b_lat, 503, "BINANCE_UNAVAILABLE_FALLBACK_TO_COINBASE")
+    log_telemetry(
+        session,
+        str(candle.get("feed_name", "binance_vision")),
+        str(candle.get("feed_endpoint", "/api/v3/klines")),
+        float(candle["feed_latency_ms"]),
+        int(candle.get("feed_status", 200)),
+        None if int(candle.get("feed_status", 200)) < 400 else str(candle.get("feed_error") or ""),
+    )
+
+
+def _persist_tick_and_predictions(
+    session: Session, candle: Dict[str, Any], latest_ts: datetime,
+    signals_output: Dict[str, Any], ml_output: Dict[str, Any],
+    is_existing: bool, existing: Optional[MarketTick], force: bool,
+) -> MarketTick:
+    # Upserts MarketTick and records primary plus shadow model predictions
+    pred_return = float(ml_output.get("expected_return_pct", 0.0))
+    pred_price = float(ml_output.get("predicted_target_price", candle["close"]))
+    confidence = float(ml_output.get("confidence", 0.50))
+    clears_hurdle = bool(ml_output.get("clears_hurdle", False))
+    safe_features = json.loads(json.dumps(signals_output, default=str)) if signals_output else None
+
+    if is_existing and existing is not None:
+        current_tick = existing
+        if force:
+            current_tick.predicted_return_1h = pred_return
+            current_tick.predicted_price_1h = pred_price
+            current_tick.model_confidence = confidence
+            current_tick.features = safe_features
+            session.flush()
+    else:
+        current_tick = MarketTick(
+            timestamp=latest_ts, open=candle["open"], high=candle["high"], low=candle["low"],
+            close=candle["close"], volume=candle["volume"], model_version=ACTIVE_MODEL_VERSION,
+            predicted_return_1h=pred_return, predicted_price_1h=pred_price,
+            model_confidence=confidence, features=safe_features,
+        )
+        session.add(current_tick)
+        session.flush()
+
+    try:
+        with session.begin_nested():
+            ensure_model_registered(session, ACTIVE_MODEL_VERSION)
+            m1_pred = session.execute(
+                select(ModelPrediction).where(ModelPrediction.tick_id == current_tick.id, ModelPrediction.model_version == ACTIVE_MODEL_VERSION)
+            ).scalars().first()
+            if not m1_pred:
+                session.add(ModelPrediction(
+                    tick_id=current_tick.id, model_version=ACTIVE_MODEL_VERSION, run_mode="PRIMARY", is_primary=True,
+                    feature_schema_version=FEATURE_SCHEMA_VERSION, predicted_return_pct=pred_return,
+                    predicted_price_1h=pred_price,
+                    direction_predicted=ml_output.get("direction", "UP" if pred_return >= 0 else "DOWN"),
+                    direction_prob_up=float(ml_output.get("direction_probability_up", 50.0)) / 100.0,
+                    clears_hurdle=clears_hurdle,
+                ))
+                session.flush()
+    except Exception as m1_err:
+        sync_logger.warning("Failed primary model prediction write: %s", type(m1_err).__name__)
+
+    try:
+        from src.model_loader import get_registered_models
+        for cand_version, cand_spec in get_registered_models().items():
+            if cand_version == ACTIVE_MODEL_VERSION:
+                continue
+            try:
+                c_feats = cand_spec.get("features", [])
+                c_clf, c_reg = cand_spec.get("classifier"), cand_spec.get("regressor")
+                if not (c_feats and c_clf is not None and c_reg is not None and all(k in signals_output for k in c_feats)):
+                    continue
+                c_row = {k: signals_output[k] for k in c_feats}
+                # Supply true 10-hour SMA distance for Model 3 without changing Model 2's 5-hour feature
+                if cand_version.startswith("lgbm_v3") and "sma_10_true_dist_pct" in signals_output:
+                    c_row["sma_10_dist_pct"] = signals_output["sma_10_true_dist_pct"]
+                c_input_df = pd.DataFrame([c_row])
+                c_prob_up = float(c_clf.predict_proba(c_input_df)[0, 1]) if hasattr(c_clf, "predict_proba") else 0.5
+                c_ret = float(c_reg.predict(c_input_df)[0])
+                close_f = float(candle["close"])
+                c_price = float(close_f * (1.0 + c_ret))
+                c_ret_pct = float(((c_price - close_f) / close_f) * 100.0)
+                with session.begin_nested():
+                    ensure_model_registered(session, cand_version, cand_spec)
+                    exists_cand = session.execute(
+                        select(ModelPrediction).where(ModelPrediction.tick_id == current_tick.id, ModelPrediction.model_version == cand_version)
+                    ).scalars().first()
+                    if not exists_cand:
+                        session.add(ModelPrediction(
+                            tick_id=current_tick.id, model_version=cand_version, run_mode="SHADOW", is_primary=False,
+                            feature_schema_version=cand_spec.get("manifest_data", {}).get("feature_schema_version", "v2_36stationary"),
+                            predicted_return_pct=c_ret_pct, predicted_price_1h=c_price,
+                            direction_predicted="UP" if c_prob_up >= 0.50 else "DOWN",
+                            direction_prob_up=c_prob_up, clears_hurdle=bool(abs(c_ret_pct) >= MIN_HURDLE_PCT),
+                        ))
+                        session.flush()
+            except Exception as model_err:
+                sync_logger.warning("Failed candidate model prediction for %s: %s", cand_version, type(model_err).__name__)
+    except Exception as cand_exc:
+        sync_logger.warning("Failed candidate model discovery loop: %s", type(cand_exc).__name__)
+
+    return current_tick
+
+
+def _run_council_and_save_audit(
+    session: Session, current_tick: MarketTick, candle: Dict[str, Any],
+    signals_output: Dict[str, Any], ml_output: Dict[str, Any],
+    is_existing: bool, force: bool,
+) -> Tuple[str, str, float]:
+    # Runs LangGraph council, saves T-aligned MCP context onto MarketTick.features, and records CouncilAudit
+    council_state = run_trading_graph(
+        symbol="BTCUSDT", current_price=candle["close"], market_data=candle,
+        engineered_features=signals_output, ml_forecast=ml_output,
+        timestamp=_normalize_utc_timestamp(candle["timestamp"]).isoformat(), use_llm=False,
+    )
+    mcp_ctx = council_state.get("mcp_context")
+    model_cons = council_state.get("model_consensus")
+    if (isinstance(mcp_ctx, dict) and mcp_ctx) or model_cons:
+        updated_feats = dict(current_tick.features or {})
+        if isinstance(mcp_ctx, dict) and mcp_ctx:
+            if mcp_ctx.get("funding_rate_8h_pct") is not None:
+                updated_feats["funding_rate_8h_pct"] = float(mcp_ctx["funding_rate_8h_pct"])
+            if mcp_ctx.get("futures_basis_usd") is not None:
+                updated_feats["futures_basis_usd"] = float(mcp_ctx["futures_basis_usd"])
+            if mcp_ctx.get("derivatives_regime") is not None:
+                updated_feats["derivatives_regime"] = str(mcp_ctx["derivatives_regime"])
+            if mcp_ctx.get("derivatives_source") is not None:
+                updated_feats["derivatives_source"] = str(mcp_ctx["derivatives_source"])
+            headlines = [str(h) for h in (mcp_ctx.get("news_headlines") or [])[:5]]
+            updated_feats["news_headlines"] = headlines
+            updated_feats["news_headline_count"] = len(headlines)
+        if model_cons:
+            updated_feats["multi_model_consensus"] = str(model_cons)
+        current_tick.features = updated_feats
+        session.flush()
+
+    decision = council_state.get("final_decision", "HOLD")
+    verdict = council_state.get("risk_verdict", "VETOED")
+    kelly = float(council_state.get("kelly_fraction", 0.0))
+    print(f"[QUANT STAGE 4/5 DONE] Decision: {decision} ({verdict}), Kelly Fraction: {kelly:.1%}", flush=True)
+
+    thesis_txt = str(council_state.get("thesis") or council_state.get("strategist_thesis") or "").strip()
+    critic_txt = str(council_state.get("risk_critic_critique") or "").strip()
+    notes_parts = [f"Council deliberated {decision} ({verdict}) at BTC ${candle['close']:,.2f}."]
+    if thesis_txt:
+        notes_parts.append(f"Thesis: {thesis_txt}")
+    if critic_txt:
+        notes_parts.append(f"Risk Critic: {critic_txt}")
+    forced_suffix = " [FORCED_REANALYSIS]" if (is_existing and force) else ""
+
+    session.add(CouncilAudit(
+        tick_id=current_tick.id,
+        strategist_action=council_state.get("strategist_action", decision),
+        strategist_conviction=council_state.get("strategist_conviction", 5),
+        rag_context_summary=str(council_state.get("rag_context") or "Normal quant market regime"),
+        risk_verdict=verdict,
+        final_decision=decision,
+        execution_notes=" | ".join(notes_parts) + forced_suffix,
+    ))
+    session.flush()
+    return decision, verdict, kelly
+
+
 def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]] = None) -> Tuple[bool, str, Dict[str, Any]]:
-    # executes end-to-end quantitative cycle: candle ingestion, ML inference, multi-agent council, and ledger
+    # Executes end-to-end quantitative cycle: ingestion, inference, T+1h reconciliation, council, and ledger
     db_ok, ver, _ = test_connection()
     if not db_ok:
         return False, f"Database unreachable: {ver}", {}
@@ -617,14 +779,7 @@ def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]
             return False, f"Market feed error: {exc}", {}
 
     with get_db() as session:
-        # log binance_vision feed telemetry to database
-        feed_svc = candle.get("feed_name", "binance_vision")
-        feed_ep = candle.get("feed_endpoint", "/api/v3/klines")
-        feed_lat = float(candle.get("feed_latency_ms", 150.0))
-        feed_status = int(candle.get("feed_status", 200))
-        feed_err = candle.get("feed_error")
-        log_telemetry(session, feed_svc, feed_ep, feed_lat, feed_status, feed_err)
-
+        _log_feed_telemetry(session, candle)
         latest_ts = _normalize_utc_timestamp(candle["timestamp"])
         print(f"[QUANT STAGE 1/5] Ingested 1h candle for {latest_ts.strftime('%Y-%m-%d %H:%M UTC')} @ ${candle.get('close', 0.0):,.2f}", flush=True)
         backfill_missing_candles(session, candle)
@@ -642,181 +797,20 @@ def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]
         already_executed = is_paper_trade_executed_for_tick(session, existing.id) if is_existing else False
 
         print("[QUANT STAGE 2/5] Calculating technical features and ML model forecasts...", flush=True)
-        signals_output = calculate_technical_signals.invoke({
-            "close": candle["close"], "open_price": candle["open"], "high": candle["high"], "low": candle["low"],
-            "volume": candle["volume"], "taker_buy_ratio": candle.get("taker_buy_ratio"), "timestamp": latest_ts, "candles": candle.get("candles"),
-        })
-        ml_output = get_model_return_forecast.invoke({"features": signals_output})
-        pred_return = float(ml_output.get("expected_return_pct", 0.0))
-        pred_price = float(ml_output.get("predicted_target_price", candle["close"]))
-        confidence = float(ml_output.get("confidence", 0.50))
-        clears_hurdle = ml_output.get("clears_hurdle", False)
-        volatility = float(signals_output.get("volatility_range_pct", 0.02))
-        regime = "HIGH_VOL_CHOP" if volatility > 3.8 else ("BULL_MOMENTUM" if (clears_hurdle and pred_return > 0) else ("BEAR_DISTRIBUTION" if (clears_hurdle and pred_return < 0) else "SIDEWAYS_RANGE"))
-
-        safe_features = json.loads(json.dumps(signals_output, default=str)) if signals_output else None
-
-        if is_existing:
-            current_tick = existing
-            if force:
-                current_tick.predicted_return_1h = pred_return
-                current_tick.predicted_price_1h = pred_price
-                current_tick.model_confidence = confidence
-                current_tick.features = safe_features
-                session.flush()
-        else:
-            current_tick = MarketTick(
-                timestamp=latest_ts, open=candle["open"], high=candle["high"], low=candle["low"],
-                close=candle["close"], volume=candle["volume"], model_version=ACTIVE_MODEL_VERSION,
-                predicted_return_1h=pred_return, predicted_price_1h=pred_price,
-                model_confidence=confidence, features=safe_features,
-            )
-            session.add(current_tick)
-            session.flush()
-
-        # record primary prediction for active model in model_predictions table
-        try:
-            with session.begin_nested():
-                ensure_model_registered(session, ACTIVE_MODEL_VERSION)
-                m1_pred = session.execute(
-                    select(ModelPrediction).where(
-                        ModelPrediction.tick_id == current_tick.id,
-                        ModelPrediction.model_version == ACTIVE_MODEL_VERSION,
-                    )
-                ).scalars().first()
-
-                if not m1_pred:
-                    m1_pred = ModelPrediction(
-                        tick_id=current_tick.id,
-                        model_version=ACTIVE_MODEL_VERSION,
-                        run_mode="PRIMARY",
-                        is_primary=True,
-                        feature_schema_version=FEATURE_SCHEMA_VERSION,
-                        predicted_return_pct=pred_return,
-                        predicted_price_1h=pred_price,
-                        direction_predicted=ml_output.get("direction", "UP" if pred_return >= 0 else "DOWN"),
-                        direction_prob_up=float(ml_output.get("direction_probability_up", 50.0)) / 100.0,
-                        clears_hurdle=bool(clears_hurdle),
-                    )
-                    session.add(m1_pred)
-                    session.flush()
-        except Exception as m1_err:
-            sync_logger.warning("Failed primary model prediction write: %s", type(m1_err).__name__)
-
-        # evaluate and record shadow predictions for registered candidate models
-        try:
-            from src.model_loader import get_registered_models
-            all_registered = get_registered_models()
-            for cand_version, cand_spec in all_registered.items():
-                if cand_version == ACTIVE_MODEL_VERSION:
-                    continue
-                try:
-                    c_feats = cand_spec.get("features", [])
-                    if c_feats and all(k in signals_output for k in c_feats):
-                        c_row = {k: signals_output[k] for k in c_feats}
-                        if cand_version.startswith("lgbm_v3") and "sma_10_true_dist_pct" in signals_output:
-                            c_row["sma_10_dist_pct"] = signals_output["sma_10_true_dist_pct"]
-                        c_input_df = pd.DataFrame([c_row])
-                        c_clf = cand_spec.get("classifier")
-                        c_reg = cand_spec.get("regressor")
-                        if c_clf is None or c_reg is None:
-                            continue
-                        c_prob_up = float(c_clf.predict_proba(c_input_df)[0, 1]) if hasattr(c_clf, "predict_proba") else 0.5
-                        c_ret = float(c_reg.predict(c_input_df)[0])
-                        close_f = float(candle["close"])
-                        c_price = float(close_f * (1.0 + c_ret))
-                        c_ret_pct = float(((c_price - close_f) / close_f) * 100.0)
-                        c_dir = "UP" if c_prob_up >= 0.50 else "DOWN"
-
-                        with session.begin_nested():
-                            ensure_model_registered(session, cand_version, cand_spec)
-                            cand_pred = session.execute(
-                                select(ModelPrediction).where(
-                                    ModelPrediction.tick_id == current_tick.id,
-                                    ModelPrediction.model_version == cand_version,
-                                )
-                            ).scalars().first()
-
-                            if not cand_pred:
-                                cand_pred = ModelPrediction(
-                                    tick_id=current_tick.id,
-                                    model_version=cand_version,
-                                    run_mode="SHADOW",
-                                    is_primary=False,
-                                    feature_schema_version=cand_spec.get("manifest_data", {}).get("feature_schema_version", "v2_36stationary"),
-                                    predicted_return_pct=c_ret_pct,
-                                    predicted_price_1h=c_price,
-                                    direction_predicted=c_dir,
-                                    direction_prob_up=c_prob_up,
-                                    clears_hurdle=bool(abs(c_ret_pct) >= MIN_HURDLE_PCT),
-                                )
-                                session.add(cand_pred)
-                                session.flush()
-                except Exception as model_err:
-                    sync_logger.warning("Failed candidate model prediction for %s: %s", cand_version, type(model_err).__name__)
-        except Exception as cand_exc:
-            sync_logger.warning("Failed candidate model discovery loop: %s", type(cand_exc).__name__)
+        signals_output = calculate_technical_signals(
+            close=candle["close"], open_price=candle["open"], high=candle["high"], low=candle["low"],
+            volume=candle["volume"], taker_buy_ratio=candle.get("taker_buy_ratio"), timestamp=latest_ts, candles=candle.get("candles"),
+        )
+        ml_output = get_model_return_forecast(features=signals_output)
+        current_tick = _persist_tick_and_predictions(session, candle, latest_ts, signals_output, ml_output, is_existing, existing, force)
 
         print("[QUANT STAGE 3/5] Reconciling prior pending predictions and ground truth...", flush=True)
         reconcile_pending_ticks(session, current_tick)
 
-        print("[QUANT STAGE 4/5] Multi-Agent LangGraph Council deliberating (Analyst -> Strategist -> Risk Critic)...", flush=True)
-        council_state = run_trading_graph(
-            symbol="BTCUSDT", current_price=candle["close"], market_data=candle,
-            engineered_features=signals_output, ml_forecast=ml_output, timestamp=latest_ts.isoformat(),
-            use_llm=False,
-        )
-        # Save timestamp-aligned derivatives, news, and consensus signals in a new dict copy so SQLAlchemy persists JSON updates
-        mcp_ctx = council_state.get("mcp_context")
-        model_cons = council_state.get("model_consensus")
-        if (isinstance(mcp_ctx, dict) and mcp_ctx) or model_cons:
-            updated_feats = dict(current_tick.features or {})
-            if isinstance(mcp_ctx, dict) and mcp_ctx:
-                if mcp_ctx.get("funding_rate_8h_pct") is not None:
-                    updated_feats["funding_rate_8h_pct"] = float(mcp_ctx["funding_rate_8h_pct"])
-                if mcp_ctx.get("futures_basis_usd") is not None:
-                    updated_feats["futures_basis_usd"] = float(mcp_ctx["futures_basis_usd"])
-                if mcp_ctx.get("derivatives_regime") is not None:
-                    updated_feats["derivatives_regime"] = str(mcp_ctx["derivatives_regime"])
-                if mcp_ctx.get("derivatives_source") is not None:
-                    updated_feats["derivatives_source"] = str(mcp_ctx["derivatives_source"])
-                headlines = [str(h) for h in (mcp_ctx.get("news_headlines") or [])[:5]]
-                updated_feats["news_headlines"] = headlines
-                updated_feats["news_headline_count"] = len(headlines)
-            if model_cons:
-                updated_feats["multi_model_consensus"] = str(model_cons)
-            current_tick.features = updated_feats
-            session.flush()
-
-        decision = council_state.get("final_decision", "HOLD")
-        verdict = council_state.get("risk_verdict", "VETOED")
-        kelly = float(council_state.get("kelly_fraction", 0.0))
-        print(f"[QUANT STAGE 4/5 DONE] Decision: {decision} ({verdict}), Kelly Fraction: {kelly:.1%}", flush=True)
-
-        # Preserve both the council thesis and risk critique in audit notes alongside the summary line
-        thesis_txt = str(council_state.get("thesis") or council_state.get("strategist_thesis") or "").strip()
-        critic_txt = str(council_state.get("risk_critic_critique") or "").strip()
-        notes_parts = [f"Council deliberated {decision} ({verdict}) at BTC ${candle['close']:,.2f}."]
-        if thesis_txt:
-            notes_parts.append(f"Thesis: {thesis_txt}")
-        if critic_txt:
-            notes_parts.append(f"Risk Critic: {critic_txt}")
-        forced_suffix = " [FORCED_REANALYSIS]" if (is_existing and force) else ""
-
-        audit = CouncilAudit(
-            tick_id=current_tick.id,
-            strategist_action=council_state.get("strategist_action", decision),
-            strategist_conviction=council_state.get("strategist_conviction", 5),
-            rag_context_summary=str(council_state.get("rag_context") or "Normal quant market regime"),
-            risk_verdict=verdict,
-            final_decision=decision,
-            execution_notes=" | ".join(notes_parts) + forced_suffix,
-        )
-        session.add(audit)
-        session.flush()
+        print("[QUANT STAGE 4/5] Multi-Agent LangGraph Council deliberating...", flush=True)
+        decision, verdict, kelly = _run_council_and_save_audit(session, current_tick, candle, signals_output, ml_output, is_existing, force)
 
         print("[QUANT STAGE 5/5] Executing paper trading orders and updating portfolio ledger...", flush=True)
-
         if not (is_existing and already_executed):
             effective_action = decision
             order_notes = f"Executed {decision} ({verdict}) at BTC ${candle['close']:,.2f}."
@@ -829,12 +823,9 @@ def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]
                     )
                     effective_action = spot_guard.get("final_spot_action", decision)
                     order_notes = spot_guard.get("reason", order_notes)
-                except Exception:
-                    pass
-            execute_paper_order(
-                session=session, action=effective_action, current_price=candle["close"],
-                kelly_fraction=kelly, notes=order_notes, tick_id=current_tick.id,
-            )
+                except Exception as spot_err:
+                    sync_logger.warning("Spot hold guard failed; keeping council action: %s", spot_err)
+            execute_paper_order(session=session, action=effective_action, current_price=candle["close"], kelly_fraction=kelly, notes=order_notes, tick_id=current_tick.id)
 
         summary = get_portfolio_summary(session, candle["close"])
         if is_existing and already_executed:
@@ -854,7 +845,6 @@ def estimate_next_hour_price_range_usd(live_df: pd.DataFrame, current_price: flo
     lows = pd.to_numeric(live_df["low"], errors="coerce")
     closes = pd.to_numeric(live_df["close"], errors="coerce").replace(0, np.nan)
     range_pct_series = ((highs - lows) / closes).dropna()
-
     if range_pct_series.empty:
         return {"predicted_range_usd": 0.0, "predicted_range_pct": 0.0, "predicted_high_1h": current_price, "predicted_low_1h": current_price}
 
@@ -875,6 +865,138 @@ def estimate_next_hour_price_range_usd(live_df: pd.DataFrame, current_price: flo
 # 5. DELAYED T+1h GROUND-TRUTH RECONCILIATION
 # ---------------------------------------------------------------------------
 
+def _classify_outcome(
+    act_p: float, base_p: float, pred_p: float,
+    dir_pred: Optional[str] = None, pred_ret_pct: Optional[float] = None,
+) -> Dict[str, Any]:
+    # Computes return error metrics and 6-way attribution tag shared across all reconciliation paths
+    pred_ret = float(pred_ret_pct) if pred_ret_pct is not None else ((pred_p - base_p) / base_p) * 100.0
+    act_ret = ((act_p - base_p) / base_p) * 100.0
+    abs_err = abs(act_p - pred_p)
+    pct_err = (abs_err / act_p) * 100.0
+    residual = act_ret - pred_ret
+    dir_real = "UP" if act_ret >= 0.0 else "DOWN"
+    resolved_dir = dir_pred if dir_pred in ("UP", "DOWN") else ("UP" if pred_ret >= 0.0 else "DOWN")
+    dir_correct = (resolved_dir == dir_real)
+    is_swan = bool(abs(act_ret) >= 3.8 or abs(residual) >= 3.8)
+
+    if is_swan:
+        tag = "BLACK_SWAN_OUTLIER"
+    elif dir_correct:
+        if pct_err <= 0.35:
+            tag = "ACCURATE"
+        elif abs(act_ret) > abs(pred_ret):
+            tag = "MOMENTUM_UNDERESTIMATED"
+        else:
+            tag = "MOMENTUM_OVERESTIMATED"
+    elif pct_err <= 0.20 or abs_err < 150.0:
+        tag = "SIDEWAYS_DRIFT"
+    else:
+        tag = "DIRECTION_MISALIGNED"
+
+    return {
+        "pred_ret": pred_ret, "act_ret": act_ret, "abs_err": abs_err, "pct_err": pct_err,
+        "residual": residual, "dir_pred": resolved_dir, "dir_real": dir_real,
+        "dir_correct": dir_correct, "is_swan": is_swan, "tag": tag,
+    }
+
+
+def _run_tick_postmortem(
+    session: Session, prior: MarketTick, act_p: float, act_ret: float,
+    dir_real: str, pred_p: float, pred_ret: float, dir_pred: str, abs_err: float, idx: int,
+) -> None:
+    # Computes per-row TreeSHAP drivers, fetches MCP context, and saves Gemini post-mortem
+    try:
+        prior_feats = dict(prior.features) if isinstance(prior.features, dict) else {}
+        prior_feats.setdefault("close", float(prior.close))
+        preds_for_tick = session.execute(select(ModelPrediction).where(ModelPrediction.tick_id == prior.id)).scalars().all()
+        model_outcomes = [
+            {
+                "model_version": p_row.model_version,
+                "predicted_price": float(p_row.predicted_price_1h or 0.0),
+                "actual_price": float(p_row.actual_price_at_t_plus_1 or act_p),
+                "predicted_return_pct": float(p_row.predicted_return_pct or 0.0),
+                "actual_return_pct": float(p_row.actual_return_pct or act_ret),
+                "direction_predicted": p_row.direction_predicted,
+                "direction_realized": p_row.direction_realized or dir_real,
+                "direction_correct": bool(p_row.direction_correct),
+                "error_usd": float(p_row.absolute_error_usd or abs_err),
+            }
+            for p_row in preds_for_tick
+        ] or [{
+            "model_version": prior.model_version or ACTIVE_MODEL_VERSION,
+            "predicted_price": pred_p, "actual_price": act_p,
+            "predicted_return_pct": pred_ret, "actual_return_pct": act_ret,
+            "direction_predicted": dir_pred, "direction_realized": dir_real,
+            "direction_correct": (dir_pred == dir_real), "error_usd": abs_err,
+        }]
+
+        from src.explainability import get_top_shap_drivers
+        from src.model_loader import get_registered_models
+        try:
+            registered_models = get_registered_models()
+        except Exception:
+            registered_models = {}
+
+        for outcome_dict in model_outcomes:
+            mv = outcome_dict.get("model_version", "")
+            spec = registered_models.get(mv, {})
+            c_model, c_feats = spec.get("classifier") or spec.get("regressor"), spec.get("features", [])
+            if c_model is not None and c_feats:
+                row_feats = dict(prior_feats)
+                if mv.startswith("lgbm_v3") and "sma_10_true_dist_pct" in row_feats:
+                    row_feats["sma_10_dist_pct"] = row_feats["sma_10_true_dist_pct"]
+                X_row = pd.DataFrame([{k: row_feats.get(k, 0.0) for k in c_feats}])
+            else:
+                X_row = pd.DataFrame([prior_feats])
+            outcome_dict["top_shap_drivers"] = get_top_shap_drivers(c_model, X_row, top_k=3)
+
+        mcp_ctx = fetch_mcp_context(limit=3)
+        d_source = mcp_ctx.get("derivatives_source", "none")
+        pulse_ep = "/api/v2/public/ticker" if d_source == "deribit" else ("/derivatives/api/v3/tickers" if d_source == "kraken_futures" else "/derivatives/pulse")
+        d_ok = mcp_ctx.get("derivatives_status") == "LIVE"
+        log_telemetry(session, "mcp_derivatives", pulse_ep, float(mcp_ctx.get("derivatives_latency_ms") or 0.0), 200 if d_ok else 503, None if d_ok else str(mcp_ctx.get("derivatives_error") or mcp_ctx.get("error") or "OFFLINE_FALLBACK"))
+
+        n_ok = mcp_ctx.get("news_status", "UNAVAILABLE") in ("LIVE", "OK_NO_HEADLINES")
+        log_telemetry(session, "mcp_rss_news", "cryptocompare+rss_news", float(mcp_ctx.get("news_latency_ms") or 0.0), 200 if n_ok else 503, None if n_ok else str(mcp_ctx.get("news_error") or mcp_ctx.get("error") or "FEED_OFFLINE"))
+
+        if idx > 0 and not os.getenv("PYTEST_CURRENT_TEST") and "pytest" not in sys.modules:
+            time.sleep(5.0)
+
+        t0_gem = time.perf_counter()
+        postmortem = generate_hourly_postmortem_with_gemini(prior_feats, mcp_ctx, model_outcomes)
+        gem_lat = (time.perf_counter() - t0_gem) * 1000.0
+        if postmortem.get("gemini_status") != "OK" and "missing" in str(postmortem.get("error_detail", "")).lower():
+            log_telemetry(session, "gemini_api", "hourly_postmortem", gem_lat, 503, str(postmortem.get("error_detail") or "GEMINI_UNAVAILABLE"))
+
+        with session.begin_nested():
+            existing_pm = session.execute(select(HourlyPostmortem).where(HourlyPostmortem.tick_id == prior.id)).scalars().first()
+            news_list = mcp_ctx.get("news_headlines", [])
+            if not existing_pm:
+                session.add(HourlyPostmortem(
+                    tick_id=prior.id, news_headlines=news_list, feature_snapshot=prior_feats,
+                    gemini_full_analysis=postmortem, gemini_status=postmortem.get("gemini_status", "UNAVAILABLE"),
+                    error_detail=postmortem.get("error_detail"), created_at=datetime.now(timezone.utc),
+                ))
+            else:
+                existing_pm.gemini_full_analysis = postmortem
+                existing_pm.gemini_status = postmortem.get("gemini_status", "UNAVAILABLE")
+                existing_pm.error_detail = postmortem.get("error_detail")
+                if news_list:
+                    existing_pm.news_headlines = news_list
+
+            per_model = postmortem.get("per_model", {})
+            for p_row in preds_for_tick:
+                pm_diag = per_model.get(p_row.model_version, {}).get("diagnosis_summary")
+                if pm_diag:
+                    p_row.diagnosis_summary = pm_diag
+                elif not p_row.diagnosis_summary:
+                    p_row.diagnosis_summary = f"{p_row.direction_predicted} target ${float(p_row.predicted_price_1h or 0):,.2f} vs actual ${act_p:,.2f} (diff ${float(p_row.absolute_error_usd or 0):,.2f}, {p_row.error_attribution_tag})."
+            session.flush()
+    except Exception as pm_exc:
+        logger.warning("Could not record hourly postmortem for tick %s: %s", prior.id, pm_exc)
+
+
 def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[Reconciliation]:
     if not current_tick or current_tick.close <= 0:
         return []
@@ -888,7 +1010,7 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
     pending_ticks = session.execute(stmt).scalars().all()
     reconciled_records: List[Reconciliation] = []
     if pending_ticks:
-        print(f"[RECONCILE] Found {len(pending_ticks)} pending prior ticks to reconcile against closed candles...", flush=True)
+        print(f"[RECONCILE] Found {len(pending_ticks)} pending prior ticks to reconcile...", flush=True)
 
     for idx, prior in enumerate(pending_ticks):
         expected_ts = prior.timestamp + timedelta(hours=1)
@@ -897,58 +1019,37 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
             continue
 
         act_p, pred_p, base_p = max(1.0, float(outcome.close)), float(prior.predicted_price_1h), max(1.0, float(prior.close))
-        pred_ret, act_ret = ((pred_p - base_p) / base_p) * 100.0, ((act_p - base_p) / base_p) * 100.0
-        abs_err, pct_err = abs(act_p - pred_p), (abs(act_p - pred_p) / act_p) * 100.0
-        # Prefer Model 1's stored classifier direction when present; fall back to regressor sign in unit tests.
         active_ver = prior.model_version or ACTIVE_MODEL_VERSION
-        m1_pred = session.execute(
-            select(ModelPrediction).where(ModelPrediction.tick_id == prior.id, ModelPrediction.model_version == active_ver)
-        ).scalars().first()
-        if m1_pred and m1_pred.direction_predicted in ("UP", "DOWN"):
-            dir_pred = str(m1_pred.direction_predicted)
-        else:
-            dir_pred = "UP" if pred_ret >= 0 else "DOWN"
-        dir_real = "UP" if act_ret >= 0 else "DOWN"
-        is_swan = bool(abs(act_ret) >= 3.8 or abs(act_ret - pred_ret) >= 3.8)
-
-        if is_swan:
-            tag = "BLACK_SWAN_OUTLIER"
-        elif dir_pred == dir_real:
-            tag = "ACCURATE" if pct_err <= 0.35 else ("MOMENTUM_UNDERESTIMATED" if abs(act_ret) > abs(pred_ret) else "MOMENTUM_OVERESTIMATED")
-        else:
-            tag = "SIDEWAYS_DRIFT" if (pct_err <= 0.20 or abs_err < 150.0) else "DIRECTION_MISALIGNED"
+        m1_pred = session.execute(select(ModelPrediction).where(ModelPrediction.tick_id == prior.id, ModelPrediction.model_version == active_ver)).scalars().first()
+        dir_override = str(m1_pred.direction_predicted) if (m1_pred and m1_pred.direction_predicted in ("UP", "DOWN")) else None
+        metrics = _classify_outcome(act_p, base_p, pred_p, dir_pred=dir_override)
 
         rec = Reconciliation(
             timestamp=datetime.now(timezone.utc), tick_id=prior.id, predicted_price=pred_p,
-            actual_price_at_t_plus_1=act_p, predicted_return_pct=pred_ret, actual_return_pct=act_ret,
-            residual_error=act_ret - pred_ret, absolute_error_usd=abs_err, percentage_error=pct_err,
-            direction_predicted=dir_pred, direction_realized=dir_real, direction_correct=(dir_pred == dir_real),
-            is_black_swan=is_swan, error_attribution_tag=tag,
+            actual_price_at_t_plus_1=act_p, predicted_return_pct=metrics["pred_ret"], actual_return_pct=metrics["act_ret"],
+            residual_error=metrics["residual"], absolute_error_usd=metrics["abs_err"], percentage_error=metrics["pct_err"],
+            direction_predicted=metrics["dir_pred"], direction_realized=metrics["dir_real"], direction_correct=metrics["dir_correct"],
+            is_black_swan=metrics["is_swan"], error_attribution_tag=metrics["tag"],
         )
         session.add(rec)
         reconciled_records.append(rec)
 
-        # indexes reconciled prediction outcome into ChromaDB episodic error memory
         if not os.getenv("PYTEST_CURRENT_TEST"):
             try:
-                from src.agents import index_reconciled_outcome_memory
+                from src.ai.rag import index_reconciled_outcome_memory
                 story = build_plain_english_reconciliation_story(
                     pred_tick=prior, outcome_tick=outcome, pred_price=pred_p, actual_price=act_p,
-                    pred_ret_pct=pred_ret, actual_ret_pct=act_ret, dir_pred=dir_pred, dir_real=dir_real,
-                    dir_correct=(dir_pred == dir_real), abs_err_usd=abs_err, tag=tag,
+                    pred_ret_pct=metrics["pred_ret"], actual_ret_pct=metrics["act_ret"],
+                    dir_pred=metrics["dir_pred"], dir_real=metrics["dir_real"],
+                    dir_correct=metrics["dir_correct"], abs_err_usd=metrics["abs_err"], tag=metrics["tag"],
                 )
                 index_reconciled_outcome_memory(
                     tick_id=prior.id,
                     timestamp_iso=outcome.timestamp.isoformat() if hasattr(outcome.timestamp, "isoformat") else str(outcome.timestamp),
-                    market_regime="STANDARD_SPOT",
-                    direction_predicted=dir_pred,
-                    direction_realized=dir_real,
-                    direction_correct=(dir_pred == dir_real),
-                    predicted_dollar_move=pred_p - base_p,
-                    actual_dollar_move=act_p - base_p,
-                    absolute_error_usd=abs_err,
-                    error_attribution_tag=tag,
-                    plain_english_notes=story.get("hypothesis_notes", f"Error: ${abs_err:,.2f}"),
+                    market_regime="STANDARD_SPOT", direction_predicted=metrics["dir_pred"], direction_realized=metrics["dir_real"],
+                    direction_correct=metrics["dir_correct"], predicted_dollar_move=pred_p - base_p,
+                    actual_dollar_move=act_p - base_p, absolute_error_usd=metrics["abs_err"],
+                    error_attribution_tag=metrics["tag"], plain_english_notes=story.get("hypothesis_notes", f"Error: ${metrics['abs_err']:,.2f}"),
                 )
             except Exception:
                 pass
@@ -956,229 +1057,52 @@ def reconcile_pending_ticks(session: Session, current_tick: MarketTick) -> List[
         try:
             with session.begin_nested():
                 for u in session.execute(select(ModelPrediction).where(ModelPrediction.tick_id == prior.id, ModelPrediction.outcome_tick_id.is_(None))).scalars().all():
-                    u_pred_price = float(u.predicted_price_1h)
-                    u_pred_ret = float(u.predicted_return_pct)
-                    u_abs_err = abs(act_p - u_pred_price)
-                    u_pct_err = (u_abs_err / act_p) * 100.0
-                    u_residual = act_ret - u_pred_ret
-                    u_dir_real = "UP" if act_ret >= 0.0 else "DOWN"
-                    u_dir_correct = (u.direction_predicted == u_dir_real)
-                    u_is_swan = bool(abs(act_ret) >= 3.8 or abs(u_residual) >= 3.8)
-
-                    if u_is_swan:
-                        u_tag = "BLACK_SWAN_OUTLIER"
-                    elif u_dir_correct:
-                        if u_pct_err <= 0.35:
-                            u_tag = "ACCURATE"
-                        elif abs(act_ret) > abs(u_pred_ret):
-                            u_tag = "MOMENTUM_UNDERESTIMATED"
-                        else:
-                            u_tag = "MOMENTUM_OVERESTIMATED"
-                    else:
-                        if u_pct_err <= 0.20 or u_abs_err < 150.0:
-                            u_tag = "SIDEWAYS_DRIFT"
-                        else:
-                            u_tag = "DIRECTION_MISALIGNED"
-
+                    if u.predicted_price_1h is None or u.predicted_return_pct is None:
+                        continue
+                    um = _classify_outcome(act_p, base_p, float(u.predicted_price_1h), dir_pred=u.direction_predicted, pred_ret_pct=float(u.predicted_return_pct))
                     u.outcome_tick_id = outcome.id
                     u.actual_price_at_t_plus_1 = act_p
-                    u.actual_return_pct = act_ret
-                    u.direction_realized = u_dir_real
-                    u.direction_correct = u_dir_correct
-                    u.residual_error = u_residual
-                    u.absolute_error_usd = u_abs_err
-                    u.percentage_error = u_pct_err
-                    u.error_attribution_tag = u_tag
+                    u.actual_return_pct = um["act_ret"]
+                    u.direction_realized = um["dir_real"]
+                    u.direction_correct = (u.direction_predicted == um["dir_real"])
+                    u.residual_error = um["residual"]
+                    u.absolute_error_usd = um["abs_err"]
+                    u.percentage_error = um["pct_err"]
+                    u.error_attribution_tag = um["tag"]
                     u.reconciled_at = datetime.now(timezone.utc)
                 session.flush()
         except Exception as exc:
             logger.warning("Could not update model_predictions for tick %s: %s", prior.id, exc)
 
-        # collect model outcomes for grounded gemini post-mortem analysis
-        try:
-            prior_feats = dict(prior.features) if isinstance(prior.features, dict) else {}
-            prior_feats.setdefault("close", float(prior.close))
+        _run_tick_postmortem(session, prior, act_p, metrics["act_ret"], metrics["dir_real"], pred_p, metrics["pred_ret"], metrics["dir_pred"], metrics["abs_err"], idx)
 
-            preds_for_tick = session.execute(
-                select(ModelPrediction).where(ModelPrediction.tick_id == prior.id)
-            ).scalars().all()
-            model_outcomes = []
-            for p_row in preds_for_tick:
-                model_outcomes.append({
-                    "model_version": p_row.model_version,
-                    "predicted_price": float(p_row.predicted_price_1h or 0.0),
-                    "actual_price": float(p_row.actual_price_at_t_plus_1 or act_p),
-                    "predicted_return_pct": float(p_row.predicted_return_pct or 0.0),
-                    "actual_return_pct": float(p_row.actual_return_pct or act_ret),
-                    "direction_predicted": p_row.direction_predicted,
-                    "direction_realized": p_row.direction_realized or dir_real,
-                    "direction_correct": bool(p_row.direction_correct),
-                    "error_usd": float(p_row.absolute_error_usd or abs_err),
-                })
-            if not model_outcomes:
-                model_outcomes.append({
-                    "model_version": prior.model_version or ACTIVE_MODEL_VERSION,
-                    "predicted_price": pred_p,
-                    "actual_price": act_p,
-                    "predicted_return_pct": pred_ret,
-                    "actual_return_pct": act_ret,
-                    "direction_predicted": dir_pred,
-                    "direction_realized": dir_real,
-                    "direction_correct": (dir_pred == dir_real),
-                    "error_usd": abs_err,
-                })
-
-            # compute per-row tree shap drivers for each evaluated model
-            from src.explainability import get_top_shap_drivers
-            from src.model_loader import get_registered_models
-            registered_models = {}
-            try:
-                registered_models = get_registered_models()
-            except Exception:
-                registered_models = {}
-
-            for outcome_dict in model_outcomes:
-                mv = outcome_dict.get("model_version", "")
-                spec = registered_models.get(mv, {})
-                c_model = spec.get("classifier") or spec.get("regressor")
-                c_feats = spec.get("features", [])
-                if c_model is not None and c_feats:
-                    row_feats = dict(prior_feats)
-                    # Map true 10-period SMA distance for Model 3 SHAP without disturbing Model 2.
-                    if mv.startswith("lgbm_v3") and "sma_10_true_dist_pct" in row_feats:
-                        row_feats["sma_10_dist_pct"] = row_feats["sma_10_true_dist_pct"]
-                    X_row = pd.DataFrame([{k: row_feats.get(k, 0.0) for k in c_feats}])
-                else:
-                    X_row = pd.DataFrame([prior_feats])
-                outcome_dict["top_shap_drivers"] = get_top_shap_drivers(c_model, X_row, top_k=3)
-
-            # Fetch derivatives pulse, 6h BTC news, and episodic error memories in a single MCP round-trip.
-            mcp_ctx = fetch_mcp_context(limit=3)
-
-            d_source = mcp_ctx.get("derivatives_source", "none")
-            pulse_endpoint = "/api/v2/public/ticker" if d_source == "deribit" else ("/derivatives/api/v3/tickers" if d_source == "kraken_futures" else "/derivatives/pulse")
-            d_ok = mcp_ctx.get("derivatives_status") == "LIVE"
-            log_telemetry(
-                session,
-                "mcp_derivatives",
-                pulse_endpoint,
-                float(mcp_ctx.get("derivatives_latency_ms") or 0.0),
-                200 if d_ok else 503,
-                None if d_ok else str(mcp_ctx.get("derivatives_error") or mcp_ctx.get("error") or "OFFLINE_FALLBACK"),
-            )
-
-            n_status = mcp_ctx.get("news_status", "UNAVAILABLE")
-            n_ok = n_status in ("LIVE", "OK_NO_HEADLINES")
-            log_telemetry(
-                session,
-                "mcp_rss_news",
-                "cryptocompare+rss_news",
-                float(mcp_ctx.get("news_latency_ms") or 0.0),
-                200 if n_ok else 503,
-                None if n_ok else str(mcp_ctx.get("news_error") or mcp_ctx.get("error") or "FEED_OFFLINE"),
-            )
-
-            # pace multi-tick reconciliation calls to stay under 15 RPM free tier limits
-            if idx > 0 and not os.getenv("PYTEST_CURRENT_TEST") and "pytest" not in sys.modules:
-                time.sleep(5.0)
-
-            # Record pre-call missing-key failures here; candidate Gemini calls log telemetry in llm.py.
-            t0_gem = time.perf_counter()
-            postmortem = generate_hourly_postmortem_with_gemini(prior_feats, mcp_ctx, model_outcomes)
-            gem_lat = (time.perf_counter() - t0_gem) * 1000.0
-            if postmortem.get("gemini_status") != "OK" and "missing" in str(postmortem.get("error_detail", "")).lower():
-                log_telemetry(session, "gemini_api", "hourly_postmortem", gem_lat, 503, str(postmortem.get("error_detail") or "GEMINI_UNAVAILABLE"))
-
-            with session.begin_nested():
-                existing_pm = session.execute(
-                    select(HourlyPostmortem).where(HourlyPostmortem.tick_id == prior.id)
-                ).scalars().first()
-                news_list = mcp_ctx.get("news_headlines", [])
-                if not existing_pm:
-                    new_pm = HourlyPostmortem(
-                        tick_id=prior.id,
-                        news_headlines=news_list,
-                        feature_snapshot=prior_feats,
-                        gemini_full_analysis=postmortem,
-                        gemini_status=postmortem.get("gemini_status", "UNAVAILABLE"),
-                        error_detail=postmortem.get("error_detail"),
-                        created_at=datetime.now(timezone.utc),
-                    )
-                    session.add(new_pm)
-                else:
-                    existing_pm.gemini_full_analysis = postmortem
-                    existing_pm.gemini_status = postmortem.get("gemini_status", "UNAVAILABLE")
-                    existing_pm.error_detail = postmortem.get("error_detail")
-                    if news_list:
-                        existing_pm.news_headlines = news_list
-
-                per_model = postmortem.get("per_model", {})
-                for p_row in preds_for_tick:
-                    pm_diag = per_model.get(p_row.model_version, {}).get("diagnosis_summary")
-                    if pm_diag:
-                        p_row.diagnosis_summary = pm_diag
-                    elif not p_row.diagnosis_summary:
-                        p_row.diagnosis_summary = f"{p_row.direction_predicted} target ${float(p_row.predicted_price_1h or 0):,.2f} vs actual ${act_p:,.2f} (diff ${float(p_row.absolute_error_usd or 0):,.2f}, {p_row.error_attribution_tag})."
-                session.flush()
-        except Exception as pm_exc:
-            logger.warning("Could not record hourly postmortem for tick %s: %s", prior.id, pm_exc)
-
-    # fallback pass: reconciles any orphaned candidate ModelPrediction records whose outcome tick exists
+    # Reconcile any orphaned candidate ModelPrediction records whose outcome tick exists
     try:
         with session.begin_nested():
             orphan_preds = session.execute(
-                select(ModelPrediction, MarketTick)
-                .join(MarketTick, ModelPrediction.tick_id == MarketTick.id)
-                .where(ModelPrediction.outcome_tick_id.is_(None))
+                select(ModelPrediction, MarketTick).join(MarketTick, ModelPrediction.tick_id == MarketTick.id).where(ModelPrediction.outcome_tick_id.is_(None))
             ).all()
-
             for pred_row, prior_tick in orphan_preds:
+                if pred_row.predicted_price_1h is None or pred_row.predicted_return_pct is None:
+                    continue
                 target_ts = prior_tick.timestamp + timedelta(hours=1)
-                outcome_tick = current_tick if current_tick.timestamp == target_ts else session.execute(
-                    select(MarketTick).where(MarketTick.timestamp == target_ts)
-                ).scalars().first()
-
+                outcome_tick = current_tick if current_tick.timestamp == target_ts else session.execute(select(MarketTick).where(MarketTick.timestamp == target_ts)).scalars().first()
                 if not outcome_tick or outcome_tick.close <= 0:
                     continue
-
-                act_p = max(1.0, float(outcome_tick.close))
-                base_p = max(1.0, float(prior_tick.close))
-                u_pred_price = float(pred_row.predicted_price_1h)
-                u_pred_ret = float(pred_row.predicted_return_pct)
-                act_ret = ((act_p - base_p) / base_p) * 100.0
-                u_abs_err = abs(act_p - u_pred_price)
-                u_pct_err = (u_abs_err / act_p) * 100.0
-                u_residual = act_ret - u_pred_ret
-                u_dir_real = "UP" if act_ret >= 0.0 else "DOWN"
-                u_dir_correct = (pred_row.direction_predicted == u_dir_real)
-                u_is_swan = bool(abs(act_ret) >= 3.8 or abs(u_residual) >= 3.8)
-
-                if u_is_swan:
-                    u_tag = "BLACK_SWAN_OUTLIER"
-                elif u_dir_correct:
-                    if u_pct_err <= 0.35:
-                        u_tag = "ACCURATE"
-                    elif abs(act_ret) > abs(u_pred_ret):
-                        u_tag = "MOMENTUM_UNDERESTIMATED"
-                    else:
-                        u_tag = "MOMENTUM_OVERESTIMATED"
-                else:
-                    if u_pct_err <= 0.20 or u_abs_err < 150.0:
-                        u_tag = "SIDEWAYS_DRIFT"
-                    else:
-                        u_tag = "DIRECTION_MISALIGNED"
-
+                act_p, base_p = max(1.0, float(outcome_tick.close)), max(1.0, float(prior_tick.close))
+                u_pred_p = float(pred_row.predicted_price_1h)
+                om = _classify_outcome(act_p, base_p, u_pred_p, dir_pred=pred_row.direction_predicted, pred_ret_pct=float(pred_row.predicted_return_pct))
                 pred_row.outcome_tick_id = outcome_tick.id
                 pred_row.actual_price_at_t_plus_1 = act_p
-                pred_row.actual_return_pct = act_ret
-                pred_row.direction_realized = u_dir_real
-                pred_row.direction_correct = u_dir_correct
-                pred_row.residual_error = u_residual
-                pred_row.absolute_error_usd = u_abs_err
-                pred_row.percentage_error = u_pct_err
-                pred_row.error_attribution_tag = u_tag
+                pred_row.actual_return_pct = om["act_ret"]
+                pred_row.direction_realized = om["dir_real"]
+                pred_row.direction_correct = (pred_row.direction_predicted == om["dir_real"])
+                pred_row.residual_error = om["residual"]
+                pred_row.absolute_error_usd = om["abs_err"]
+                pred_row.percentage_error = om["pct_err"]
+                pred_row.error_attribution_tag = om["tag"]
                 if not pred_row.diagnosis_summary:
-                    pred_row.diagnosis_summary = f"{pred_row.direction_predicted} target ${u_pred_price:,.2f} vs actual ${act_p:,.2f} (diff ${u_abs_err:,.2f}, {u_tag})."
+                    pred_row.diagnosis_summary = f"{pred_row.direction_predicted} target ${u_pred_p:,.2f} vs actual ${act_p:,.2f} (diff ${om['abs_err']:,.2f}, {om['tag']})."
                 pred_row.reconciled_at = datetime.now(timezone.utc)
             session.flush()
     except Exception as orphan_exc:
@@ -1206,7 +1130,11 @@ def build_plain_english_reconciliation_story(
         why = f"Small Chop Flip: drifted by ${abs_err_usd:,.2f} inside normal noise."
     else:
         why = f"Trend Reversal Miss: reversed to {dir_real}, missing by ${abs_err_usd:,.2f}."
-    return {"headline": headline[:500], "hypothesis_notes": f"Pred: ${pred_price:,.2f} ({dir_pred}) | Actual: ${actual_price:,.2f} ({dir_real}) | Err: ${abs_err_usd:,.2f} | Diagnosis: {why}", "suspected_cause_category": tag}
+    return {
+        "headline": headline[:500],
+        "hypothesis_notes": f"Pred: ${pred_price:,.2f} ({dir_pred}, {pred_ret_pct:+.2f}%) | Actual: ${actual_price:,.2f} ({dir_real}) | Err: ${abs_err_usd:,.2f} | Diagnosis: {why}",
+        "suspected_cause_category": tag,
+    }
 
 
 def get_reconciliation_summary(session: Session, limit: int = 168, model_version: Optional[str] = None) -> Dict[str, Any]:
@@ -1249,17 +1177,12 @@ def get_reconciliation_summary(session: Session, limit: int = 168, model_version
         ic = float(np.nan_to_num(np.corrcoef(pred_rets, act_rets)[0, 1], nan=0.0))
 
     win_rate = round((wins / total) * 100.0, 2)
-    # Handle both Reconciliation (has is_black_swan) and ModelPrediction (uses BLACK_SWAN_OUTLIER tag).
-    black_swan_count = sum(
-        1 for r in records
-        if bool(getattr(r, "is_black_swan", r.error_attribution_tag == "BLACK_SWAN_OUTLIER"))
-    )
+    black_swan_count = sum(1 for r in records if bool(getattr(r, "is_black_swan", r.error_attribution_tag == "BLACK_SWAN_OUTLIER")))
     return {
         "total_evaluated": total, "total_reconciled": total, "total_lifetime_evaluated": total_lifetime,
         "win_rate_pct": win_rate, "directional_accuracy_pct": win_rate, "mae_usd": round(mae, 2), "mape_pct": round(mape, 3),
         "information_coefficient": round(ic, 4), "information_coefficient_ic": round(ic, 4),
-        "black_swans_filtered": black_swan_count,
-        "black_swan_count": black_swan_count,
+        "black_swans_filtered": black_swan_count, "black_swan_count": black_swan_count,
         "accurate_count": sum(1 for r in records if r.error_attribution_tag == "ACCURATE"),
         "tag_breakdown": dict(Counter(r.error_attribution_tag for r in records if r.error_attribution_tag)),
         "model_version": model_version if (model_version and model_version != "All Models") else None,
