@@ -1,10 +1,11 @@
 import argparse
 from datetime import datetime
+import importlib
 import os
 from pathlib import Path
 import shutil
 import sys
-from typing import Optional, Union
+from typing import Union
 import pandas as pd
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -12,13 +13,13 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 import config
+import src.model_loader as model_loader
 from src.data_preprocessing import (
     load_and_clean_data,
     merge_fear_greed,
     merge_onchain,
 )
 from src.feature_engineering import create_features, extract_features_for_inference
-from src.model_loader import load_production_models
 
 
 # loads optional binance credentials from env or streamlit secrets
@@ -102,6 +103,13 @@ def preprocess_and_save_featured_data(
     return featured_df
 
 
+def _run_optional_step(label: str, fn) -> None:
+    try:
+        fn()
+    except Exception as exc:
+        print(f"{label} skipped: {exc}")
+
+
 # executes end-to-end quant pipeline: data prep, training, audit, and evaluation
 def run_pipeline(
     fetch_fresh: bool = False, tune: bool = False, n_trials: int = 50,
@@ -122,28 +130,24 @@ def run_pipeline(
         from src.model_training import train_and_save_models
         train_and_save_models()
 
-    reg_model, clf_model = load_production_models()
+    # Reload manifest SHA-256 digests when training updated artifacts on disk
+    if tune or train_baseline:
+        importlib.reload(config)
+        importlib.reload(model_loader)
+
+    reg_model, clf_model = model_loader.load_production_models()
 
     if run_shap:
-        try:
-            from src.explainability import generate_global_explanations
-            generate_global_explanations()
-        except Exception as exc:
-            print(f"SHAP skipped: {exc}")
+        from src.explainability import generate_global_explanations
+        _run_optional_step("SHAP", generate_global_explanations)
 
     if run_threshold:
-        try:
-            from src.backtesting import run_threshold_sweep
-            run_threshold_sweep()
-        except Exception as exc:
-            print(f"Threshold sweep skipped: {exc}")
+        from src.backtesting import run_threshold_sweep
+        _run_optional_step("Threshold sweep", run_threshold_sweep)
 
     if run_backtest:
-        try:
-            from src.backtesting import main as run_backtest_main
-            run_backtest_main()
-        except Exception as exc:
-            print(f"Backtest skipped: {exc}")
+        from src.backtesting import main as run_backtest_main
+        _run_optional_step("Backtest", run_backtest_main)
 
     raw_df = load_and_clean_data(config.BTCUSDT_1H_CSV).tail(100)
     live_features = extract_features_for_inference(raw_df)
