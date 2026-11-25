@@ -106,7 +106,7 @@ SHAP_REGRESSOR_SUMMARY_PATH = str(BASE_DIR / "artifacts" / "shap_regressor_summa
 SHAP_CLASSIFIER_SUMMARY_PATH = str(BASE_DIR / "artifacts" / "shap_classifier_summary.png")
 SHAP_IMPORTANCE_CSV_PATH = str(BASE_DIR / "artifacts" / "shap_feature_importance.csv")
 CHROMADB_DIR = str(BASE_DIR / "data" / "chromadb")
-CHROMA_COLLECTION_NAME = "mudra_market_knowledge_v3"
+CHROMA_COLLECTION_NAME = "mudra_rag_minilm_v1"
 
 FETCH_DAYS = 59
 LIVE_FETCH_LIMIT = 100
