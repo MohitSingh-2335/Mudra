@@ -655,3 +655,86 @@ def test_ensure_model_registered_idempotency_and_shadow_prediction(isolated_db):
     assert pred.id is not None
     assert pred.model_version == "lgbm_v3.0.0"
     assert pred.run_mode == "SHADOW"
+
+
+def test_sync_hourly_persists_mcp_signals_and_council_thesis(isolated_db, monkeypatch):
+    """Ensure Stage 4 persists live MCP derivatives/news on MarketTick.features and council thesis in CouncilAudit."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    import src.engine as eng
+    from src.database import MarketTick, CouncilAudit
+
+    session = isolated_db[0]
+    ts = datetime(2026, 11, 25, 10, 0, 0, tzinfo=timezone.utc)
+    candle = {
+        "timestamp": ts,
+        "open": 90000.0,
+        "high": 90500.0,
+        "low": 89800.0,
+        "close": 90250.0,
+        "volume": 1234.5,
+        "taker_buy_base_volume": 650.25,
+        "trades": 15000,
+    }
+
+    monkeypatch.setattr(
+        eng,
+        "calculate_technical_signals",
+        SimpleNamespace(invoke=lambda payload: {"rsi_14": 54.0, "volatility_range_pct": 0.008}),
+    )
+    monkeypatch.setattr(
+        eng,
+        "get_model_return_forecast",
+        SimpleNamespace(
+            invoke=lambda payload: {
+                "expected_return_pct": 0.05,
+                "predicted_target_price": 90295.0,
+                "confidence": 0.62,
+                "clears_hurdle": False,
+                "direction": "UP",
+                "direction_probability_up": 54.0,
+                "model_version": "xgb_onnx_v1.0.0",
+            }
+        ),
+    )
+    monkeypatch.setattr("src.model_loader.get_registered_models", lambda: {})
+    monkeypatch.setattr(eng, "reconcile_pending_ticks", lambda sess, tick: [])
+    monkeypatch.setattr(
+        eng,
+        "run_trading_graph",
+        lambda **kwargs: {
+            "final_decision": "HOLD",
+            "risk_verdict": "VETOED",
+            "strategist_action": "HOLD",
+            "strategist_conviction": 4,
+            "kelly_fraction": 0.0,
+            "rag_context": "Similar low-volatility session resolved sideways.",
+            "thesis": "Edge below fee hurdle under muted volatility.",
+            "risk_critic_critique": "VETOED BY RISK CRITIC: Edge clears 0/2 hurdle gates.",
+            "model_consensus": "2/3 UP, 1/3 DOWN",
+            "mcp_context": {
+                "funding_rate_8h_pct": 0.0042,
+                "futures_basis_usd": 88.5,
+                "derivatives_regime": "Mildly Bullish",
+                "derivatives_source": "deribit",
+                "news_headlines": ["BTC holds 90k support", "Deribit funding steady"],
+            },
+        },
+    )
+
+    synced, msg, _ = eng.sync_hourly_quant_cycle(force=False, candle=candle)
+    assert synced is True, msg
+
+    tick = session.query(MarketTick).order_by(MarketTick.id.desc()).first()
+    assert tick is not None
+    assert tick.features["funding_rate_8h_pct"] == 0.0042
+    assert tick.features["futures_basis_usd"] == 88.5
+    assert tick.features["derivatives_regime"] == "Mildly Bullish"
+    assert tick.features["derivatives_source"] == "deribit"
+    assert tick.features["news_headline_count"] == 2
+    assert tick.features["multi_model_consensus"] == "2/3 UP, 1/3 DOWN"
+
+    audit = session.query(CouncilAudit).order_by(CouncilAudit.id.desc()).first()
+    assert audit is not None
+    assert "Edge below fee hurdle under muted volatility." in audit.execution_notes
+    assert "Risk Critic:" in audit.execution_notes
