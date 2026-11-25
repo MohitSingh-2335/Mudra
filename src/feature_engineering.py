@@ -3,37 +3,35 @@ import numpy as np
 import pandas as pd
 import ta
 
+from config import CLASSIFIER_FEATURES, REGRESSOR_FEATURES
 
-# Compute technical indicators, rolling statistics, cyclical encodings, and microstructure features
+
 def create_features(df: pd.DataFrame, drop_na: bool = True, is_training: bool = True) -> pd.DataFrame:
+    """Computes technical indicators, rolling statistics, cyclical encodings, and microstructure features."""
     df = df.copy()
 
-    # Parse timestamps
     if "timestamp" in df.columns and not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
         try:
             df["timestamp"] = pd.to_datetime(df["timestamp"], format="%Y:%m:%d %H:%M:%S")
         except (ValueError, TypeError):
             df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-    # Basic price differences and volatility ratios
     df["Price Change"] = df["close"] - df["open"]
     df["Volatility"] = (df["high"] - df["low"]) / df["open"]
     df["high_low_ratio"] = df["high"] / df["low"]
     df["close_open_diff"] = df["close"] - df["open"]
 
-    # Rolling window price statistics
     df["Rolling_Mean_Close"] = df["close"].rolling(5).mean()
     df["Rolling_Std_Close"] = df["close"].rolling(5).std()
     df["rolling_max_6h"] = df["close"].rolling(6).max()
     df["rolling_min_6h"] = df["close"].rolling(6).min()
 
-    # Forward-looking supervised learning targets
+    # Forward targets disabled during live inference to enforce zero leakage
     if is_training:
         df["Target_Close"] = df["close"].shift(-1)
         df["Target_Movement"] = (df["close"].shift(-1) > df["close"]).astype(int)
         df["Target_Return"] = df["close"].shift(-1) / df["close"] - 1.0
 
-    # Volatility and historical percentage returns
     df["vol_1h"] = df["high"] - df["low"]
     df["vol_mean_6h"] = df["vol_1h"].rolling(6).mean()
     df["vol_std_6h"] = df["vol_1h"].rolling(6).std()
@@ -43,7 +41,6 @@ def create_features(df: pd.DataFrame, drop_na: bool = True, is_training: bool = 
     df["return_mean_6h"] = df["return_1h_lag"].rolling(6).mean()
     df["return_std_6h"] = df["return_1h_lag"].rolling(6).std()
 
-    # Cyclical calendar encodings for 24-hour crypto markets
     if "timestamp" in df.columns:
         df["hour"] = df["timestamp"].dt.hour
         df["dayofweek"] = df["timestamp"].dt.dayofweek
@@ -53,10 +50,9 @@ def create_features(df: pd.DataFrame, drop_na: bool = True, is_training: bool = 
         df["day_sin"] = np.sin(2 * np.pi * df["dayofweek"] / 7.0)
         df["day_cos"] = np.cos(2 * np.pi * df["dayofweek"] / 7.0)
     else:
-        for c in ["hour", "dayofweek", "day", "hour_sin", "hour_cos", "day_sin", "day_cos"]:
+        for c in ("hour", "dayofweek", "day", "hour_sin", "hour_cos", "day_sin", "day_cos"):
             df[c] = 0.0
 
-    # Technical momentum and trend indicators
     df["rsi"] = ta.momentum.RSIIndicator(close=df["close"], window=14).rsi()
     df["macd"] = ta.trend.MACD(close=df["close"]).macd()
     bb = ta.volatility.BollingerBands(close=df["close"])
@@ -64,11 +60,10 @@ def create_features(df: pd.DataFrame, drop_na: bool = True, is_training: bool = 
     df["ema_10"] = df["close"].ewm(span=10).mean()
     df["ema_30"] = df["close"].ewm(span=30).mean()
 
-    # Normalized percentage distance features
     df["candle_body_pct"] = (df["close"] - df["open"]) / df["open"]
     df["hl_range_pct"] = (df["high"] - df["low"]) / df["close"]
     df["sma_10_dist_pct"] = (df["close"] - df["Rolling_Mean_Close"]) / df["Rolling_Mean_Close"]
-    # True 10-hour SMA distance for Model 3 parity without breaking Model 2's 5-hour feature
+    # True 10-hour SMA distance for Model 3 parity without altering Model 2's 5-hour feature
     sma_10_true = df["close"].rolling(10, min_periods=1).mean()
     df["sma_10_true_dist_pct"] = (df["close"] - sma_10_true) / (sma_10_true + 1e-8)
     df["ema_10_dist_pct"] = (df["close"] - df["ema_10"]) / df["ema_10"]
@@ -77,12 +72,10 @@ def create_features(df: pd.DataFrame, drop_na: bool = True, is_training: bool = 
     bb_diff = (df["bb_high"] - df["bb_low"]).replace(0, np.nan)
     df["bb_pct_b"] = ((df["close"] - df["bb_low"]) / bb_diff).fillna(0.5)
 
-    # Autoregressive lags and interaction terms
     df["close_lag_1"] = df["close"].shift(1)
     df["volume_lag_1"] = df["volume"].shift(1)
     df["price_volatility_interaction"] = df["close"] * df["Volatility"]
 
-    # Microstructure order flow
     has_taker = "taker_buy_ratio" in df.columns and df["taker_buy_ratio"].notna().any()
     df["taker_buy_ratio"] = pd.to_numeric(df["taker_buy_ratio"], errors="coerce").fillna(0.5) if has_taker else 0.5
     df["taker_buy_ratio_mean_6h"] = df["taker_buy_ratio"].rolling(6).mean().fillna(0.5) if has_taker else 0.5
@@ -93,19 +86,21 @@ def create_features(df: pd.DataFrame, drop_na: bool = True, is_training: bool = 
     df["number_of_trades"] = pd.to_numeric(df["number_of_trades"], errors="coerce").fillna(0.0) if has_trades else 0.0
     df["trades_mean_6h"] = df["number_of_trades"].rolling(6).mean().fillna(0.0) if has_trades else 0.0
 
-    # Macro sentiment and on-chain network indicators
-    df["fng_value"] = df["fng_value"] if "fng_value" in df.columns else 50.0
-    df["fng_mean_3d"] = df["fng_value"].rolling(72, min_periods=1).mean() if "fng_value" in df.columns else 50.0
+    if "fng_value" not in df.columns:
+        df["fng_value"] = 50.0
+    df["fng_mean_3d"] = df["fng_value"].rolling(72, min_periods=1).mean()
 
-    for col, src in [("onchain_num_tx_change", "onchain_num_tx"),
-                     ("onchain_hash_rate_change", "onchain_hash_rate"),
-                     ("onchain_miners_revenue_change", "onchain_miners_revenue_usd")]:
-        df[col] = df[src].pct_change(fill_method=None).fillna(0.0) if col not in df.columns and src in df.columns else df.get(col, pd.Series(0.0, index=df.index)).fillna(0.0)
-    for c in ["onchain_num_tx", "onchain_hash_rate"]:
+    for col, src in (
+        ("onchain_num_tx_change", "onchain_num_tx"),
+        ("onchain_hash_rate_change", "onchain_hash_rate"),
+        ("onchain_miners_revenue_change", "onchain_miners_revenue_usd"),
+    ):
+        df[col] = df[src].pct_change(fill_method=None).fillna(0.0) if (col not in df.columns and src in df.columns) else df.get(col, pd.Series(0.0, index=df.index)).fillna(0.0)
+    for c in ("onchain_num_tx", "onchain_hash_rate"):
         if c not in df.columns:
             df[c] = 0.0
 
-    # Model 3 (v3_29stationary) scale-invariant indicators
+    # Model 3 (v3_29stationary) scale-invariant features
     df["return_1h"] = df["close"].pct_change(1, fill_method=None).fillna(0.0)
     df["return_4h"] = df["close"].pct_change(4, fill_method=None).fillna(0.0)
     df["return_24h"] = df["close"].pct_change(24, fill_method=None).fillna(0.0)
@@ -120,7 +115,7 @@ def create_features(df: pd.DataFrame, drop_na: bool = True, is_training: bool = 
     macd_sig = df["macd"].ewm(span=9, adjust=False).mean()
     df["macd_signal_diff_pct"] = ((df["macd"] - macd_sig) / (df["close"] + 1e-8)).fillna(0.0)
 
-    for raw_c, new_pref in [("volume", "vol"), ("taker_buy_base_volume", "taker"), ("number_of_trades", "trades")]:
+    for raw_c, new_pref in (("volume", "vol"), ("taker_buy_base_volume", "taker"), ("number_of_trades", "trades")):
         log_v = np.log1p(df[raw_c])
         df[f"{new_pref}_log_z24"] = ((log_v - log_v.rolling(24).mean()) / (log_v.rolling(24).std() + 1e-8)).fillna(0.0)
     df["volume_ratio_6h_24h"] = (df["volume"].rolling(6).mean() / (df["volume"].rolling(24).mean() + 1e-8)).fillna(1.0)
@@ -129,8 +124,8 @@ def create_features(df: pd.DataFrame, drop_na: bool = True, is_training: bool = 
     return df.dropna().reset_index(drop=True) if drop_na else df
 
 
-# Extract features from latest closed candle for live model evaluation
 def extract_features_for_inference(df: pd.DataFrame) -> dict:
+    """Extracts features from latest closed candle for live inference."""
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         raise ValueError("Market candle sequence cannot be empty.")
     missing = {"open", "high", "low", "close", "volume"} - set(df.columns)
@@ -142,22 +137,21 @@ def extract_features_for_inference(df: pd.DataFrame) -> dict:
     featured_df = create_features(df, drop_na=False, is_training=False)
     latest = featured_df.iloc[-1]
 
-    from config import CLASSIFIER_FEATURES, REGRESSOR_FEATURES
-    all_required = sorted(list(set(REGRESSOR_FEATURES + CLASSIFIER_FEATURES)))
+    all_required = sorted(set(REGRESSOR_FEATURES + CLASSIFIER_FEATURES))
     nan_features = [col for col in all_required if pd.isna(latest.get(col))]
     if nan_features:
         raise ValueError(f"Feature parity violation: NaNs encountered in computed features: {nan_features}")
 
     out: dict = {col: (int(latest[col]) if col in {"hour", "dayofweek", "day"} else float(latest[col])) for col in all_required}
     for col in featured_df.columns:
-        if col not in out and col in latest and pd.notna(latest[col]):
+        if col not in out and pd.notna(latest[col]):
             val = latest[col]
             if isinstance(val, (int, np.integer)):
                 out[col] = int(val)
             elif isinstance(val, (float, np.floating)):
                 out[col] = float(val)
 
-    for k in ["close", "open", "high", "low", "volume"]:
+    for k in ("close", "open", "high", "low", "volume"):
         out[k] = float(latest[k])
 
     if "timestamp" in latest and pd.notna(latest["timestamp"]):
@@ -169,18 +163,19 @@ def extract_features_for_inference(df: pd.DataFrame) -> dict:
     taker_ratio = float(out.get("taker_buy_ratio", 0.50))
     flow_bias = "Bullish Aggressive Buying (Takers Sweeping Book)" if taker_ratio > 0.55 else ("Bearish Aggressive Selling (Inventory Dumping)" if taker_ratio < 0.45 else "Neutral Balanced Liquidity")
 
-    out["close_price"] = close_price
-    out["high_low_spread_usd"] = round(spread, 2)
-    out["volatility_range_pct"] = round((spread / close_price) * 100.0 if close_price > 0 else 0.0, 3)
-    out["order_flow_bias"] = flow_bias
-    out["rsi_estimate"] = round(float(out["rsi"]), 1)
-    out["volume_usd"] = round(float(latest["volume"]), 2)
+    out.update({
+        "close_price": close_price,
+        "high_low_spread_usd": round(spread, 2),
+        "volatility_range_pct": round((spread / close_price) * 100.0 if close_price > 0 else 0.0, 3),
+        "order_flow_bias": flow_bias,
+        "rsi_estimate": round(float(out["rsi"]), 1),
+        "volume_usd": round(float(latest["volume"]), 2),
+    })
     return out
 
 
-# Validate input feature vector columns, order, and data types before inference
 def validate_inference_features(features: Union[pd.DataFrame, dict], model_type: str = "regressor") -> pd.DataFrame:
-    from config import CLASSIFIER_FEATURES, REGRESSOR_FEATURES
+    """Enforces column presence, canonical ordering, numeric types, and zero NaN/Inf before inference."""
     mtype = model_type.strip().lower()
     if mtype == "regressor":
         expected = REGRESSOR_FEATURES
@@ -227,7 +222,6 @@ def validate_inference_features(features: Union[pd.DataFrame, dict], model_type:
     return df
 
 
-# Predict return with input schema validation
 def predict_with_validation(model: Any, features: Union[pd.DataFrame, dict], model_type: str = "regressor") -> np.ndarray:
     if model is None or not hasattr(model, "predict"):
         raise ValueError("Invalid model provided: must implement .predict().")
@@ -238,7 +232,6 @@ def predict_with_validation(model: Any, features: Union[pd.DataFrame, dict], mod
     return preds
 
 
-# Predict direction probabilities with input validation
 def predict_proba_with_validation(model: Any, features: Union[pd.DataFrame, dict]) -> np.ndarray:
     if model is None or not hasattr(model, "predict_proba"):
         raise ValueError("Invalid classifier provided: must implement .predict_proba().")
