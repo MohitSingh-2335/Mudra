@@ -36,42 +36,48 @@ class RAGMemoryItem(BaseModel):
 
 
 class GeminiEmbeddingFunction(EmbeddingFunction):
+    # Embeds documents and queries using local ONNX MiniLM (384-dim) so vector spaces stay consistent at zero API cost.
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key, self._local_fallback = api_key, None
-        self.last_embedding_mode: str = "uninitialized"
+        self.api_key = api_key
+        self._local_fn: Any = None
+        if os.getenv("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+            self.last_embedding_mode = "hash_test_fallback"
+        else:
+            self.last_embedding_mode = "local_minilm"
 
-    def _hash_vector(self, text: str, dim: int = 768) -> List[float]:
+    def _hash_vector(self, text: str, dim: int = 384) -> List[float]:
         rng = np.random.RandomState(sum(ord(c) for c in text) % 10000 + 1)
         vec = rng.randn(dim).astype(float)
         norm = np.linalg.norm(vec)
         return (vec / norm).tolist() if norm > 0 else vec.tolist()
 
+    def _get_local_minilm(self) -> Any:
+        if self._local_fn is None:
+            try:
+                from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+                self._local_fn = DefaultEmbeddingFunction()
+            except Exception as exc:
+                logger.warning("DefaultEmbeddingFunction unavailable, falling back to hash vectors: %s", exc)
+                self._local_fn = False
+        return self._local_fn
+
     def __call__(self, input: Documents) -> Embeddings:
         texts = list(input)
         if os.getenv("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
             self.last_embedding_mode = "hash_test_fallback"
-            return [self._hash_vector(t) for t in texts]
-        try:
-            from src.ai.llm import embed_texts
-            embs = embed_texts(texts, api_key=self.api_key, output_dimensionality=768)
-            self.last_embedding_mode = "gemini-embedding-001"
-            return embs
-        except Exception as exc:
-            logger.warning("Gemini embed_texts failed, falling back to local: %s", exc)
+            return [self._hash_vector(t, dim=384) for t in texts]
 
-        if self._local_fallback is None:
+        local_fn = self._get_local_minilm()
+        if local_fn:
             try:
-                from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
-                self._local_fallback = DefaultEmbeddingFunction()
-            except Exception: self._local_fallback = False
-        if self._local_fallback:
-            try:
-                embs = self._local_fallback(texts)
+                embs = local_fn(texts)
                 self.last_embedding_mode = "local_minilm"
-                return [list(vec) + list(vec) if len(vec) == 384 else list(vec) for vec in embs]
-            except Exception: pass
+                return [list(vec) for vec in embs]
+            except Exception as exc:
+                logger.warning("Local MiniLM embedding failed: %s", exc)
+
         self.last_embedding_mode = "hash_test_fallback"
-        return [self._hash_vector(t) for t in texts]
+        return [self._hash_vector(t, dim=384) for t in texts]
 
 
 class MarketKnowledgeRAG:
