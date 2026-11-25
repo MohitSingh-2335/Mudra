@@ -52,11 +52,15 @@ async def _fetch_mcp_context_stdio(limit: int = 3, timeout_sec: float = 15.0) ->
                 tools_res = await session.list_tools()
                 discovered = [t.name for t in tools_res.tools]
 
-                # Invoke derivatives, 6h news, and error memories concurrently so a cold DB never blocks live market feeds
-                p_task = _timed_tool(session, "get_live_btc_derivatives_pulse", {})
-                n_task = _timed_tool(session, "get_recent_btc_news_headlines", {"hours_back": 6, "max_items": 5})
-                e_task = _timed_tool(session, "get_recent_prediction_error_memories", {"limit": limit})
-                p_res, n_res, e_res = await asyncio.gather(p_task, n_task, e_task, return_exceptions=True)
+                # Fetch fast external derivatives and 6h news first so synchronous Neon queries never starve them in FastMCP.
+                p_task = asyncio.wait_for(_timed_tool(session, "get_live_btc_derivatives_pulse", {}), timeout=6.0)
+                n_task = asyncio.wait_for(_timed_tool(session, "get_recent_btc_news_headlines", {"hours_back": 6, "max_items": 5}), timeout=6.0)
+                p_res, n_res = await asyncio.gather(p_task, n_task, return_exceptions=True)
+
+                try:
+                    e_res = await asyncio.wait_for(_timed_tool(session, "get_recent_prediction_error_memories", {"limit": limit}), timeout=8.0)
+                except Exception as e_exc:
+                    e_res = e_exc
 
                 p_lat = p_res[1] if not isinstance(p_res, Exception) else 0.0
                 n_lat = n_res[1] if not isinstance(n_res, Exception) else 0.0
@@ -92,10 +96,10 @@ async def _fetch_mcp_context_stdio(limit: int = 3, timeout_sec: float = 15.0) ->
             news_headlines=headlines,
             derivatives_status=d_status,
             derivatives_source=str(p_data.get("source", "none")),
-            derivatives_error=str(p_res) if isinstance(p_res, Exception) else p_data.get("error"),
+            derivatives_error=(str(p_res) or type(p_res).__name__) if isinstance(p_res, Exception) else p_data.get("error"),
             derivatives_latency_ms=round(float(p_lat), 2),
             news_status=n_status,
-            news_error=str(n_res) if isinstance(n_res, Exception) else n_data.get("error"),
+            news_error=(str(n_res) or type(n_res).__name__) if isinstance(n_res, Exception) else n_data.get("error"),
             news_latency_ms=round(float(n_lat), 2),
         ).model_dump()
 
@@ -160,5 +164,6 @@ def fetch_mcp_context(limit: int = 3, timeout_sec: float = 15.0) -> Dict[str, An
         logger.info("MCP stdio context fetch succeeded (status: %s)", res.get("status"))
         return res
     except Exception as exc:
-        logger.warning("MCP stdio client failed or timed out: %s", exc)
-        return MCPContextPayload(status="UNAVAILABLE", transport="mcp_stdio_error", error=str(exc)).model_dump()
+        err_str = str(exc) or type(exc).__name__
+        logger.warning("MCP stdio client failed or timed out: %s", err_str)
+        return MCPContextPayload(status="UNAVAILABLE", transport="mcp_stdio_error", error=err_str).model_dump()
