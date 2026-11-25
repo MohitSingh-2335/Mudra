@@ -328,3 +328,35 @@ def generate_market_commentary(
     except Exception as exc:
         logger.warning("Market commentary generation failed: %s", exc)
         return _generate_fallback_report(pred_price, pred_return, pred_move_text)
+
+
+def embed_texts(
+    texts: List[str],
+    api_key: Optional[str] = None,
+    output_dimensionality: int = 768,
+    caller: str = "rag_embed",
+) -> List[List[float]]:
+    """Generates semantic embeddings via Gemini gemini-embedding-001 and logs quota telemetry."""
+    key = api_key or _get_gemini_api_key()
+    if not key:
+        raise RuntimeError("Missing Gemini API key for embeddings.")
+
+    from google import genai
+    from google.genai import types
+
+    t0 = time.perf_counter()
+    try:
+        client = genai.Client(api_key=key)
+        cfg = types.EmbedContentConfig(output_dimensionality=output_dimensionality)
+        res = client.models.embed_content(model="gemini-embedding-001", contents=texts, config=cfg)
+        lat_ms = (time.perf_counter() - t0) * 1000.0
+        embs = getattr(res, "embeddings", [getattr(res, "embedding", None)])
+        _log_llm_telemetry(f"gemini-embedding-001:{caller}", lat_ms, 200)
+        return [list(getattr(e, "values", e)) for e in embs if e is not None]
+    except Exception as exc:
+        lat_ms = (time.perf_counter() - t0) * 1000.0
+        err_msg = str(exc)
+        status_code = 429 if ("429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg) else 503
+        _log_llm_telemetry(f"gemini-embedding-001:{caller}", lat_ms, status_code, err_msg[:300])
+        logger.warning("Gemini embed_content failed (%s): %s", status_code, exc)
+        raise RuntimeError(f"Gemini embed_content error ({status_code}): {exc}") from exc
