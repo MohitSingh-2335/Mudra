@@ -7,11 +7,10 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
 
 from config import (
     BTCUSDT_1H_CSV,
@@ -19,27 +18,15 @@ from config import (
     FEATURED_BTC_DATA_PATH,
     INITIAL_CAPITAL_USD,
     REGRESSOR_FEATURES,
-    SLIPPAGE_RATE as CONFIG_SLIPPAGE_RATE,
-    TAKER_FEE_RATE as CONFIG_TAKER_FEE_RATE,
+    SLIPPAGE_RATE,
+    TAKER_FEE_RATE,
     THRESHOLD_SWEEP,
-    TOTAL_FRICTION_PER_SIDE_RATE,
 )
-from src.data_preprocessing import (
-    load_and_clean_data,
-    merge_fear_greed,
-    merge_onchain,
-)
+from src.data_preprocessing import load_and_clean_data, merge_fear_greed, merge_onchain
 from src.feature_engineering import create_features
-from src.model_loader import load_production_models as loader_load_production_models
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
-
-INITIAL_CAPITAL = INITIAL_CAPITAL_USD
-TAKER_FEE_RATE = CONFIG_TAKER_FEE_RATE
-SLIPPAGE_RATE = CONFIG_SLIPPAGE_RATE
+from src.model_loader import load_production_models
 
 
-# Load holdout out-of-sample data for backtesting evaluation
 def load_backtest_data(data_path: Union[str, Path] = FEATURED_BTC_DATA_PATH, split_ratio: float = 0.8) -> pd.DataFrame:
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"Dataset not found at: {data_path}")
@@ -49,22 +36,20 @@ def load_backtest_data(data_path: Union[str, Path] = FEATURED_BTC_DATA_PATH, spl
     return df.iloc[int(len(df) * split_ratio):].reset_index(drop=True)
 
 
-# Load verified production models
-def load_production_models() -> Tuple[Any, Any]:
-    return loader_load_production_models()
-
-
-# Simulate trading portfolio returns from discrete signal array with fee and slippage friction
 def _simulate_from_signals(
-    test_df: pd.DataFrame, signals: np.ndarray, initial_capital: float = INITIAL_CAPITAL,
-    taker_fee_rate: float = TAKER_FEE_RATE, slippage_rate: float = SLIPPAGE_RATE,
+    test_df: pd.DataFrame,
+    signals: np.ndarray,
+    initial_capital: float = INITIAL_CAPITAL_USD,
+    taker_fee_rate: float = TAKER_FEE_RATE,
+    slippage_rate: float = SLIPPAGE_RATE,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    # Simulates sequential spot entry/exit with per-side taker fee + slippage
     equity, position = initial_capital, 0
     entry_equity, entry_price, entry_time = 0.0, 0.0, None
     equity_curve, trade_log = [], []
     total_friction = taker_fee_rate + slippage_rate
 
-    def _close_position(curr_price, curr_time):
+    def _close_position(curr_price: float, curr_time: Any) -> None:
         nonlocal equity, position
         gross_ret = (curr_price / entry_price) - 1.0 if position == 1 else 1.0 - (curr_price / entry_price)
         equity = entry_equity * (1.0 + gross_ret) * (1.0 - total_friction)
@@ -78,14 +63,14 @@ def _simulate_from_signals(
         position = 0
 
     for i in range(len(test_df)):
-        price, time, sig = float(test_df["close"].iloc[i]), test_df["timestamp"].iloc[i], int(signals[i])
+        price, ts, sig = float(test_df["close"].iloc[i]), test_df["timestamp"].iloc[i], int(signals[i])
         if position == 0 and sig in (1, -1):
-            entry_equity, entry_price, entry_time, position = equity * (1.0 - total_friction), price, time, sig
+            entry_equity, entry_price, entry_time, position = equity * (1.0 - total_friction), price, ts, sig
         elif position != 0 and sig == 0:
-            _close_position(price, time)
+            _close_position(price, ts)
 
         mtm = (entry_equity * (price / entry_price)) if position == 1 else ((entry_equity * (1.0 + (entry_price - price) / entry_price)) if position == -1 else equity)
-        equity_curve.append({"timestamp": time, "close": price, "equity": mtm, "position": position, "signal": sig})
+        equity_curve.append({"timestamp": ts, "close": price, "equity": mtm, "position": position, "signal": sig})
 
     if position != 0:
         _close_position(float(test_df["close"].iloc[-1]), test_df["timestamp"].iloc[-1])
@@ -95,12 +80,16 @@ def _simulate_from_signals(
     return pd.DataFrame(equity_curve), pd.DataFrame(trade_log)
 
 
-# Backtesting simulation with dual model threshold hurdle
 def run_backtest_simulation(
-    test_df: pd.DataFrame, clf_model: Any, reg_model: Optional[Any] = None,
-    strategy_mode: str = "fused", return_threshold: float = 0.002,
-    taker_fee_rate: Optional[float] = None, slippage_rate: Optional[float] = None,
-    clf_features: Optional[List[str]] = None, reg_features: Optional[List[str]] = None,
+    test_df: pd.DataFrame,
+    clf_model: Any,
+    reg_model: Optional[Any] = None,
+    strategy_mode: str = "fused",
+    return_threshold: float = 0.002,
+    taker_fee_rate: Optional[float] = None,
+    slippage_rate: Optional[float] = None,
+    clf_features: Optional[List[str]] = None,
+    reg_features: Optional[List[str]] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     f_clf = CLASSIFIER_FEATURES if clf_features is None else clf_features
     clf_preds = clf_model.predict(test_df[f_clf])
@@ -110,21 +99,17 @@ def run_backtest_simulation(
         signals = ((clf_preds == 1) & (reg_preds >= return_threshold)).astype(int)
     else:
         signals = (clf_preds == 1).astype(int)
-    return _simulate_from_signals(test_df, signals, taker_fee_rate=taker_fee_rate or TAKER_FEE_RATE, slippage_rate=slippage_rate or SLIPPAGE_RATE)
+    return _simulate_from_signals(
+        test_df,
+        signals,
+        taker_fee_rate=TAKER_FEE_RATE if taker_fee_rate is None else taker_fee_rate,
+        slippage_rate=SLIPPAGE_RATE if slippage_rate is None else slippage_rate,
+    )
 
 
-# Legacy backtest wrapper with scaler support
-def run_backtest(test_df: pd.DataFrame, model: Any, scaler: Optional[Any] = None, threshold: float = 0.5, taker_fee_rate: Optional[float] = None, slippage_rate: Optional[float] = None, feature_cols: Optional[List[str]] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    cols = feature_cols or [c for c in CLASSIFIER_FEATURES if c in test_df.columns]
-    X = scaler.transform(test_df[cols]) if scaler else test_df[cols]
-    signals = (model.predict_proba(X)[:, 1] >= threshold).astype(int) if hasattr(model, "predict_proba") else model.predict(X)
-    return _simulate_from_signals(test_df, signals, taker_fee_rate=taker_fee_rate or TAKER_FEE_RATE, slippage_rate=slippage_rate or SLIPPAGE_RATE)
-
-
-# Calculate key portfolio performance metrics: Sharpe, Sortino, Max Drawdown, Win Rate
 def calculate_quant_metrics(equity_curve_df: pd.DataFrame, trade_log_df: pd.DataFrame, test_df: pd.DataFrame) -> Dict[str, Any]:
     final_eq = equity_curve_df["equity"].iloc[-1]
-    total_ret = ((final_eq / INITIAL_CAPITAL) - 1.0) * 100.0
+    total_ret = ((final_eq / INITIAL_CAPITAL_USD) - 1.0) * 100.0
     start_p, end_p = test_df["close"].iloc[0], test_df["close"].iloc[-1]
     bh_ret = ((end_p / start_p) - 1.0) * 100.0
 
@@ -138,7 +123,7 @@ def calculate_quant_metrics(equity_curve_df: pd.DataFrame, trade_log_df: pd.Data
 
     run_max = equity_curve_df["equity"].cummax()
     mdd = ((equity_curve_df["equity"] - run_max) / run_max).min() * 100.0
-    bh_series = INITIAL_CAPITAL * (equity_curve_df["close"] / start_p)
+    bh_series = INITIAL_CAPITAL_USD * (equity_curve_df["close"] / start_p)
     bh_mdd = ((bh_series - bh_series.cummax()) / bh_series.cummax()).min() * 100.0
 
     n_trades = len(trade_log_df)
@@ -148,8 +133,8 @@ def calculate_quant_metrics(equity_curve_df: pd.DataFrame, trade_log_df: pd.Data
     profit_factor = (gains / losses) if losses > 0 else (gains if gains > 0 else 1.0)
 
     return {
-        "initial_capital": INITIAL_CAPITAL, "final_equity": round(final_eq, 2), "total_return_pct": round(total_ret, 2),
-        "bh_final_equity": round(INITIAL_CAPITAL * (end_p / start_p), 2), "bh_return_pct": round(bh_ret, 2),
+        "initial_capital": INITIAL_CAPITAL_USD, "final_equity": round(final_eq, 2), "total_return_pct": round(total_ret, 2),
+        "bh_final_equity": round(INITIAL_CAPITAL_USD * (end_p / start_p), 2), "bh_return_pct": round(bh_ret, 2),
         "sharpe_annualized": round(sharpe, 3), "sortino_annualized": round(sortino, 3),
         "max_drawdown_pct": round(mdd, 2), "bh_max_drawdown_pct": round(bh_mdd, 2),
         "calmar_ratio": round((total_ret / abs(mdd)) if mdd != 0 else 0.0, 3), "win_rate_pct": round(win_rate, 2),
@@ -159,34 +144,6 @@ def calculate_quant_metrics(equity_curve_df: pd.DataFrame, trade_log_df: pd.Data
     }
 
 
-compute_metrics = calculate_quant_metrics
-
-
-# Save performance comparison chart vs Buy-and-Hold
-def plot_backtest_comparison(equity_curve_df: pd.DataFrame, output_path: Union[str, Path] = "artifacts/backtest_performance.png") -> None:
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    start_p = equity_curve_df["close"].iloc[0]
-    bh_eq = INITIAL_CAPITAL * (equity_curve_df["close"] / start_p)
-    s_max = equity_curve_df["equity"].cummax()
-
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True, gridspec_kw={"height_ratios": [2.5, 1]})
-    ax1.plot(equity_curve_df["timestamp"], equity_curve_df["equity"], label="Mudra Strategy", color="#00C805", linewidth=2)
-    ax1.plot(equity_curve_df["timestamp"], bh_eq, label="Buy & Hold BTC", color="#F7931A", linewidth=1.5, alpha=0.85)
-    ax1.set_ylabel("Portfolio Equity ($ USD)", fontweight="bold")
-    ax1.legend(loc="upper left")
-    ax1.grid(True, linestyle="--", alpha=0.3)
-
-    ax2.fill_between(equity_curve_df["timestamp"], ((equity_curve_df["equity"] - s_max) / s_max) * 100.0, 0, color="#00C805", alpha=0.3)
-    ax2.fill_between(equity_curve_df["timestamp"], ((bh_eq - bh_eq.cummax()) / bh_eq.cummax()) * 100.0, 0, color="#F7931A", alpha=0.2)
-    ax2.set_ylabel("Drawdown (%)", fontweight="bold")
-    ax2.grid(True, linestyle="--", alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=300)
-    plt.close(fig)
-
-
-# Train baseline classifier for threshold sweep experiment
 def train_classifier(df: pd.DataFrame, split_idx: int) -> Tuple[LogisticRegression, StandardScaler]:
     X_train = df[CLASSIFIER_FEATURES].iloc[:split_idx]
     y_train = df["Target_Movement"].iloc[:split_idx]
@@ -196,66 +153,31 @@ def train_classifier(df: pd.DataFrame, split_idx: int) -> Tuple[LogisticRegressi
     return model, scaler
 
 
-# Backtest trading strategy across decision probability threshold with transaction friction
 def run_backtest_threshold(test_df: pd.DataFrame, model: Any, scaler: StandardScaler, threshold: float = 0.50) -> Tuple[pd.DataFrame, pd.DataFrame]:
     probs = model.predict_proba(scaler.transform(test_df[CLASSIFIER_FEATURES]))[:, 1]
     signals = (probs > threshold).astype(int)
-
-    equity, position, entry_price, entry_equity, entry_time = INITIAL_CAPITAL, 0, 0.0, 0.0, None
-    equity_curve, trade_log = [], []
-
-    for i in range(len(test_df)):
-        price, time, signal = float(test_df["close"].iloc[i]), test_df["timestamp"].iloc[i], signals[i]
-        if position == 0 and signal == 1:
-            entry_equity, entry_price, entry_time, position = equity * (1.0 - TOTAL_FRICTION_PER_SIDE_RATE), price, time, 1
-        elif position == 1 and signal == 0:
-            gross = (price / entry_price) - 1.0
-            equity = entry_equity * (1.0 + gross) * (1.0 - TOTAL_FRICTION_PER_SIDE_RATE)
-            net = (equity / (entry_equity / (1.0 - TOTAL_FRICTION_PER_SIDE_RATE))) - 1.0
-            trade_log.append({
-                "entry_time": entry_time, "exit_time": time, "entry_price": entry_price,
-                "exit_price": price, "gross_return_pct": gross * 100.0, "net_return_pct": net * 100.0,
-                "outcome": "WIN" if equity > entry_equity else "LOSS",
-            })
-            position = 0
-        equity_curve.append({"timestamp": time, "equity": entry_equity * (price / entry_price) if position == 1 else equity, "position": position})
-
-    if position == 1:
-        last_price = float(test_df["close"].iloc[-1])
-        gross = (last_price / entry_price) - 1.0
-        equity = entry_equity * (1.0 + gross) * (1.0 - TOTAL_FRICTION_PER_SIDE_RATE)
-        net = (equity / (entry_equity / (1.0 - TOTAL_FRICTION_PER_SIDE_RATE))) - 1.0
-        trade_log.append({
-            "entry_time": entry_time, "exit_time": test_df["timestamp"].iloc[-1], "entry_price": entry_price,
-            "exit_price": last_price, "gross_return_pct": gross * 100.0, "net_return_pct": net * 100.0,
-            "outcome": "WIN" if equity > entry_equity else "LOSS",
-        })
-        equity_curve[-1]["equity"], equity_curve[-1]["position"] = equity, 0
-
-    return pd.DataFrame(equity_curve), pd.DataFrame(trade_log)
+    return _simulate_from_signals(test_df, signals)
 
 
-# Sweep classification decision thresholds and save comparison CSV
-def run_threshold_sweep(data_path: Path = Path(BTCUSDT_1H_CSV), output_path: Path = Path(THRESHOLD_SWEEP), thresholds: List[float] = [0.50, 0.55, 0.60, 0.65, 0.70]) -> pd.DataFrame:
+def run_threshold_sweep(
+    data_path: Path = Path(BTCUSDT_1H_CSV),
+    output_path: Path = Path(THRESHOLD_SWEEP),
+    thresholds: Optional[List[float]] = None,
+) -> pd.DataFrame:
+    sweep_vals = [0.50, 0.55, 0.60, 0.65, 0.70] if thresholds is None else thresholds
     df = create_features(merge_onchain(merge_fear_greed(load_and_clean_data(data_path), "timestamp"), "timestamp"), drop_na=True)
     split_idx = int(len(df) * 0.8)
     test_df = df.iloc[split_idx:].reset_index(drop=True)
     model, scaler = train_classifier(df, split_idx)
 
     results = []
-    for t in thresholds:
+    for t in sweep_vals:
         ec, tl = run_backtest_threshold(test_df, model, scaler, threshold=t)
-        final_eq = ec["equity"].iloc[-1]
-        returns = ec["equity"].pct_change().fillna(0.0)
-        running_max = ec["equity"].cummax()
+        m = calculate_quant_metrics(ec, tl, test_df)
         results.append({
-            "threshold": t,
-            "num_trades": len(tl),
-            "win_rate_pct": float((tl["outcome"] == "WIN").mean() * 100.0) if len(tl) > 0 else 0.0,
-            "total_return_pct": ((final_eq / INITIAL_CAPITAL) - 1.0) * 100.0,
-            "buy_hold_return_pct": ((test_df["close"].iloc[-1] / test_df["close"].iloc[0]) - 1.0) * 100.0,
-            "sharpe_ratio_annualized": float((returns.mean() / returns.std()) * np.sqrt(8760)) if returns.std() > 0 else 0.0,
-            "max_drawdown_pct": float(((ec["equity"] - running_max) / running_max).min() * 100.0),
+            "threshold": t, "num_trades": m["num_trades"], "win_rate_pct": m["win_rate_pct"],
+            "total_return_pct": m["total_return_pct"], "buy_hold_return_pct": m["bh_return_pct"],
+            "sharpe_ratio_annualized": m["sharpe_annualized"], "max_drawdown_pct": m["max_drawdown_pct"],
         })
 
     out = pd.DataFrame(results)[["threshold", "num_trades", "win_rate_pct", "total_return_pct", "buy_hold_return_pct", "sharpe_ratio_annualized", "max_drawdown_pct"]]
