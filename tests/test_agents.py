@@ -348,3 +348,65 @@ def test_llm_telemetry_logs_model_and_caller(monkeypatch):
     assert logged[2][2] == 200
 
 
+
+
+def test_generate_hourly_postmortem_preserves_mcp_snapshot_honestly(monkeypatch):
+    """Ensure mcp_snapshot keeps real basis/headlines and leaves missing funding_rate as None without fake 0.01 defaults."""
+    import json
+    from src.ai.llm import generate_hourly_postmortem_with_gemini
+
+    # Offline / pytest path must preserve mcp_snapshot honestly when funding_rate_8h_pct is None
+    offline_res = generate_hourly_postmortem_with_gemini(
+        tick_features={"rsi_14": 48.0},
+        mcp_context={
+            "funding_rate_8h_pct": None,
+            "futures_basis_usd": -12.5,
+            "derivatives_regime": "Bearish / Deleveraging",
+            "derivatives_source": "deribit",
+            "news_headlines": ["BTC volume rises", "Miner reserves steady"],
+        },
+        model_outcomes=[{"model_version": "lgbm_v3.0.0", "predicted_return_pct": 0.1, "actual_return_pct": -0.2}],
+    )
+    assert offline_res["gemini_status"] == "UNAVAILABLE"
+    assert offline_res["mcp_snapshot"]["funding_rate_8h_pct"] is None
+    assert offline_res["mcp_snapshot"]["futures_basis_usd"] == -12.5
+    assert offline_res["mcp_snapshot"]["derivatives_source"] == "deribit"
+    assert offline_res["mcp_snapshot"]["news_headline_count"] == 2
+
+    # Online mocked Gemini path must pass mcp_snapshot without inventing 0.01 and return it in analysis
+    captured = {}
+
+    def fake_gemini(api_key, prompt, **kwargs):
+        captured["prompt"] = prompt
+        payload = {
+            "market_summary": "Muted spot session.",
+            "per_model": {
+                "lgbm_v3.0.0": {
+                    "root_cause_driver": "NEGATIVE_BASIS",
+                    "diagnosis_summary": "Negative basis aligned with mild pullback.",
+                }
+            },
+        }
+        return json.dumps(payload), "gemini-2.5-flash"
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setattr("src.ai.llm._get_gemini_api_key", lambda: "unit-test-key")
+    monkeypatch.setattr("src.ai.llm.generate_with_gemini_fallback", fake_gemini)
+
+    online_res = generate_hourly_postmortem_with_gemini(
+        tick_features={"rsi_14": 48.0},
+        mcp_context={
+            "funding_rate_8h_pct": None,
+            "futures_basis_usd": 125.5,
+            "derivatives_regime": "Neutral",
+            "derivatives_source": "kraken",
+            "news_headlines": ["Headline A", "Headline B"],
+        },
+        model_outcomes=[{"model_version": "lgbm_v3.0.0", "predicted_return_pct": 0.1, "actual_return_pct": 0.2}],
+    )
+    assert online_res["gemini_status"] == "OK"
+    assert online_res["mcp_snapshot"]["funding_rate_8h_pct"] is None
+    assert online_res["mcp_snapshot"]["futures_basis_usd"] == 125.5
+    assert online_res["mcp_snapshot"]["news_headline_count"] == 2
+    assert '"funding_rate_8h_pct": null' in captured["prompt"]
+    assert "0.01" not in captured["prompt"]
