@@ -1,5 +1,6 @@
 {
   "model_version": "xgb_onnx_v1.0.0",
+  "status": "ACTIVE_PRODUCTION",
   "feature_schema_version": "v1_39features",
   "regressor_sha256": "b44fba18cf2c7b51e3297e83a946d869392803a267e951a5e85ea052c63eb854",
   "classifier_sha256": "df139c1018ed5025b1444d6597c3d98b4d7c377a898487268d18e58d253ae684",
@@ -116,6 +117,10 @@
   "metrics": {
     "holdout_accuracy": 0.5326,
     "holdout_log_loss": 0.6914,
-    "holdout_mae": 0.0032
+    "holdout_brier_score": 0.2491,
+    "holdout_roc_auc": 0.5394,
+    "holdout_spearman_ic": 0.0149,
+    "holdout_mae": 0.003221,
+    "model_price_rmse": 399.47
   }
 }
