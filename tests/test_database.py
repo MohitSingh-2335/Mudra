@@ -8,10 +8,18 @@ import pytest
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
 
-import config
-from config import ACTIVE_MODEL_VERSION, FEATURE_SCHEMA_VERSION
+from config import ACTIVE_MODEL_VERSION
 from src.database import (
-    CANONICAL_TABLE_COLUMNS, Base, HourlyPostmortem, MarketTick, ModelPrediction, ModelRegistry, init_db,
+    CANONICAL_TABLE_COLUMNS,
+    Base,
+    HourlyPostmortem,
+    MarketTick,
+    ModelPrediction,
+    ModelRegistry,
+    get_api_telemetry_summary,
+    get_model_reconciled_counts,
+    get_portfolio_kpis,
+    init_db,
 )
 from src.engine import execute_paper_order, get_portfolio_summary, reconcile_pending_ticks
 from scripts.migrate_db import BASELINE_MODEL_SPEC, run_migration
@@ -267,6 +275,46 @@ def test_get_reconciliation_summary_model_prediction_no_black_swan_attr(in_memor
     assert summary["black_swan_count"] == 1
     assert summary["black_swans_filtered"] == 1
     assert summary["model_version"] == "xgb_v2.0.0"
+
+
+def test_db_summary_helpers_and_honest_offline_defaults(in_memory_db, monkeypatch):
+    from contextlib import contextmanager
+    import src.database as src_db
+
+    session = in_memory_db[0]
+
+    @contextmanager
+    def mock_get_db():
+        yield session
+
+    monkeypatch.setattr(src_db, "get_db", mock_get_db)
+
+    # Empty api_telemetry must report None success rate instead of fake 100.0%.
+    empty_tel = get_api_telemetry_summary(hours=24)
+    assert empty_tel["total_calls"] == 0
+    assert empty_tel["success_rate_pct"] is None
+
+    # Seed reconciled legacy row and verify func import + max() count mapping work.
+    t0 = datetime(2026, 3, 1, 10, 0, tzinfo=timezone.utc)
+    tick = MarketTick(timestamp=t0, open=60000.0, high=60100.0, low=59900.0, close=60050.0, volume=10.0)
+    session.add(tick)
+    session.flush()
+    from src.database import Reconciliation
+    session.add(Reconciliation(
+        timestamp=t0, tick_id=tick.id, predicted_price=60100.0, actual_price_at_t_plus_1=60050.0,
+        predicted_return_pct=0.08, actual_return_pct=0.0, residual_error=-0.08,
+        absolute_error_usd=50.0, percentage_error=0.08, direction_predicted="UP",
+        direction_realized="DOWN", direction_correct=False, error_attribution_tag="SIDEWAYS_DRIFT",
+    ))
+    session.commit()
+
+    counts = get_model_reconciled_counts()
+    assert counts[ACTIVE_MODEL_VERSION] == 1
+
+    # DB query failure in get_portfolio_kpis must surface query_failed=True instead of fake $10,000.
+    monkeypatch.setattr(src_db, "get_db", lambda: (_ for _ in ()).throw(RuntimeError("db down")))
+    kpis = get_portfolio_kpis(current_price=65000.0)
+    assert kpis["query_failed"] is True and "total_equity_usd" not in kpis
 
 
 
