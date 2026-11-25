@@ -406,3 +406,44 @@ def test_generate_hourly_postmortem_preserves_mcp_snapshot_honestly(monkeypatch)
     assert online_res["mcp_snapshot"]["news_headline_count"] == 2
     assert '"funding_rate_8h_pct": null' in captured["prompt"]
     assert "0.01" not in captured["prompt"]
+
+
+def test_rag_gemini_primary_fallback_and_cooldown_recovery(monkeypatch, tmp_path):
+    # Verify Gemini primary RAG falls back cleanly to separate MiniLM collection on 429 and recovers after cooldown.
+    import src.ai.rag as ai_rag
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("MUDRA_TEST_GEMINI_RAG", "1")
+    monkeypatch.setattr(ai_rag, "_fetch_neon_rag_records", lambda limit=15: ([], [], []))
+    monkeypatch.setattr(ai_rag.LocalMiniLMEmbedding, "_get_local_minilm", lambda self: False)
+    monkeypatch.setattr(ai_llm, "_get_gemini_api_key", lambda: "unit-test-key")
+
+    state = {"fail_429": False, "now": 1000.0}
+    monkeypatch.setattr(ai_rag.time, "time", lambda: state["now"])
+
+    def fake_embed_texts(texts, api_key=None, output_dimensionality=768, caller="rag_embed"):
+        if state["fail_429"]:
+            raise RuntimeError("429 RESOURCE_EXHAUSTED")
+        return [[0.1] * output_dimensionality for _ in texts]
+
+    monkeypatch.setattr(ai_llm, "embed_texts", fake_embed_texts)
+
+    rag = ai_rag.MarketKnowledgeRAG(db_path=str(tmp_path / "chroma_dual"), cooldown_sec=60)
+    rag.index_outcome_memory(1, "2026-11-25T10:00Z", "Bullish", "UP", "UP", True, 50.0, 80.0, 30.0, "ACCURATE", "Matched.")
+    assert rag.embedding_mode == "gemini-embedding-001"
+    assert rag.cooldown_remaining_sec == 0
+
+    state["fail_429"] = True
+    res_fallback = rag.query_memories("Bullish UP Matched", n_results=1)
+    assert len(res_fallback) >= 1
+    assert rag.embedding_mode == "hash_test_fallback" or rag.embedding_mode == "local_minilm"
+    assert rag.cooldown_remaining_sec == 60
+    assert rag.collection is rag.local_collection
+
+    # After cooldown expires and Gemini quota resets, RAG automatically resumes Gemini primary collection.
+    state["fail_429"] = False
+    state["now"] += 61.0
+    res_recovered = rag.query_memories("Bullish UP Matched", n_results=1)
+    assert len(res_recovered) >= 1
+    assert rag.embedding_mode == "gemini-embedding-001"
+    assert rag.cooldown_remaining_sec == 0
