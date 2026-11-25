@@ -766,19 +766,51 @@ def sync_hourly_quant_cycle(force: bool = False, candle: Optional[Dict[str, Any]
             engineered_features=signals_output, ml_forecast=ml_output, timestamp=latest_ts.isoformat(),
             use_llm=False,
         )
+        # Save timestamp-aligned derivatives, news, and consensus signals in a new dict copy so SQLAlchemy persists JSON updates
+        mcp_ctx = council_state.get("mcp_context")
+        model_cons = council_state.get("model_consensus")
+        if (isinstance(mcp_ctx, dict) and mcp_ctx) or model_cons:
+            updated_feats = dict(current_tick.features or {})
+            if isinstance(mcp_ctx, dict) and mcp_ctx:
+                if mcp_ctx.get("funding_rate_8h_pct") is not None:
+                    updated_feats["funding_rate_8h_pct"] = float(mcp_ctx["funding_rate_8h_pct"])
+                if mcp_ctx.get("futures_basis_usd") is not None:
+                    updated_feats["futures_basis_usd"] = float(mcp_ctx["futures_basis_usd"])
+                if mcp_ctx.get("derivatives_regime") is not None:
+                    updated_feats["derivatives_regime"] = str(mcp_ctx["derivatives_regime"])
+                if mcp_ctx.get("derivatives_source") is not None:
+                    updated_feats["derivatives_source"] = str(mcp_ctx["derivatives_source"])
+                headlines = [str(h) for h in (mcp_ctx.get("news_headlines") or [])[:5]]
+                updated_feats["news_headlines"] = headlines
+                updated_feats["news_headline_count"] = len(headlines)
+            if model_cons:
+                updated_feats["multi_model_consensus"] = str(model_cons)
+            current_tick.features = updated_feats
+            session.flush()
+
         decision = council_state.get("final_decision", "HOLD")
         verdict = council_state.get("risk_verdict", "VETOED")
         kelly = float(council_state.get("kelly_fraction", 0.0))
         print(f"[QUANT STAGE 4/5 DONE] Decision: {decision} ({verdict}), Kelly Fraction: {kelly:.1%}", flush=True)
 
+        # Preserve both the council thesis and risk critique in audit notes alongside the summary line
+        thesis_txt = str(council_state.get("thesis") or council_state.get("strategist_thesis") or "").strip()
+        critic_txt = str(council_state.get("risk_critic_critique") or "").strip()
+        notes_parts = [f"Council deliberated {decision} ({verdict}) at BTC ${candle['close']:,.2f}."]
+        if thesis_txt:
+            notes_parts.append(f"Thesis: {thesis_txt}")
+        if critic_txt:
+            notes_parts.append(f"Risk Critic: {critic_txt}")
+        forced_suffix = " [FORCED_REANALYSIS]" if (is_existing and force) else ""
+
         audit = CouncilAudit(
             tick_id=current_tick.id,
             strategist_action=council_state.get("strategist_action", decision),
             strategist_conviction=council_state.get("strategist_conviction", 5),
-            rag_context_summary=council_state.get("rag_context", "Normal quant market regime"),
+            rag_context_summary=str(council_state.get("rag_context") or "Normal quant market regime"),
             risk_verdict=verdict,
             final_decision=decision,
-            execution_notes=f"Council deliberated {decision} ({verdict}) at BTC ${candle['close']:,.2f}." + (" [FORCED_REANALYSIS]" if (is_existing and force) else ""),
+            execution_notes=" | ".join(notes_parts) + forced_suffix,
         )
         session.add(audit)
         session.flush()
