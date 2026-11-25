@@ -697,6 +697,84 @@ def get_api_telemetry_summary(hours: int = 24) -> Dict[str, Any]:
         return default_res
 
 
+def get_model_reconciled_counts() -> Dict[str, int]:
+    # Returns true lifetime reconciled hour counts per registered model from Neon.
+    try:
+        with get_db() as s:
+            rows = s.execute(
+                select(ModelPrediction.model_version, func.count(ModelPrediction.id))
+                .where(ModelPrediction.outcome_tick_id.isnot(None))
+                .group_by(ModelPrediction.model_version)
+            ).all()
+            counts = {str(ver): int(cnt) for ver, cnt in rows if ver}
+            if ACTIVE_MODEL_VERSION not in counts:
+                rec_cnt = int(s.execute(select(func.count(Reconciliation.id))).scalar() or 0)
+                if rec_cnt > 0:
+                    counts[ACTIVE_MODEL_VERSION] = rec_cnt
+            return counts
+    except Exception:
+        return {}
+
+
+def get_latest_hourly_postmortems(limit: int = 3) -> List[Dict[str, Any]]:
+    # Fetches recent Gemini post-mortem diagnoses, headlines, and per-row TreeSHAP drivers.
+    try:
+        with get_db() as s:
+            rows = s.execute(
+                select(HourlyPostmortem, MarketTick.timestamp)
+                .outerjoin(MarketTick, HourlyPostmortem.tick_id == MarketTick.id)
+                .order_by(desc(HourlyPostmortem.id))
+                .limit(max(1, min(int(limit), 20)))
+            ).all()
+            out: List[Dict[str, Any]] = []
+            for pm, tick_ts in rows:
+                out.append({
+                    "id": pm.id,
+                    "tick_id": pm.tick_id,
+                    "tick_timestamp": tick_ts.isoformat() if hasattr(tick_ts, "isoformat") else str(tick_ts or ""),
+                    "created_at": pm.created_at.isoformat() if hasattr(pm.created_at, "isoformat") else str(pm.created_at),
+                    "gemini_status": pm.gemini_status,
+                    "news_headlines": pm.news_headlines or [],
+                    "gemini_full_analysis": pm.gemini_full_analysis or {},
+                    "error_detail": pm.error_detail,
+                })
+            return out
+    except Exception:
+        return []
+
+
+def get_api_telemetry_breakdown(hours: int = 24) -> List[Dict[str, Any]]:
+    # Summarizes rolling 24h external API calls by service, endpoint, and HTTP status code.
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        with get_db() as s:
+            rows = s.execute(
+                select(
+                    ApiTelemetry.service_name,
+                    ApiTelemetry.endpoint,
+                    ApiTelemetry.status_code,
+                    ApiTelemetry.latency_ms,
+                ).where(ApiTelemetry.timestamp >= cutoff)
+            ).all()
+            if not rows:
+                return []
+            buckets: Dict[Tuple[str, str, int], List[float]] = {}
+            for svc, ep, code, lat in rows:
+                buckets.setdefault((str(svc), str(ep), int(code or 0)), []).append(float(lat or 0.0))
+            return [
+                {
+                    "Service": svc,
+                    "Endpoint": ep,
+                    "Status": code,
+                    "Calls": len(lats),
+                    "Avg ms": round(sum(lats) / len(lats), 1),
+                }
+                for (svc, ep, code), lats in sorted(buckets.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+            ]
+    except Exception:
+        return []
+
+
 # ---------------------------------------------------------------------------
 # 5. RETRO-COMPATIBILITY MAPPINGS
 # ---------------------------------------------------------------------------
@@ -717,4 +795,5 @@ __all__ = [
     "_TICK_ID_COLUMN_CACHE", "get_latest_market_ticks", "get_reconciliation_history",
     "get_reconciliation_kpis", "get_portfolio_history", "get_portfolio_kpis",
     "get_latest_council_audit", "log_telemetry", "get_api_telemetry_summary",
+    "get_model_reconciled_counts", "get_latest_hourly_postmortems", "get_api_telemetry_breakdown",
 ]
