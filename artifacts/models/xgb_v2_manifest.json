@@ -123,6 +123,10 @@
   "metrics": {
     "holdout_accuracy": 0.5207,
     "holdout_log_loss": 0.6926,
-    "holdout_mae": 0.003222
+    "holdout_brier_score": 0.2497,
+    "holdout_roc_auc": 0.5342,
+    "holdout_spearman_ic": 0.0135,
+    "holdout_mae": 0.003222,
+    "model_price_rmse": 401.12
   }
 }
