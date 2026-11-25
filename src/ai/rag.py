@@ -1,15 +1,18 @@
-import logging, os, sys
+import logging
+import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import numpy as np
-from pydantic import BaseModel, Field
 from config import CHROMADB_DIR, CHROMA_COLLECTION_NAME
 
 # Linux / Streamlit SQLite upgrade hook & silence ChromaDB telemetry
 try:
     if sys.platform != "win32":
-        __import__("pysqlite3"); sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
-except Exception: pass
+        __import__("pysqlite3")
+        sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+except Exception:
+    pass
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 logging.getLogger("chromadb.telemetry").setLevel(logging.ERROR)
 logging.getLogger("chromadb.telemetry.posthog").setLevel(logging.ERROR)
@@ -21,29 +24,24 @@ try:
     from chromadb.config import Settings
     HAS_CHROMADB = True
 except Exception:
-    chromadb, HAS_CHROMADB = None, False
+    chromadb, HAS_CHROMADB = False, False
     Documents, Embeddings = Any, Any  # type: ignore
-    class EmbeddingFunction: pass  # type: ignore
+
+    class EmbeddingFunction:  # type: ignore
+        pass
+
     class Settings:
-        def __init__(self, *args, **kwargs): pass
+        def __init__(self, *args, **kwargs):
+            pass
 
 
-class RAGMemoryItem(BaseModel):
-    doc_id: str
-    document: str
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    distance: Optional[float] = None
+class LocalMiniLMEmbedding(EmbeddingFunction):
+    """Embeds texts with local CPU ONNX MiniLM (384-dim) and deterministic hash fallback in pytest."""
 
-
-class GeminiEmbeddingFunction(EmbeddingFunction):
-    # Embeds documents and queries using local ONNX MiniLM (384-dim) so vector spaces stay consistent at zero API cost.
-    def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key
+    def __init__(self):
         self._local_fn: Any = None
-        if os.getenv("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
-            self.last_embedding_mode = "hash_test_fallback"
-        else:
-            self.last_embedding_mode = "local_minilm"
+        is_test = bool(os.getenv("PYTEST_CURRENT_TEST") or "pytest" in sys.modules)
+        self.last_embedding_mode = "hash_test_fallback" if is_test else "local_minilm"
 
     def _hash_vector(self, text: str, dim: int = 384) -> List[float]:
         rng = np.random.RandomState(sum(ord(c) for c in text) % 10000 + 1)
@@ -98,7 +96,7 @@ class MarketKnowledgeRAG:
             try:
                 Path(db_path).mkdir(parents=True, exist_ok=True)
                 self.client = chromadb.PersistentClient(path=db_path, settings=Settings(anonymized_telemetry=False, is_persistent=True))
-                self.embedding_fn = GeminiEmbeddingFunction()
+                self.embedding_fn = LocalMiniLMEmbedding()
                 self.collection = self.client.get_or_create_collection(name=collection_name, embedding_function=self.embedding_fn)
                 if self.collection.count() == 0:
                     self.collection.upsert(
@@ -107,31 +105,38 @@ class MarketKnowledgeRAG:
                         metadatas=[{"category": item["category"]} for item in self.FOUNDATIONAL_KNOWLEDGE],
                     )
                 self.has_chroma = True
-            except Exception as exc: logger.warning("ChromaDB initialization failed: %s", exc)
-
-    def add_document(self, doc_id: str, text: str, metadata: Optional[dict] = None) -> None:
-        if self.has_chroma and self.collection is not None:
-            self.collection.upsert(ids=[doc_id], documents=[text], metadatas=[metadata or {}])
+            except Exception as exc:
+                logger.warning("ChromaDB initialization failed: %s", exc)
 
     def retrieve_market_context(self, query: str, n_results: int = 3) -> List[str]:
         if self.has_chroma and self.collection is not None:
             try:
                 res = self.collection.query(query_texts=[query], n_results=n_results)
                 docs = res.get("documents", [[]])[0]
-                if docs: return docs
-            except Exception: pass
+                if docs:
+                    return docs
+            except Exception:
+                pass
         q = query.lower()
         matches = [k["doc"] for k in self.FOUNDATIONAL_KNOWLEDGE if any(w in k["doc"].lower() for w in q.split() if len(w) > 3)]
         return matches[:n_results] if matches else [self.FOUNDATIONAL_KNOWLEDGE[0]["doc"]]
 
     def hydrate_from_neon(self, limit: int = 50) -> int:
-        if os.getenv("PYTEST_CURRENT_TEST") or "pytest" in sys.modules or not self.has_chroma or self.collection is None: return 0
+        if os.getenv("PYTEST_CURRENT_TEST") or "pytest" in sys.modules or not self.has_chroma or self.collection is None:
+            return 0
         try:
-            from src.database import ModelPrediction, get_db
             from sqlalchemy import or_, select
+            from src.database import ModelPrediction, get_db
+
             with get_db() as s:
-                rows = s.execute(select(ModelPrediction).where(or_(ModelPrediction.diagnosis_summary.isnot(None), ModelPrediction.error_attribution_tag.isnot(None))).order_by(ModelPrediction.id.desc()).limit(max(1, min(int(limit), 200)))).scalars().all()
-                if not rows: return 0
+                rows = s.execute(
+                    select(ModelPrediction)
+                    .where(or_(ModelPrediction.diagnosis_summary.isnot(None), ModelPrediction.error_attribution_tag.isnot(None)))
+                    .order_by(ModelPrediction.id.desc())
+                    .limit(max(1, min(int(limit), 200)))
+                ).scalars().all()
+                if not rows:
+                    return 0
                 all_ids = [f"neon_pred_{r.id}" for r in rows]
                 existing_res = self.collection.get(ids=all_ids)
                 existing = set(existing_res.get("ids", []) if existing_res else [])
@@ -139,19 +144,52 @@ class MarketKnowledgeRAG:
                 if not new_rows:
                     return 0
                 ids = [f"neon_pred_{r.id}" for r in new_rows]
-                docs = [f"Model: {r.model_version} | Pred: {r.direction_predicted} (${float(r.predicted_price_1h or 0.0):,.2f}) | Actual: {r.direction_realized or 'N/A'} (${float(r.actual_price_at_t_plus_1 or 0.0):,.2f}) | Correct: {bool(r.direction_correct)} | Tag: {r.error_attribution_tag or 'NONE'} | Notes: {r.diagnosis_summary or f'Error: ${float(r.absolute_error_usd or 0.0):,.2f}'}" for r in new_rows]
-                metas = [{"type": "episodic_outcome", "tick_id": int(r.tick_id or 0), "model_version": str(r.model_version or "unknown"), "direction_predicted": str(r.direction_predicted or "UP"), "direction_realized": str(r.direction_realized or "UP"), "direction_correct": bool(r.direction_correct), "error_attribution_tag": str(r.error_attribution_tag or "ACCURATE"), "absolute_error_usd": float(r.absolute_error_usd or 0.0)} for r in new_rows]
+                docs = [
+                    f"Model: {r.model_version} | Pred: {r.direction_predicted} (${float(r.predicted_price_1h or 0.0):,.2f}) "
+                    f"| Actual: {r.direction_realized or 'N/A'} (${float(r.actual_price_at_t_plus_1 or 0.0):,.2f}) "
+                    f"| Correct: {bool(r.direction_correct)} | Tag: {r.error_attribution_tag or 'NONE'} "
+                    f"| Notes: {r.diagnosis_summary or f'Error: ${float(r.absolute_error_usd or 0.0):,.2f}'}"
+                    for r in new_rows
+                ]
+                metas = [
+                    {
+                        "type": "episodic_outcome",
+                        "tick_id": int(r.tick_id or 0),
+                        "model_version": str(r.model_version or "unknown"),
+                        "direction_predicted": str(r.direction_predicted or "UP"),
+                        "direction_realized": str(r.direction_realized or "UP"),
+                        "direction_correct": bool(r.direction_correct),
+                        "error_attribution_tag": str(r.error_attribution_tag or "ACCURATE"),
+                        "absolute_error_usd": float(r.absolute_error_usd or 0.0),
+                    }
+                    for r in new_rows
+                ]
                 self.collection.upsert(ids=ids, documents=docs, metadatas=metas)
                 return len(ids)
         except Exception as exc:
             logger.debug("Neon hydration skipped: %s", exc)
             return 0
 
-    def index_outcome_memory(self, tick_id: int, timestamp_iso: str, market_regime: str, direction_predicted: str, direction_realized: str, direction_correct: bool, predicted_dollar_move: float, actual_dollar_move: float, absolute_error_usd: float, error_attribution_tag: str, plain_english_notes: str) -> bool:
-        if not self.has_chroma or self.collection is None: return False
+    def index_outcome_memory(
+        self, tick_id: int, timestamp_iso: str, market_regime: str,
+        direction_predicted: str, direction_realized: str, direction_correct: bool,
+        predicted_dollar_move: float, actual_dollar_move: float,
+        absolute_error_usd: float, error_attribution_tag: str, plain_english_notes: str,
+    ) -> bool:
+        if not self.has_chroma or self.collection is None:
+            return False
         doc_id = f"reconciled_tick_{int(tick_id)}"
-        doc_text = f"[{timestamp_iso}] Regime: {market_regime} | Pred: {direction_predicted} (${predicted_dollar_move:+,.2f}) | Realized: {direction_realized} (${actual_dollar_move:+,.2f}) | Correct: {direction_correct} | Tag: {error_attribution_tag} | Notes: {plain_english_notes}"
-        meta = {"type": "episodic_outcome", "tick_id": int(tick_id), "regime": str(market_regime or "UNKNOWN"), "direction_predicted": str(direction_predicted or "UP"), "direction_realized": str(direction_realized or "UP"), "direction_correct": bool(direction_correct), "error_attribution_tag": str(error_attribution_tag or "ACCURATE"), "absolute_error_usd": float(absolute_error_usd or 0.0)}
+        doc_text = (
+            f"[{timestamp_iso}] Regime: {market_regime} | Pred: {direction_predicted} (${predicted_dollar_move:+,.2f}) "
+            f"| Realized: {direction_realized} (${actual_dollar_move:+,.2f}) | Correct: {direction_correct} "
+            f"| Tag: {error_attribution_tag} | Notes: {plain_english_notes}"
+        )
+        meta = {
+            "type": "episodic_outcome", "tick_id": int(tick_id), "regime": str(market_regime or "UNKNOWN"),
+            "direction_predicted": str(direction_predicted or "UP"), "direction_realized": str(direction_realized or "UP"),
+            "direction_correct": bool(direction_correct), "error_attribution_tag": str(error_attribution_tag or "ACCURATE"),
+            "absolute_error_usd": float(absolute_error_usd or 0.0),
+        }
         try:
             self.collection.upsert(ids=[doc_id], documents=[doc_text], metadatas=[meta])
             return True
@@ -164,38 +202,60 @@ class MarketKnowledgeRAG:
         return getattr(getattr(self, "embedding_fn", None), "last_embedding_mode", "uninitialized")
 
     def query_memories(self, query_text: str, n_results: int = 3, where: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-        if not self.has_chroma or self.collection is None: return []
+        if not self.has_chroma or self.collection is None:
+            return []
         try:
             kwargs: Dict[str, Any] = {"query_texts": [query_text], "n_results": n_results}
-            if where: kwargs["where"] = where
+            if where:
+                kwargs["where"] = where
             res = self.collection.query(**kwargs)
             ids, docs = res.get("ids", [[]])[0], res.get("documents", [[]])[0]
             metas = res.get("metadatas", [[]])[0] if res.get("metadatas") else [{}] * len(docs)
             dists = res.get("distances", [[]])[0] if res.get("distances") else [None] * len(docs)
-            return [RAGMemoryItem(doc_id=str(i), document=str(d), metadata=m or {}, distance=float(dist) if dist is not None else None).model_dump() for i, d, m, dist in zip(ids, docs, metas, dists)]
+            return [
+                {"doc_id": str(i), "document": str(d), "metadata": m or {}, "distance": float(dist) if dist is not None else None}
+                for i, d, m, dist in zip(ids, docs, metas, dists)
+            ]
         except Exception as exc:
             logger.warning("RAG memory query failed: %s", exc)
             return []
 
 
-FOUNDATIONAL_KNOWLEDGE = MarketKnowledgeRAG.FOUNDATIONAL_KNOWLEDGE
 _rag_instance: Optional[MarketKnowledgeRAG] = None
+
 
 def get_rag_agent() -> MarketKnowledgeRAG:
     global _rag_instance
     if _rag_instance is None:
         _rag_instance = MarketKnowledgeRAG()
         if not os.getenv("PYTEST_CURRENT_TEST") and "pytest" not in sys.modules:
-            try: _rag_instance.hydrate_from_neon(limit=15)
-            except Exception as e: logger.debug("Auto-hydration skipped: %s", e)
+            try:
+                _rag_instance.hydrate_from_neon(limit=15)
+            except Exception as e:
+                logger.debug("Auto-hydration skipped: %s", e)
     return _rag_instance
 
-def get_rag_collection(): return getattr(get_rag_agent(), "collection", None)
-def initialize_knowledge_base() -> MarketKnowledgeRAG: return get_rag_agent()
-def retrieve_rag_context(query: str, n_results: int = 3) -> List[str]: return get_rag_agent().retrieve_market_context(query, n_results)
-def index_reconciled_outcome_memory(tick_id: int, timestamp_iso: str, market_regime: str, direction_predicted: str, direction_realized: str, direction_correct: bool, predicted_dollar_move: float, actual_dollar_move: float, absolute_error_usd: float, error_attribution_tag: str, plain_english_notes: str) -> bool:
-    return get_rag_agent().index_outcome_memory(tick_id, timestamp_iso, market_regime, direction_predicted, direction_realized, direction_correct, predicted_dollar_move, actual_dollar_move, absolute_error_usd, error_attribution_tag, plain_english_notes)
+
+def get_rag_collection():
+    return getattr(get_rag_agent(), "collection", None)
+
+
+def index_reconciled_outcome_memory(
+    tick_id: int, timestamp_iso: str, market_regime: str, direction_predicted: str,
+    direction_realized: str, direction_correct: bool, predicted_dollar_move: float,
+    actual_dollar_move: float, absolute_error_usd: float, error_attribution_tag: str,
+    plain_english_notes: str,
+) -> bool:
+    return get_rag_agent().index_outcome_memory(
+        tick_id, timestamp_iso, market_regime, direction_predicted, direction_realized,
+        direction_correct, predicted_dollar_move, actual_dollar_move, absolute_error_usd,
+        error_attribution_tag, plain_english_notes,
+    )
+
+
 def query_similar_error_memories(query_text: str, n_results: int = 3) -> List[Dict[str, Any]]:
     return get_rag_agent().query_memories(query_text=query_text, n_results=n_results, where={"type": "episodic_outcome"})
-def hydrate_rag_from_neon(limit: int = 50) -> int: return get_rag_agent().hydrate_from_neon(limit)
-def get_rag_embedding_mode() -> str: return getattr(get_rag_agent(), "embedding_mode", "uninitialized")
+
+
+def get_rag_embedding_mode() -> str:
+    return getattr(get_rag_agent(), "embedding_mode", "uninitialized")
