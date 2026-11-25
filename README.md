@@ -1,275 +1,141 @@
-# Mudra — Bitcoin 1-Hour AI Forecasting & Paper-Trading MLOps Pipeline
-### Empirical Quantitative Research: Negative Result — No Durable Post-Fee Alpha on 1-Hour OHLCV Features
+# Mudra — Bitcoin 1-Hour ML Forecasting & Autonomous MLOps Platform
+
+**Can tabular GBDTs or zero-shot time-series foundation models forecast next-hour `BTC/USDT` returns cleanly enough to beat exchange transaction costs?**  
+Across **34,990 hours** of Binance market data under a strict leak-free chronological split, Bonferroni multiple-comparison correction, and walk-forward validation, **the honest answer is no**: persistence wins on price RMSE (`$398.77`), directional accuracy plateaus at **53.26%**, and **`~0.14%` round-trip execution friction** erases naive hourly trading edge. Mudra pairs that documented negative result with an autonomous 24/7 Neon PostgreSQL ground-truth evaluation loop, `T+1h` per-row TreeSHAP Gemini post-mortems, and a 4-layer `src/ai/` LangGraph + MCP + ChromaDB stack.
 
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://mudra-trading.streamlit.app)
 [![CI/CD Pipeline](https://github.com/MohitSingh-2335/Mudra/actions/workflows/ci.yml/badge.svg)](https://github.com/MohitSingh-2335/Mudra/actions/workflows/ci.yml)
-[![Tests Passing](https://img.shields.io/badge/pytest-93%20passed-00C087?logo=pytest&logoColor=white)](https://github.com/MohitSingh-2335/Mudra)
+[![Hourly Worker](https://github.com/MohitSingh-2335/Mudra/actions/workflows/hourly_worker.yml/badge.svg)](https://github.com/MohitSingh-2335/Mudra/actions/workflows/hourly_worker.yml)
+[![Tests Passing](https://img.shields.io/badge/pytest-98%20passed-00C087?logo=pytest&logoColor=white)](https://github.com/MohitSingh-2335/Mudra)
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![XGBoost](https://img.shields.io/badge/XGBoost-2.0-EB5E28)](https://xgboost.readthedocs.io/)
 [![LangGraph](https://img.shields.io/badge/Orchestration-LangGraph-8A2BE2)](https://langchain-ai.github.io/langgraph/)
 [![PostgreSQL](https://img.shields.io/badge/Database-Neon%20PostgreSQL-00E599?logo=postgresql&logoColor=white)](https://neon.tech/)
 
-**Live Streamlit Dashboard:** [`https://mudra-trading.streamlit.app`](https://mudra-trading.streamlit.app)  
-**GitHub Repository:** [`https://github.com/MohitSingh-2335/Mudra.git`](https://github.com/MohitSingh-2335/Mudra.git)  
-**Author:** Mohit Singh (Entry-Level Machine Learning / AI Engineer)
+**Live Dashboard:** [`https://mudra-trading.streamlit.app`](https://mudra-trading.streamlit.app) · **Repository:** [`https://github.com/MohitSingh-2335/Mudra.git`](https://github.com/MohitSingh-2335/Mudra.git) · **Author:** Mohit Singh
 
 ---
 
-## 1. Executive Summary & Core Research Finding
+## 1. Chronological Split & Empirical Verdict
 
-**Mudra** is an autonomous, 24/7 machine learning engineering and paper-trading MLOps pipeline designed to answer a single quantitative question:  
-*Can gradient-boosted decision trees (XGBoost) or zero-shot time-series foundation models forecast next-hour Bitcoin (`BTC/USDT`) returns accurately enough to beat exchange transaction fees on a strict, leak-free chronological split?*
-
-### The Scientific Finding: A Documented Negative Result
-Across **34,990 hours** of cleaned Binance market data (`2022-07-08` to `2026-07-06`), rigorous backtesting and live forward monitoring confirmed:
-
-1. **Regression Fails to Beat Naive Persistence:**  
-   Every regression model tested failed to beat a simple persistence baseline ($\hat{P}_{t+1} = P_t$). Naive persistence achieved an RMSE of **$398.77**, while the primary XGBoost regressor achieved **$399.47**. Because financial return series have a near-zero mean and low signal-to-noise ratio, predicting non-zero moves adds variance that exceeds zero-prediction error.
-2. **Directional Classifiers Hit a ~53% Ceiling:**  
-   The primary directional classifier achieved **53.26%** out-of-sample accuracy (Model 1) with a log-loss of **0.6914**, barely outperforming a random 50/50 coin flip (**0.6931**). When tested on zero-shot time-series foundation models (**Amazon Chronos-2**, **Google TimesFM 2.5**, **Salesforce Moirai 2.0**), all three scored between **48.60% and 49.60%**.
-3. **Exchange Fees Destroy Naive Trading Alpha:**  
-   Binance charges ~0.05% maker / 0.10% taker fee per trade (~0.14% round-trip friction with slippage). Trading every hour on a 53% edge results in severe negative returns due to fee churn.
-4. **Capital Preservation vs. Alpha:**  
-   During a 6,998-hour bear-market holdout where Bitcoin fell **-45.41%**, an execution strategy with a minimum return hurdle lost **-17.66%** solely because it sat in cash **96.43% of the time**. This was **cash preservation**, not active alpha.
-
-Rather than hiding this negative finding or reporting inflated numbers using lookahead leakage, this repository documents the complete empirical audit trail alongside a production-style, 24/7 autonomous MLOps architecture. Detailed engineering rationale, architectural trade-offs, and database designs are documented in [Technical Decisions](docs/TECH_DECISIONS.md). Full historical experiment tracking and post-mortems across all model iterations are recorded in the [Model Evolution Ledger](docs/reports/model_evolution_ledger.md).
-
-![Mudra Live Monitoring Dashboard](docs/images/dashboard_screenshot.png)
-
----
-
-## 2. Real Empirical Proofs & Visual Evidence
-
-All charts below are generated directly from the real 34,990-hour Binance dataset and the live Neon PostgreSQL database:
-
-### 2.1 The Leak-Free Chronological Split Boundary
-Retail crypto models often report 60%+ accuracy because they use random `train_test_split(random_state=42)`, which leaks future price volatility into the training set. Mudra enforces a strict, time-ordered split with a **1-hour causality purge buffer** to prevent target leakage:
+To prevent lookahead leakage common in shuffled `train_test_split` crypto benchmarks, Mudra enforces strict chronological partitioning with a **1-hour causality purge buffer** and `D-1` day-lagged macro/on-chain joins:
 
 ![Chronological Split Proof](docs/images/chronological_split_proof.png)
 
 ```text
-CLEAN DATASET (34,990 Total 1-Hour Candles):
-├── Period: 2022-07-08 13:00 UTC to 2026-07-06 08:00 UTC
-└── Anomaly Removed: 1 exchange-halt candle (2023-03-24 12:00 UTC, volume = 0)
-
-1. TRAIN SET (80% Chronological — 27,991 Hours):
-   └── 2022-07-08 13:00 UTC  ===>  2025-09-17 17:00 UTC
-
-2. PURGE BUFFER (1-Hour Causality Guard — 1 Hour):
-   └── 2025-09-17 18:00 UTC (Prevents T+1h forward target from leaking across split)
-
-3. OUT-OF-SAMPLE TEST SET (20% Holdout — 6,998 Hours):
-   └── 2025-09-17 19:00 UTC  ===>  2026-07-06 08:00 UTC (Pure forward evaluation)
+CLEAN DATASET (34,990 Validated 1-Hour BTC/USDT Candles, 2022-07-08 to 2026-07-06):
+├── Train Partition (80% — 27,991 Hours) : 2022-07-08 13:00 UTC -> 2025-09-17 17:00 UTC
+├── Purge Buffer    (1-Hour Target Guard): 2025-09-17 18:00 UTC (excluded)
+└── Holdout Test    (20% — 6,998 Hours)  : 2025-09-17 19:00 UTC -> 2026-07-06 08:00 UTC
 ```
 
----
-
-### 2.2 Model Benchmark Comparison
-Out-of-sample directional accuracy on the 6,998-hour test set demonstrates that neither classical gradient boosting nor zero-shot foundation models break beyond the ~53% ceiling. Detailed model specifications and post-mortems are tracked in the [Model Evolution Ledger](docs/reports/model_evolution_ledger.md):
-
-![Model Benchmark Comparison](docs/images/model_benchmark_comparison.png)
-
-| Model Architecture | Role / Status | Regressor RMSE (USD) | Return MAE | Direction Accuracy | Log-Loss (50/50 = 0.6931) | Model Documentation |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Naive Persistence ($\hat{P}_{t+1} = P_t$)** | Baseline | **$398.77** | **0.003198** | 50.39% | 0.6931 | Reference Benchmark |
-| **[Model 1 (`xgb_onnx_v1.0.0`)](docs/models/model_1_xgb_v1.md)** | **Active Production** | $399.47 | 0.003221 | **53.26%** | 0.6914 | [Model Card](docs/models/model_1_xgb_v1.md) (39 Features, serialized `.pkl` XGBoost; legacy ID, no ONNX runtime) |
-| **[Model 2 (`xgb_v2.0.0`)](docs/models/model_2_xgb_v2.md)** | **Shadow Consensus** | $401.12 | 0.003222 | 52.07% | 0.6926 | [Model Card](docs/models/model_2_xgb_v2.md) (Stationary) |
-| **[Model 3 (`lgbm_v3.0.0`)](docs/models/model_3_lgbm_v3.md)** | **Shadow Candidate** | $400.22 | 0.003220 | 52.89% | **0.6913** | [Model Card](docs/models/model_3_lgbm_v3.md) (29 Stationary) |
-| **Amazon Chronos-2 (Zero-Shot)** | Foundation Model | $322.65 *(Scaled)* | - | 49.60% | - | Failed to beat coin flip |
-| **Google TimesFM 2.5 (Zero-Shot)**| Foundation Model | $314.65 *(Scaled)* | - | 48.60% | - | Failed to beat coin flip |
-| **Salesforce Moirai 2.0 (Zero-Shot)**| Foundation Model| $316.35 *(Scaled)* | - | 49.20% | - | Failed to beat coin flip |
+**Core Findings (6,998-Hour Locked Holdout):**
+- **Regression Ceiling:** None of the GBDT or foundation models beat Naive Persistence (`$398.77` RMSE, `0.003198` return MAE) because 1-hour BTC returns are near-zero mean with low signal-to-noise ratio.
+- **Directional Ceiling (~53%):** Model 1 reached **53.26%** directional accuracy (`0.6914` log-loss vs. `0.6931` coin flip); stationary LightGBM Model 3 achieved best log-loss (**0.6913**) and rank correlation (**+0.0211** Spearman IC, `p = 0.0772`). All three zero-shot foundation models scored **48.60%–49.60%**.
+- **Execution Friction Floor (`~0.14%` Round-Trip):** Configured with **`0.05%` taker fee + `0.02%` slippage per side** (`0.07%` per side, `0.13995%` round-trip hurdle in [`config.py`](config.py)). Trading hourly without a hurdle lost **-92.47%** over 1,196 trades, while live expected moves remain sub-hurdle (`max |pred_ret| < 0.05%`), keeping the automated paper ledger safely in cash (`HOLD`).
 
 ---
 
-### 2.3 Real Ground-Truth Delayed Reconciliation (Neon PostgreSQL)
-Every hour, an autonomous worker reconciles predictions made at hour $T$ against the actual closed Binance candle at hour $T+1$. Below is the real 168-hour ground truth telemetry queried directly from the production Neon PostgreSQL database:
+## 2. Model Evolution & Research Benchmarks
 
-![Ground Truth Reconciliation](docs/images/ground_truth_reconciliation.png)
+| Model / Baseline | Role | Features & Calibration | Regressor RMSE (USD) | Return MAE | Dir. Accuracy | Log-Loss | Details |
+| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
+| **Naive Persistence** | Baseline | $\hat{P}_{t+1} = P_t$ | **$398.77** | **0.003198** | 50.39% | 0.6931 | [Model Evolution Ledger](docs/reports/model_evolution_ledger.md) |
+| **Model 1 (`xgb_onnx_v1.0.0`)** | Active Production | 39 Clf / 26 Reg (`.pkl` XGBoost; legacy ID) | $399.47 | 0.003221 | **53.26%** | 0.6914 | [Model 1 Card](docs/models/model_1_xgb_v1.md) |
+| **Model 2 (`xgb_v2.0.0`)** | Live Shadow | 36 features (raw price levels pruned) | $401.12 | 0.003222 | 52.07% | 0.6926 | [Model 2 Card](docs/models/model_2_xgb_v2.md) |
+| **Model 3 (`lgbm_v3.0.0`)** | Shadow Candidate | 29 strictly stationary + Platt sigmoid | $400.22 | 0.003220 | 52.89% | **0.6913** | [Model 3 Card](docs/models/model_3_lgbm_v3.md) |
+| **Amazon Chronos-2** | Zero-Shot TSFM | Rolling 1-step (`amazon/chronos-2`) | $322.65 *(subset vs $310.06 naive)* | — | 49.60% | — | [Foundation Eval](docs/reports/foundation_model_zero_shot_evaluation.md) |
+| **Google TimesFM 2.5** | Zero-Shot TSFM | Rolling 1-step (`timesfm-2.5-200m`) | $314.65 *(subset vs $310.06 naive)* | — | 48.60% | — | [Foundation Eval](docs/reports/foundation_model_zero_shot_evaluation.md) |
+| **Salesforce Moirai 2.0** | Zero-Shot TSFM | Rolling 1-step (`moirai-2.0-R-small`) | $316.35 *(subset vs $310.06 naive)* | — | 49.20% | — | [Foundation Eval](docs/reports/foundation_model_zero_shot_evaluation.md) |
 
-- **White Line:** Realized next-hour Bitcoin closing price.
-- **Green Dots:** AI forecast direction correctly matched the actual price move (`✅ MATCH`).
-- **Red Dots:** AI forecast direction mismatched the actual price move (`❌ MISMATCH`).
+**Phase Evaluation Reports:** [Classical Model Backtesting](docs/reports/classical_model_backtesting.md) · [Foundation Model Zero-Shot Evaluation](docs/reports/foundation_model_zero_shot_evaluation.md) · [Fear & Greed Feature Evaluation](docs/reports/fear_greed_feature_evaluation.md) · [On-Chain Metrics Evaluation](docs/reports/onchain_metrics_evaluation.md)
 
----
+![TreeSHAP Classifier Feature Importance](docs/images/shap_classifier_summary.png)
 
-### 2.4 Feature Importance via TreeSHAP
-Global feature attributions calculated using TreeSHAP on out-of-sample test data:
-
-| Classifier Feature Importance (Direction) | Regressor Feature Importance (Return) |
-| :---: | :---: |
-| ![SHAP Classifier](docs/images/shap_classifier_summary.png) | ![SHAP Regressor](docs/images/shap_regressor_summary.png) |
-
-**Key Feature Insight:** Momentum features (RSI, short-term returns) and order flow (taker buy volume ratio) dominate directional signal, while long-term price levels add minimal predictive value once stationary transformations are applied.
+*Holdout TreeSHAP summary (`v1_39features`): short-horizon order flow (`taker_buy_ratio`), intra-candle volatility, and momentum dominate signal; Model 2 and Model 3 progressively strip drifting dollar scales into scale-invariant ratios and log z-scores.*
 
 ---
 
-### 2.5 Strategy Backtest & Fee Drag Reality
-Comparison of a naive classifier trading every hour versus a fee-hurdle filtered strategy and Buy & Hold across the 6,998-hour holdout test period ($10,000 initial bankroll):
-
-![Backtest Performance](docs/images/backtest_performance.png)
-
-```text
-Trading Every Hour (P(up) > 0.50):
-├── Total Trades: 1,196 trades
-├── Final Portfolio: $753.00 (-92.47% loss)
-└── Cause: 0.14% round-trip exchange fee churn destroyed account equity.
-
-Return-Filtered Strategy (E[r] > 0.055% Hurdle):
-├── Total Trades: 105 trades
-├── Market Exposure: 3.57% of time (96.43% sat safely in cash)
-├── Final Portfolio: $8,234.12 (-17.66% drawdown vs. -45.41% Buy & Hold)
-└── Cause: Capital was preserved by sitting in cash during sideways chop.
-```
-
----
-
-## 3. System Architecture & 24/7 Autonomous Pipeline
+## 3. 4-Layer AI (`src/ai/`) & Production MLOps Architecture
 
 ```mermaid
 flowchart LR
-    A["Binance API / Vision\n1-Hour BTC Candles"] --> B["Feature Pipeline\nsrc/feature_engineering.py\n(39 Causal Indicators)"]
-    B --> C["Multi-Model Inference\nModel 1: 53.26% Active\nModel 2: 52.07% Shadow\nModel 3: 52.89% Shadow"]
-    C --> D["LangGraph Council\n1. Strategist Node\n2. Risk Critic Gate\n3. ChromaDB Episodic RAG"]
-    D --> E["Paper Trading Ledger\n0.14% Fee Deduction\n$10,000 Virtual Bankroll"]
-    E --> F["Neon PostgreSQL\nContinuous Ground Truth\n6 Core Production Tables"]
-    F --> G["Streamlit Cloud Dashboard\nmudra-trading.streamlit.app\nTradingView Live Stream"]
-    
-    H["GitHub Actions Cron\nHourly Dispatch"] -. Triggers .-> B
+    Cron["GitHub Actions :15 UTC Cron\nscripts/run_hourly_worker.py"] --> Ingest["Market & Macro Ingestion\nBinance Vision c[9] + FnG + On-Chain"]
+    Ingest --> Feat["Causal Feature Pipeline\nsrc/feature_engineering.py\n& SHA-256 Loader"]
+    Feat --> Models["Multi-Model Inference\nM1 (Active) + M2/M3 (Shadow)"]
+    Models --> Reconcile["T+1h Ground Truth + TreeSHAP\nsrc/explainability.py -> Gemini Post-Mortem"]
+    Models --> Council["4-Layer src/ai/ Stack\nMCP stdio · Local MiniLM RAG · LangGraph · Gemini"]
+    Reconcile --> DB["Neon Serverless PostgreSQL\n8 Production Audit Tables"]
+    Council --> DB
+    DB --> Apps["Streamlit Dashboard & FastAPI\napp.py · src/api.py"]
 ```
 
-### 3.1 The 4-Agent LangGraph Council
-Rather than letting raw model outputs execute directly, Mudra uses a 4-agent LangGraph workflow to enforce risk management:
+### Modular 4-Layer Agent Stack (`src/ai/`)
+- **Layer 1 — LLM & Structured Post-Mortems ([`src/ai/llm.py`](src/ai/llm.py)):** Official `google-genai` SDK candidate fallback (`gemini-3.1-flash-lite` chain), strict Pydantic schemas (`HourlyPostmortemOutput`, `MarketAnalystReport`), LangSmith `@traceable` secret bridging, HTTP `429` cooldowns, and per-model `api_telemetry` tracking.
+- **Layer 2 — Real FastMCP `stdio` Client ([`src/ai/mcp_client.py`](src/ai/mcp_client.py), [`src/mcp_server.py`](src/mcp_server.py)):** Spawns the FastMCP server over `mcp_stdio` with isolated per-tool timeouts (`6s` for Deribit/Kraken perpetual funding & 6h CryptoCompare/RSS headlines; `8s` for Neon error memories) so slow DB wakes never starve live market feeds.
+- **Layer 3 — Quota-Free Local RAG ([`src/ai/rag.py`](src/ai/rag.py)):** ChromaDB (`mudra_rag_minilm_v1`) powered by CPU ONNX MiniLM embeddings (`DefaultEmbeddingFunction()`, zero remote embedding quota burn) storing quantitative regime rules hydrated with reconciled Neon prediction episodes.
+- **Layer 4 — 2-Node LangGraph Council ([`src/ai/workflow.py`](src/ai/workflow.py)):** `StateGraph` (`strategist_node` -> `risk_critic_node`) with deterministic fee-hurdle and `3.8%` volatility risk gates. Uses `use_llm=False` in automated hourly cycles to preserve quota and `use_llm=True` with multi-model classifier consensus for on-demand UI/API deliberations ([`src/agents.py`](src/agents.py) acts as a backward-compatible shim).
 
-1. **Strategist Agent:** Evaluates signals from both XGBoost models alongside technical indicators (RSI, taker buy ratio, volatility spread). Proposes a trade **only** when the expected price return clears the exchange fee hurdle.
-2. **Risk Critic Agent (Adversarial Gatekeeper):** Holds absolute veto power over the Strategist. Validates 5 hard deterministic mathematical gates:
-   - Must be a valid action contract (`BUY`, `SELL`, or `HOLD`).
-   - Price must be valid and positive.
-   - **Fee Hurdle Check:** Expected return must exceed the 0.14% round-trip fee floor.
-   - **Volatility Circuit Breaker:** Volatility spread must not exceed 3.8% (blocks news-driven liquidation spikes).
-   - **Conviction Floor:** Model confidence score must be $\ge 4 / 10$.
-3. **ChromaDB Episodic RAG Memory:** Vector memory storing embeddings of past market hours and model mispredictions. Before approving an order, it queries historical episodes where similar volatility spikes or order-flow patterns occurred, warning the council against repeated false breakouts.
-4. **Execution Agent:** Deterministically calculates position sizing, deducts 0.10% taker fee and 0.04% slippage, and updates the paper trading portfolio.
-
-![Mudra Paper Trading & LangGraph Multi-Agent Council](docs/images/dashboard_trading.png)
+### Production MLOps Invariants & Neon Schema
+- **Artifact & Feature Integrity:** Fail-closed SHA-256 verification before `joblib` deserialization ([`src/model_loader.py`](src/model_loader.py)) and strict schema/NaN/order enforcement prior to inference ([`src/feature_engineering.py`](src/feature_engineering.py)).
+- **8-Table Neon PostgreSQL Store ([`src/database.py`](src/database.py)):** `market_ticks`, `model_predictions` (M1/M2/M3 rows), `reconciliations`, `hourly_postmortems` (Gemini diagnosis JSON + per-row TreeSHAP drivers + headlines), `council_audits`, `paper_portfolio` (advisory-locked execution ledger), `api_telemetry`, and `model_registry`.
+- **Architecture Deep Dive:** See [`docs/TECH_DECISIONS.md`](docs/TECH_DECISIONS.md) for trade-offs, fail-closed design rationale, and database invariants.
 
 ---
 
-## 4. Production Database Schema (Neon PostgreSQL)
+## 4. Quick Start & Repository Layout
 
-The live production database on **Neon Serverless PostgreSQL** maintains continuous, immutable audit trails across 6 core production tables:
-
-| Table Name | Primary & Foreign Keys | Purpose & Integrity Invariants |
-| :--- | :--- | :--- |
-| **`market_ticks`** | `tick_id` (PK), `timestamp` | Canonical 1-hour OHLCV candles, 39 feature vectors, and closed prices from Binance. |
-| **`reconciliations`** | `rec_id` (PK), `outcome_tick_id` (FK) | Ground-truth delayed evaluations: pairs past predictions with realized T+1h outcomes. |
-| **`paper_portfolio`** | `ledger_id` (PK), `tick_id` (FK) | Autonomous $10,000 virtual paper trading ledger tracking cash, BTC balances, fees, and PnL. |
-| **`council_audits`** | `audit_id` (PK), `tick_id` (FK) | Multi-agent council deliberation records, conviction scores, and risk veto rationales. |
-| **`model_predictions`**| `pred_id` (PK), `tick_id` (FK) | Granular prediction logs comparing Model 1 (Active) and Shadow Models 2 & 3. |
-| **`model_registry`** | `model_id` (PK, Unique) | Cryptographic model registry tracking SHA-256 hashes and feature schemas. |
-
----
-
-## 5. Multi-Model Comparison: Model 1 vs. Models 2 & 3
-
-A key machine learning lesson uncovered during empirical testing was the impact of feature stationarity:
-
-- **Model 1 (`xgb_onnx_v1.0.0` — Active Production):**
-  - Standard serialized `joblib` (`.pkl`) XGBoost model retaining its legacy `xgb_onnx_v1.0.0` identifier (runs with zero ONNX runtime dependency).
-  - Uses 39 features, including some raw price levels (`close_lag_1`, `bb_high`, `bb_low`, `ema_10`).
-  - Achieves **53.26%** directional accuracy on the holdout test set.
-  - *Limitation:* Non-stationary dollar levels saturate tree splits when Bitcoin trades above the historical training price ceiling.
-- **Model 2 (`xgb_v2_stationary` — Shadow Consensus Candidate):**
-  - Uses 36 strictly scale-invariant features: percentage returns, volatility ratios, cyclical time encodings (sine/cosine of hour/day), and volume flow.
-  - Mathematically stationary and leak-free across all price regimes.
-  - Achieves **52.07%** directional accuracy on the holdout set, confirming the true statistical ceiling of 1-hour technical indicators.
-- **Model 3 (`lgbm_v3.0.0` — Shadow Candidate):**
-  - Uses 29 stationary features, LightGBM GBDT architecture, and Platt scaling probability calibration.
-  - Achieves **52.89%** directional accuracy and **0.6913** log-loss on the holdout set.
-
----
-
-## 6. How to Run Locally
-
-### 6.1 Clone and Install Dependencies
+### Setup & Verification
 ```bash
 git clone https://github.com/MohitSingh-2335/Mudra.git
 cd Mudra
 
-python -m venv .venv
-source .venv/bin/activate       # On Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+pytest tests/ -q                     # 98 passed (causality, SHA-256, engine, DB, AI layers)
+streamlit run app.py                 # Dashboard at http://localhost:8501
+uvicorn src.api:app --port 8000      # FastAPI endpoints (/health, /predict, /explain, /analyze, /agents/trade)
+python scripts/run_hourly_worker.py  # Single ingestion, M1/M2/M3 inference, T+1h reconciliation & audit cycle
 ```
 
-### 6.2 Run Automated Test Suite (93/93 Passing)
-```bash
-pytest tests/ -q
-```
-Verifies temporal split causality, cryptographic SHA-256 model digests, exchange fee hurdle logic, and database schemas.
-
-### 6.3 Launch the Streamlit Monitoring Dashboard
-```bash
-streamlit run app.py
-```
-Opens the interactive dashboard at `http://localhost:8501` featuring:
-- Real-time ticking TradingView Bitcoin chart (`BINANCE:BTCUSDT`).
-- Live dual-model prediction vs. actual ground-truth table.
-- Interactive LangGraph Multi-Agent deliberation panel.
-- $10,000 virtual paper trading account ledger.
-
-### 6.4 Run the Hourly Inference Worker
-```bash
-python scripts/run_hourly_worker.py
-```
-
----
-
-## 7. Repository Structure
-
+### Repository Structure
 ```text
 Mudra/
-├── app.py                              # Streamlit live monitoring & governance dashboard
-├── config.py                           # Central configuration, SHA-256 digests & fee parameters
-├── requirements.txt                    # Pinned production dependencies
-├── artifacts/                          # Models and visual proof artifacts
-│   ├── models/
-│   │   ├── model_manifest.json         # Active Model 1 manifest (SHA-256 verified)
-│   │   ├── best_regressor_model.pkl    # Serialized XGBoost regressor
-│   │   └── best_classifier_model.pkl   # Serialized XGBoost classifier
-│   ├── shap_classifier_summary.png     # TreeSHAP classifier feature summary
-│   ├── shap_regressor_summary.png      # TreeSHAP regressor feature summary
-│   └── backtest_performance.png        # Holdout test set backtest performance
-├── data/
-│   ├── raw/BTCUSDT-1H.csv              # 35,064 raw 1-hour Binance candles
-│   └── processed/featured_btc_data.csv # 34,990 clean featured rows
+├── app.py                        # Streamlit Cloud live monitoring UI (4 tabs + telemetry)
+├── config.py                     # Fee friction rates, SHA-256 digests, feature schemas, Chroma config
+├── Dockerfile / docker-compose.yml
+├── requirements.txt
+├── .github/workflows/
+│   ├── ci.yml                    # Pytest suite (PostgreSQL 16 service) + Docker build check
+│   ├── hourly_worker.yml         # Autonomous :15 UTC ingestion, reconciliation & post-mortem cron
+│   └── keep_streamlit_awake.yml  # Periodic health ping for hosted dashboard
+├── artifacts/models/             # SHA-256 verified M1/M2/M3 artifacts & JSON manifests
+├── data/                         # Cleaned 34,990-row dataset, backtest & zero-shot CSV results
 ├── docs/
-│   ├── TECH_DECISIONS.md               # Architectural trade-offs, database designs & invariants
-│   ├── images/                         # Real empirical proof plots & live dashboard screenshots
-│   │   ├── dashboard_screenshot.png    # Live Streamlit headline metrics & predictions table
-│   │   ├── dashboard_trading.png       # Live LangGraph multi-agent council & paper trading ledger
-│   │   ├── chronological_split_proof.png
-│   │   ├── model_benchmark_comparison.png
-│   │   └── ground_truth_reconciliation.png
-│   └── reports/                        # Empirical research reports & model evolution ledger
+│   ├── TECH_DECISIONS.md         # Architecture & MLOps design decisions
+│   ├── models/                   # Standardized Model Cards (M1, M2, M3)
+│   ├── reports/                  # Phase evaluations & Model Evolution Ledger
+│   └── images/                   # Proof figures
 ├── scripts/
-│   ├── run_pipeline.py                 # Full 7-stage ML training, SHAP & evaluation CLI
-│   ├── run_hourly_worker.py            # Hourly live inference & T+1h reconciliation worker
-│   ├── generate_readme_figures.py      # Automated script to generate visual proof plots
-│   └── migrate_db.py                   # PostgreSQL schema migration & model registry seeder
+│   ├── run_hourly_worker.py      # Production hourly worker CLI + local outbox flush
+│   ├── run_pipeline.py           # Training, evaluation & SHAP generation pipeline
+│   ├── migrate_db.py             # Schema verification & model registry seeder
+│   └── generate_readme_figures.py
 ├── src/
-│   ├── agents/                         # LangGraph multi-agent council (Strategist, Risk Critic, RAG)
-│   ├── database.py                     # SQLAlchemy 2.0 ORM, Neon PostgreSQL connection pool
-│   ├── feature_engineering.py          # Strict causal rolling features (v1 and v2 schemas)
-│   ├── model_loader.py                 # Fail-closed SHA-256 cryptographic verification
-│   ├── backtesting.py                  # Chronological backtest simulator with fee/slippage
-│   ├── engine.py                       # Paper trading portfolio ledger & sync orchestrator
-│   └── api/                            # FastAPI REST service & Pydantic v2 schemas
-└── tests/                              # Automated test suite (93 test cases passing)
+│   ├── ai/                       # Modular 4-layer stack: llm.py, mcp_client.py, rag.py, workflow.py
+│   ├── agents.py                 # Backward-compatible re-export shim for src.ai
+│   ├── mcp_server.py             # FastMCP stdio tool server (Deribit/Kraken, CryptoCompare/RSS, Neon)
+│   ├── engine.py                 # Exchange ingestion, T+1h reconciliation, consensus & paper ledger
+│   ├── explainability.py         # Global & per-row TreeSHAP attribution (CalibratedClassifierCV unwrapping)
+│   ├── feature_engineering.py    # Causal v1/v2/v3 features & inference validation gates
+│   ├── data_preprocessing.py     # BTC OHLCV cleaning & D-1 lagged macro/on-chain enrichment
+│   ├── database.py               # SQLAlchemy 2.0 ORM (8 tables), Neon pooling & telemetry logging
+│   ├── model_loader.py           # Fail-closed SHA-256 verification & multi-model registry discovery
+│   ├── backtesting.py            # Chronological backtest & fee-hurdle sweep simulator
+│   └── api.py                    # FastAPI REST service & Pydantic v2 schemas
+└── tests/                        # 98 automated unit & integration tests (pytest)
 ```
 
 ---
 
-## 8. License & Ethical Disclaimer
+## License & Disclaimer
 
-This project is licensed under the MIT License.
-
-**Disclaimer:** Mudra is an academic research and software engineering project. All trading executions shown on the dashboard and in this repository are simulated paper trades on virtual capital. Nothing in this repository constitutes financial advice or an endorsement of algorithmic cryptocurrency trading.
+Licensed under the [MIT License](LICENSE). Mudra is an academic research and software engineering project; all paper-trading logs represent virtual simulation rather than financial advice.
