@@ -1952,11 +1952,13 @@ with tab_agent:
                 extra_detail = f"Risk Critic: {live_council.get('risk_critic_critique', '')} | Consensus: {live_council.get('model_consensus', 'N/A')}"
             else:
                 source_badge = "AUTOMATED HOURLY RULE ENGINE (use_llm=False)"
-                last_thesis = str(audit_data.get("thesis") or "Awaiting deliberation.")
+                # Fall back to execution_notes because CouncilAudit ORM exposes notes rather than a thesis column
+                last_thesis = str(audit_data.get("thesis") or audit_data.get("execution_notes") or "Awaiting deliberation.")
                 last_action = str(audit_data.get("final_decision") or "HOLD")
                 last_verdict = str(audit_data.get("risk_verdict") or "APPROVED")
                 conviction = int(audit_data.get("strategist_conviction") or 5)
-                extra_detail = ""
+                rag_note = str(audit_data.get("rag_context_summary") or "").strip()
+                extra_detail = f"RAG Context: {rag_note[:220]}" if rag_note else ""
 
             r_col1, r_col2 = st.columns([2.5, 1])
             with r_col1:
