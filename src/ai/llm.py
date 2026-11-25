@@ -1,8 +1,4 @@
-"""Mudra LLM & Gemini Post-Mortem Subsystem.
-
-Uses the official Google GenAI SDK (google-genai >= 1.0.0), Pydantic strict schemas,
-LangSmith tracing, and honest error boundaries without fake zero-vectors or fabricated scores.
-"""
+"""Mudra LLM & Gemini Post-Mortem Subsystem."""
 
 import json
 import logging
@@ -20,64 +16,10 @@ try:
     from langsmith import traceable
 except ImportError:
     def traceable(*args, **kwargs):  # type: ignore
-        def decorator(func): return func
-        return decorator
+        return lambda func: func
 
 load_dotenv(".env")
 logger = logging.getLogger("mudra.ai.llm")
-
-
-def _sync_langsmith_env() -> None:
-    """Bridges LangSmith configuration from Streamlit secrets into os.environ outside pytest."""
-    if os.getenv("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
-        return
-    keys = ("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2", "LANGSMITH_API_KEY", "LANGSMITH_PROJECT")
-    sources: List[Any] = []
-    try:
-        import streamlit as st
-        if hasattr(st, "secrets"):
-            sources.append(st.secrets)
-    except Exception:
-        pass
-    secrets_path = Path(__file__).resolve().parent.parent.parent / ".streamlit" / "secrets.toml"
-    if secrets_path.is_file():
-        try:
-            sources.append(tomllib.loads(secrets_path.read_text(encoding="utf-8")))
-        except Exception:
-            pass
-    for src in sources:
-        candidates = [src]
-        for sec in ("langsmith", "LangSmith", "langchain", "LangChain"):
-            try:
-                if sec in src:
-                    candidates.append(src[sec])
-            except Exception:
-                pass
-        for block in candidates:
-            for k in keys:
-                try:
-                    if not os.getenv(k) and k in block:
-                        val = block[k]
-                        os.environ[k] = str(val).lower() if isinstance(val, bool) else str(val).strip()
-                except Exception:
-                    pass
-    if os.getenv("LANGSMITH_TRACING", "").lower() == "true" and not os.getenv("LANGCHAIN_TRACING_V2"):
-        os.environ["LANGCHAIN_TRACING_V2"] = "true"
-
-
-_sync_langsmith_env()
-
-
-def _log_llm_telemetry(endpoint: str, latency_ms: float, status_code: int, error_msg: Optional[str] = None) -> None:
-    """Records per-model Gemini API latency and status codes to api_telemetry without failing calls."""
-    if os.getenv("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
-        return
-    try:
-        from src.database import get_db, log_telemetry
-        with get_db() as session:
-            log_telemetry(session, "gemini_api", endpoint, latency_ms, status_code, error_msg)
-    except Exception:
-        pass
 
 GEMINI_MODEL_CANDIDATES = (
     "gemini-3.1-flash-lite",
@@ -114,6 +56,41 @@ Respond strictly with valid JSON:
 }}"""
 
 
+def _sync_langsmith_env() -> None:
+    # Loads LangSmith tracing env vars from secrets.toml outside pytest runs
+    if os.getenv("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+        return
+    secrets_path = Path(__file__).resolve().parent.parent.parent / ".streamlit" / "secrets.toml"
+    if not secrets_path.is_file():
+        return
+    try:
+        data = tomllib.loads(secrets_path.read_text(encoding="utf-8"))
+        blocks = [data] + [data[s] for s in ("langsmith", "langchain") if isinstance(data.get(s), dict)]
+        for block in blocks:
+            for key in ("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2", "LANGSMITH_API_KEY", "LANGSMITH_PROJECT"):
+                if not os.getenv(key) and key in block:
+                    val = block[key]
+                    os.environ[key] = str(val).lower() if isinstance(val, bool) else str(val).strip()
+        if os.getenv("LANGSMITH_TRACING", "").lower() == "true" and not os.getenv("LANGCHAIN_TRACING_V2"):
+            os.environ["LANGCHAIN_TRACING_V2"] = "true"
+    except Exception as exc:
+        logger.warning("Failed to parse secrets.toml for LangSmith: %s", type(exc).__name__)
+
+
+_sync_langsmith_env()
+
+
+def _log_llm_telemetry(endpoint: str, latency_ms: float, status_code: int, error_msg: Optional[str] = None) -> None:
+    if os.getenv("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+        return
+    try:
+        from src.database import get_db, log_telemetry
+        with get_db() as session:
+            log_telemetry(session, "gemini_api", endpoint, latency_ms, status_code, error_msg)
+    except Exception:
+        pass
+
+
 class MarketAnalystReport(BaseModel):
     trade_thesis: str = Field(description="STRONG BULLISH, MODERATE BULLISH, NEUTRAL, MODERATE BEARISH, STRONG BEARISH")
     conviction_score: int = Field(description="Conviction rating 1-10")
@@ -133,40 +110,28 @@ class HourlyPostmortemOutput(BaseModel):
     per_model: Dict[str, ModelDiagnosis]
 
 
-def _read_raw_gemini_api_key() -> Optional[str]:
-    """Finds GEMINI_API_KEY from environment or secrets without assuming it is locally present."""
+def _get_gemini_api_key() -> Optional[str]:
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return None
     for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
         val = os.getenv(key)
         if val and val.strip() and val.strip() != "your_gemini_api_key_here":
             return val.strip()
-    try:
-        import streamlit as st
-        if hasattr(st, "secrets"):
-            for sec in ("Google", "google", "gemini", "Gemini"):
-                if sec in st.secrets and "api_key" in st.secrets[sec]:
-                    v = str(st.secrets[sec]["api_key"]).strip()
-                    if v and v != "your_gemini_api_key_here": return v
-            for var in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
-                if var in st.secrets and str(st.secrets[var]).strip() != "your_gemini_api_key_here":
-                    return str(st.secrets[var]).strip()
-    except Exception:
-        pass
+    secrets_path = Path(__file__).resolve().parent.parent.parent / ".streamlit" / "secrets.toml"
+    if secrets_path.is_file():
+        try:
+            sec = tomllib.loads(secrets_path.read_text(encoding="utf-8"))
+            for section in ("google", "Google", "gemini", "Gemini"):
+                if isinstance(sec.get(section), dict) and sec[section].get("api_key"):
+                    v = str(sec[section]["api_key"]).strip()
+                    if v and v != "your_gemini_api_key_here":
+                        return v
+            for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+                if key in sec and str(sec[key]).strip() != "your_gemini_api_key_here":
+                    return str(sec[key]).strip()
+        except Exception:
+            pass
     return None
-
-
-def _get_gemini_api_key() -> Optional[str]:
-    return None if os.getenv("PYTEST_CURRENT_TEST") else _read_raw_gemini_api_key()
-
-
-def get_gemini_status() -> Dict[str, Any]:
-    raw_key = _read_raw_gemini_api_key()
-    preferred = os.getenv("GEMINI_MODEL_NAME", GEMINI_MODEL_CANDIDATES[0])
-    masked = f"{raw_key[:4]}...{raw_key[-4:]}" if raw_key and len(raw_key) > 8 else ("Configured" if raw_key else None)
-    return {
-        "configured": bool(raw_key), "masked_key": masked, "preferred_model": preferred,
-        "fallback_models": list(GEMINI_MODEL_CANDIDATES),
-        "label": f"Gemini AI: Active ({preferred})" if raw_key else "Gemini AI: Rule Engine Fallback (No API Key)",
-    }
 
 
 def _clean_json_response(raw_text: str) -> str:
@@ -186,7 +151,7 @@ def generate_with_gemini_fallback(
     response_schema: Optional[Any] = None,
     caller: str = "general",
 ) -> Union[str, Tuple[str, str]]:
-    """Generates response using official Google GenAI SDK with candidate model fallback."""
+    """Generates response via Google GenAI SDK with model candidate fallback and 429 cooldown."""
     if not api_key:
         raise ValueError("Missing Gemini API key. Cannot generate response.")
 
@@ -196,7 +161,7 @@ def generate_with_gemini_fallback(
     custom_model = os.getenv("GEMINI_MODEL_NAME")
     candidates = (custom_model,) + tuple(m for m in GEMINI_MODEL_CANDIDATES if m != custom_model) if custom_model else GEMINI_MODEL_CANDIDATES
     client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=int(timeout_sec * 1000)))
-    config = types.GenerateContentConfig(
+    cfg = types.GenerateContentConfig(
         system_instruction=system_instruction,
         response_mime_type=response_mime_type,
         response_schema=response_schema,
@@ -208,13 +173,11 @@ def generate_with_gemini_fallback(
             break
         start_cand = time.perf_counter()
         try:
-            resp = client.models.generate_content(model=model_name, contents=prompt, config=config)
+            resp = client.models.generate_content(model=model_name, contents=prompt, config=cfg)
             lat_ms = (time.perf_counter() - start_cand) * 1000.0
             text_out = getattr(resp, "text", None)
             if text_out and str(text_out).strip():
-                # Record per-model Gemini API latency and HTTP 200 status for quota visibility.
                 _log_llm_telemetry(f"{model_name}:{caller}", lat_ms, 200)
-                logger.info("Gemini call succeeded with model %s in %.1f ms", model_name, lat_ms)
                 return (str(text_out).strip(), model_name) if return_model else str(text_out).strip()
             _log_llm_telemetry(f"{model_name}:{caller}", lat_ms, 503, "EMPTY_RESPONSE")
         except AssertionError:
@@ -223,68 +186,16 @@ def generate_with_gemini_fallback(
             last_exc = exc
             lat_ms = (time.perf_counter() - start_cand) * 1000.0
             err_msg = str(exc)
-            # Map HTTP quota (429) and deprecated model (404) errors accurately for monitoring.
             status_code = 429 if ("429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg) else (404 if ("404" in err_msg or "NOT_FOUND" in err_msg) else 503)
             _log_llm_telemetry(f"{model_name}:{caller}", lat_ms, status_code, err_msg[:300])
             logger.warning("Gemini candidate %s failed: %s", model_name, exc)
             if status_code == 429:
-                logger.warning("Rate limit hit on %s. Sleeping 4.0s before trying next candidate.", model_name)
                 time.sleep(4.0)
 
     raise RuntimeError(f"All Gemini model candidates failed or timed out. Last error: {last_exc}")
 
 
-def embed_texts(
-    texts: List[str],
-    api_key: Optional[str] = None,
-    output_dimensionality: int = 768,
-    caller: str = "rag_embed",
-) -> List[List[float]]:
-    """Embeds texts using Gemini gemini-embedding-001 model, failing honestly if unavailable."""
-    key = api_key or _get_gemini_api_key()
-    if not key:
-        logger.warning("Cannot embed texts: Gemini API key is missing or test mode active.")
-        raise RuntimeError("Missing Gemini API key for embeddings.")
-
-    from google import genai
-    from google.genai import types
-
-    t0 = time.perf_counter()
-    try:
-        client = genai.Client(api_key=key)
-        cfg = types.EmbedContentConfig(output_dimensionality=output_dimensionality)
-        res = client.models.embed_content(model="gemini-embedding-001", contents=texts, config=cfg)
-        lat_ms = (time.perf_counter() - t0) * 1000.0
-        embs = getattr(res, "embeddings", [getattr(res, "embedding", None)])
-        # Log embedding call status and latency so daily RPD/RPM limits remain observable.
-        _log_llm_telemetry(f"gemini-embedding-001:{caller}", lat_ms, 200)
-        return [list(getattr(e, "values", e)) for e in embs if e is not None]
-    except Exception as exc:
-        lat_ms = (time.perf_counter() - t0) * 1000.0
-        err_msg = str(exc)
-        status_code = 429 if ("429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg) else 503
-        _log_llm_telemetry(f"gemini-embedding-001:{caller}", lat_ms, status_code, err_msg[:300])
-        logger.warning("Gemini embed_content failed: %s", exc)
-        raise RuntimeError(f"Gemini embed_content error: {exc}") from exc
-
-
-def _unavailable_postmortem(
-    error_msg: str,
-    model_versions: List[str],
-    outcomes: List[Dict[str, Any]],
-    mcp_snapshot: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    return {
-        "gemini_status": "UNAVAILABLE", "model_used": None, "error_detail": error_msg,
-        "market_summary": "Gemini unavailable (offline or missing key)",
-        "per_model": {mv: {"root_cause_driver": "GEMINI_UNAVAILABLE", "diagnosis_summary": "Gemini API unavailable (check quota/logs) — manual review needed."} for mv in model_versions},
-        "model_outcomes": outcomes,
-        "mcp_snapshot": mcp_snapshot or {},
-    }
-
-
 def _build_mcp_snapshot(mcp_context: Any) -> Dict[str, Any]:
-    """Extracts derivatives and news telemetry honestly without substituting fake defaults."""
     raw_mcp = mcp_context if isinstance(mcp_context, dict) else {}
     raw_funding = raw_mcp.get("funding_rate_8h_pct")
     raw_basis = raw_mcp.get("futures_basis_usd")
@@ -299,18 +210,35 @@ def _build_mcp_snapshot(mcp_context: Any) -> Dict[str, Any]:
     }
 
 
+def _unavailable_postmortem(
+    error_msg: str, model_versions: List[str], outcomes: List[Dict[str, Any]],
+    mcp_snapshot: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return {
+        "gemini_status": "UNAVAILABLE",
+        "model_used": None,
+        "error_detail": error_msg,
+        "market_summary": "Gemini unavailable (offline or missing key)",
+        "per_model": {
+            mv: {"root_cause_driver": "GEMINI_UNAVAILABLE", "diagnosis_summary": "Gemini API unavailable — manual review needed."}
+            for mv in model_versions
+        },
+        "model_outcomes": outcomes,
+        "mcp_snapshot": mcp_snapshot or {},
+    }
+
+
 @traceable(name="gemini_hourly_postmortem")
 def generate_hourly_postmortem_with_gemini(
     tick_features: Dict[str, Any],
     mcp_context: Dict[str, Any],
     model_outcomes: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Generates grounded post-mortem explanation per model using Gemini, failing honestly if unavailable."""
+    """Generates grounded per-model post-mortem explanation using Gemini, failing honestly if offline."""
     model_versions = [str(m.get("model_version", "unknown")) for m in model_outcomes]
     mcp_snapshot = _build_mcp_snapshot(mcp_context)
     api_key = _get_gemini_api_key()
-    if not api_key or os.getenv("PYTEST_CURRENT_TEST"):
-        logger.warning("Gemini postmortem offline or test active: returning UNAVAILABLE.")
+    if not api_key:
         return _unavailable_postmortem("Gemini API key missing or test mode active", model_versions, model_outcomes, mcp_snapshot)
 
     try:
@@ -325,7 +253,8 @@ def generate_hourly_postmortem_with_gemini(
         clean_text = _clean_json_response(raw_resp)
         try:
             parsed = HourlyPostmortemOutput.model_validate_json(clean_text)
-            market_summary, raw_per_model = parsed.market_summary, parsed.per_model
+            market_summary = parsed.market_summary
+            raw_per_model = {k: v.model_dump() for k, v in parsed.per_model.items()}
         except Exception:
             raw_data = json.loads(clean_text, strict=False)
             market_summary = str(raw_data.get("market_summary", "Hourly reconciliation completed."))
@@ -333,28 +262,30 @@ def generate_hourly_postmortem_with_gemini(
 
         per_model = {}
         for mv in model_versions:
-            m_data = raw_per_model.get(mv, {})
-            rc = getattr(m_data, "root_cause_driver", None) or (m_data.get("root_cause_driver") if isinstance(m_data, dict) else None) or "TELEMETRY_DRIVER"
-            ds = getattr(m_data, "diagnosis_summary", None) or (m_data.get("diagnosis_summary") if isinstance(m_data, dict) else None) or "Reconciliation completed."
-            per_model[mv] = {"root_cause_driver": str(rc), "diagnosis_summary": str(ds)}
+            m_data = raw_per_model.get(mv, {}) if isinstance(raw_per_model, dict) else {}
+            per_model[mv] = {
+                "root_cause_driver": str((m_data.get("root_cause_driver") if isinstance(m_data, dict) else None) or "TELEMETRY_DRIVER"),
+                "diagnosis_summary": str((m_data.get("diagnosis_summary") if isinstance(m_data, dict) else None) or "Reconciliation completed."),
+            }
 
         return {
-            "gemini_status": "OK", "model_used": model_used, "error_detail": None,
-            "market_summary": market_summary, "per_model": per_model,
-            "model_outcomes": model_outcomes, "mcp_snapshot": mcp_snapshot,
+            "gemini_status": "OK",
+            "model_used": model_used,
+            "error_detail": None,
+            "market_summary": market_summary,
+            "per_model": per_model,
+            "model_outcomes": model_outcomes,
+            "mcp_snapshot": mcp_snapshot,
         }
     except Exception as exc:
         logger.warning("Hourly postmortem generation failed: %s", exc)
         return _unavailable_postmortem(str(exc), model_versions, model_outcomes, mcp_snapshot)
 
 
-def _generate_fallback_report(
-    current_price: float, pred_price: float, pred_return: float, pred_move_text: str,
-    top_pos_drivers: List[Dict[str, Any]], top_neg_drivers: List[Dict[str, Any]], rag_context: Optional[List[str]] = None,
-) -> MarketAnalystReport:
-    """Honest deterministic fallback when Gemini is offline or unavailable."""
+def _generate_fallback_report(pred_price: float, pred_return: float, pred_move_text: str) -> MarketAnalystReport:
     return MarketAnalystReport(
-        trade_thesis="NEUTRAL", conviction_score=1,
+        trade_thesis="NEUTRAL",
+        conviction_score=1,
         executive_summary="Gemini API unavailable — deterministic ML forecast only.",
         quantitative_driver_analysis=f"Forecast: ${pred_price:,.2f} ({pred_return:+.2%}, {pred_move_text}). Deterministic models only.",
         macro_market_context="No LLM market commentary available (offline fallback).",
@@ -365,28 +296,26 @@ def _generate_fallback_report(
 def generate_market_commentary(
     current_price: float, pred_price: float, pred_return: float, pred_move_text: str,
     top_pos_drivers: List[Dict[str, Any]], top_neg_drivers: List[Dict[str, Any]],
-    market_snapshot: Optional[Dict[str, Any]] = None, rag_docs: Optional[List[str]] = None,
+    rag_docs: Optional[List[str]] = None,
 ) -> MarketAnalystReport:
-    """Generates structured market commentary via Gemini, falling back honestly to rule report if unavailable."""
+    """Generates structured market commentary via Gemini, falling back honestly if offline."""
     api_key = _get_gemini_api_key()
     if not api_key:
-        return _generate_fallback_report(current_price, pred_price, pred_return, pred_move_text, top_pos_drivers, top_neg_drivers, rag_docs)
+        return _generate_fallback_report(pred_price, pred_return, pred_move_text)
 
     try:
-        pos_str = ", ".join([f"{d['feature']}: SHAP={d['shap']:+.4f}" for d in top_pos_drivers]) or "None"
-        neg_str = ", ".join([f"{d['feature']}: SHAP={d['shap']:+.4f}" for d in top_neg_drivers]) or "None"
-        rag_context_str = "\n".join([f"- {d}" for d in (rag_docs or [])])
+        pos_str = ", ".join(f"{d['feature']}: SHAP={d['shap']:+.4f}" for d in top_pos_drivers) or "None"
+        neg_str = ", ".join(f"{d['feature']}: SHAP={d['shap']:+.4f}" for d in top_neg_drivers) or "None"
+        rag_context_str = "\n".join(f"- {d}" for d in (rag_docs or []))
         prompt = (
             f"You are Mudra AI's Lead Quantitative Strategist.\n"
             f"Current BTC: ${current_price:,.2f}, Predicted: ${pred_price:,.2f} ({pred_return:+.4%}, {pred_move_text})\n"
             f"Bullish drivers: {pos_str}\nBearish drivers: {neg_str}\nRAG context: {rag_context_str}\n"
             f"Return strictly JSON matching MarketAnalystReport schema."
         )
-        raw_text = generate_with_gemini_fallback(
-            api_key, prompt, response_mime_type="application/json",
-            timeout_sec=20.0, total_deadline_sec=45.0, caller="commentary",
+        clean_text = _clean_json_response(
+            str(generate_with_gemini_fallback(api_key, prompt, response_mime_type="application/json", timeout_sec=20.0, total_deadline_sec=45.0, caller="commentary"))
         )
-        clean_text = _clean_json_response(raw_text if isinstance(raw_text, str) else raw_text[0])
         try:
             return MarketAnalystReport.model_validate_json(clean_text)
         except Exception:
@@ -398,4 +327,4 @@ def generate_market_commentary(
             return MarketAnalystReport(**report_data)
     except Exception as exc:
         logger.warning("Market commentary generation failed: %s", exc)
-        return _generate_fallback_report(current_price, pred_price, pred_return, pred_move_text, top_pos_drivers, top_neg_drivers, rag_docs)
+        return _generate_fallback_report(pred_price, pred_return, pred_move_text)
