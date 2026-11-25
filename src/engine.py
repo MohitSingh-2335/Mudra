@@ -500,11 +500,13 @@ def fetch_latest_confirmed_candle(
         if len(confirmed) >= 35:
             selected = confirmed[-100:]
             c = selected[-1]
+            # Preserve Binance kline c[9] (taker_buy_base_volume) for Model 2 and Model 3 parity.
             records = [
                 {
                     "timestamp": pd.to_datetime(float(k[0]), unit="ms", utc=True),
                     "open": float(k[1]), "high": float(k[2]), "low": float(k[3]), "close": float(k[4]),
                     "volume": float(k[5]), "number_of_trades": _parse_trade_count(k[8]),
+                    "taker_buy_base_volume": float(k[9]),
                     "taker_buy_ratio": round(float(k[9]) / float(k[5]), 4) if float(k[5]) > 0 else 0.5,
                 }
                 for k in selected
@@ -512,7 +514,8 @@ def fetch_latest_confirmed_candle(
             return {
                 "timestamp": datetime.fromtimestamp(float(c[0]) / 1000.0, tz=timezone.utc),
                 "open": float(c[1]), "high": float(c[2]), "low": float(c[3]), "close": float(c[4]),
-                "volume": float(c[5]), "taker_buy_ratio": records[-1]["taker_buy_ratio"],
+                "volume": float(c[5]), "taker_buy_base_volume": float(c[9]),
+                "taker_buy_ratio": records[-1]["taker_buy_ratio"],
                 "number_of_trades": _parse_trade_count(c[8]), "candles": records,
                 "feed_name": "binance_vision", "feed_endpoint": "/api/v3/klines",
                 "feed_latency_ms": b_lat, "feed_status": 200, "feed_error": None,
@@ -536,14 +539,16 @@ def fetch_latest_confirmed_candle(
                 {
                     "timestamp": pd.to_datetime(float(k[0]), unit="s", utc=True),
                     "low": float(k[1]), "high": float(k[2]), "open": float(k[3]), "close": float(k[4]),
-                    "volume": float(k[5]), "taker_buy_ratio": 0.50, "number_of_trades": None,
+                    "volume": float(k[5]), "taker_buy_base_volume": round(float(k[5]) * 0.50, 4),
+                    "taker_buy_ratio": 0.50, "number_of_trades": None,
                 }
                 for k in selected
             ]
             return {
                 "timestamp": datetime.fromtimestamp(float(c[0]), tz=timezone.utc),
                 "open": float(c[3]), "high": float(c[2]), "low": float(c[1]), "close": float(c[4]),
-                "volume": float(c[5]), "taker_buy_ratio": 0.50, "number_of_trades": None, "candles": records,
+                "volume": float(c[5]), "taker_buy_base_volume": round(float(c[5]) * 0.50, 4),
+                "taker_buy_ratio": 0.50, "number_of_trades": None, "candles": records,
                 "feed_name": "binance_vision", "feed_endpoint": "/api/v3/klines",
                 "feed_latency_ms": b_lat, "feed_status": 503, "feed_error": "BINANCE_UNAVAILABLE_FALLBACK_TO_COINBASE",
             }
@@ -1212,12 +1217,17 @@ def get_reconciliation_summary(session: Session, limit: int = 168, model_version
         ic = float(np.nan_to_num(np.corrcoef(pred_rets, act_rets)[0, 1], nan=0.0))
 
     win_rate = round((wins / total) * 100.0, 2)
+    # Handle both Reconciliation (has is_black_swan) and ModelPrediction (uses BLACK_SWAN_OUTLIER tag).
+    black_swan_count = sum(
+        1 for r in records
+        if bool(getattr(r, "is_black_swan", r.error_attribution_tag == "BLACK_SWAN_OUTLIER"))
+    )
     return {
         "total_evaluated": total, "total_reconciled": total, "total_lifetime_evaluated": total_lifetime,
         "win_rate_pct": win_rate, "directional_accuracy_pct": win_rate, "mae_usd": round(mae, 2), "mape_pct": round(mape, 3),
         "information_coefficient": round(ic, 4), "information_coefficient_ic": round(ic, 4),
-        "black_swans_filtered": sum(1 for r in records if r.is_black_swan),
-        "black_swan_count": sum(1 for r in records if r.is_black_swan),
+        "black_swans_filtered": black_swan_count,
+        "black_swan_count": black_swan_count,
         "accurate_count": sum(1 for r in records if r.error_attribution_tag == "ACCURATE"),
         "tag_breakdown": dict(Counter(r.error_attribution_tag for r in records if r.error_attribution_tag)),
         "model_version": model_version if (model_version and model_version != "All Models") else None,
