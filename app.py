@@ -145,10 +145,10 @@ from config import (
 )
 from src.agents import fetch_historical_candles, run_trading_graph
 from src.database import (
-    get_api_telemetry_summary, get_db, get_latest_council_audit, get_latest_market_ticks,
-    get_portfolio_history, get_portfolio_kpis,
-    get_reconciliation_history, get_reconciliation_kpis,
-    test_connection,
+    get_api_telemetry_breakdown, get_api_telemetry_summary, get_db, get_latest_council_audit,
+    get_latest_hourly_postmortems, get_latest_market_ticks, get_model_reconciled_counts,
+    get_portfolio_history, get_portfolio_kpis, get_reconciliation_history,
+    get_reconciliation_kpis, test_connection,
 )
 from src.engine import sync_hourly_quant_cycle
 from src.model_loader import load_verified_model
@@ -927,10 +927,10 @@ def get_model_card_title(model_version: str, spec: Dict[str, Any]) -> str:
 
 
 def get_model_benchmark_caption(model_version: str, spec: Dict[str, Any]) -> str:
-    # returns holdout benchmark caption line for a given model
+    # returns holdout benchmark caption line matching each model manifest schema
     ver = str(model_version).strip()
     if ver in ("xgb_onnx_v1.0.0", "xgb_v1"):
-        return "Benchmark: **53.26%** Accuracy · 0.6914 Log-Loss · 39 Features"
+        return "Benchmark: **53.26%** Accuracy · 0.6914 Log-Loss · 39 Classifier / 26 Regressor Features"
     if ver == "xgb_v2.0.0":
         return "Benchmark: **52.07%** Accuracy · 0.6926 Log-Loss · 36 Stationary Features"
     if ver == "lgbm_v3.0.0":
@@ -989,6 +989,9 @@ def build_council_scenario_payload(scenario_selected: str, current_price: float,
     direction = "SIDEWAYS" if not clears else ("UP" if expected_ret >= 0 else "DOWN")
     m_data = {"close": current_price, "high": current_price * (1 + vol_spread / 2), "low": current_price * (1 - vol_spread / 2), "volume": volume, "taker_buy_ratio": taker}
     t_data = {"volatility_spread": vol_spread, "volatility_range_pct": round(vol_spread * 100, 3), "order_flow_bias": order_bias, "rsi_estimate": rsi}
+    # Merge full engineered features for live scenario runs so LangGraph computes real multi-model consensus.
+    if scenario_selected == "live" and isinstance(live_forecast, dict) and isinstance(live_forecast.get("features"), dict):
+        t_data = {**live_forecast["features"], **t_data}
     f_data = {"expected_return_pct": expected_ret, "predicted_dollar_move": round(current_price * (expected_ret / 100.0), 2), "clears_hurdle": clears, "confidence": confidence, "direction": direction}
     return m_data, t_data, f_data
 
@@ -1023,8 +1026,8 @@ def build_model_pedigree_markdown() -> str:
     return (
         "| Model Version | Architecture | Status | Features | Accuracy | Log-Loss | Friction Benchmark |\n"
         "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
-        f"| **Model 1** (`xgb_onnx_v1.0.0`) | XGBoost Regressor + Classifier | Active Production | 42 (Raw + engineered) | 53.26% | 0.6914 | `0.30% (Historical)` benchmark; canonical `{ROUND_TRIP_FRICTION_PCT:.2f}%` (`{TOTAL_FRICTION_PER_SIDE_PCT:.2f}%`/side) |\n"
-        f"| **Model 2** (`xgb_v2.0.0`) | XGBoost Stationary | Live Shadow | 29 (Leak-free stationary) | 52.07% | 0.6926 | Evaluated under canonical `{ROUND_TRIP_FRICTION_PCT:.2f}%` hurdle |\n"
+        f"| **Model 1** (`xgb_onnx_v1.0.0`) | XGBoost Regressor + Classifier | Active Production | 39 Classifier / 26 Regressor | 53.26% | 0.6914 | `0.30% (Historical)` benchmark; canonical `{ROUND_TRIP_FRICTION_PCT:.2f}%` (`{TOTAL_FRICTION_PER_SIDE_PCT:.2f}%`/side) |\n"
+        f"| **Model 2** (`xgb_v2.0.0`) | XGBoost Stationary | Live Shadow | 36 (Leak-free stationary) | 52.07% | 0.6926 | Evaluated under canonical `{ROUND_TRIP_FRICTION_PCT:.2f}%` hurdle |\n"
         f"| **Model 3** (`lgbm_v3.0.0`) | LightGBM GBDT | Shadow Candidate | 29 (Stationary + Platt) | 52.89% | 0.6913 | Evaluated under canonical `{ROUND_TRIP_FRICTION_PCT:.2f}%` hurdle |"
     )
 
@@ -1235,7 +1238,8 @@ def fetch_cloud_database_state(current_price: Optional[float]):
         "db_ok": False, "db_ver": "Offline", "db_lat": 0.0, "db_error": "Database unavailable",
         "ticks_df": pd.DataFrame(), "rec_df": pd.DataFrame(), "rec_kpis": {}, "latest_audit": None,
         "port_df": pd.DataFrame(), "port_kpis": {},
-        "api_telemetry": {"total_calls": 0, "success_rate_pct": 100.0, "avg_latency_ms": 0.0},
+        "api_telemetry": {"total_calls": 0, "success_rate_pct": None, "avg_latency_ms": 0.0},
+        "model_counts": {}, "postmortems": [], "telemetry_breakdown": [],
     }
     try:
         db_ok, db_ver, db_lat = test_connection()
@@ -1244,16 +1248,53 @@ def fetch_cloud_database_state(current_price: Optional[float]):
         return {
             "db_ok": True, "db_ver": db_ver, "db_lat": db_lat, "db_error": None,
             "ticks_df": get_latest_market_ticks(limit=500),
-            "rec_df": get_reconciliation_history(limit=100),
+            "rec_df": get_reconciliation_history(limit=300),
             "rec_kpis": get_reconciliation_kpis(lookback_hours=168),
             "latest_audit": get_latest_council_audit(),
             "port_df": get_portfolio_history(limit=500),
             "port_kpis": get_portfolio_kpis(current_price=float(current_price)) if (current_price is not None and float(current_price) > 0) else {},
             "api_telemetry": get_api_telemetry_summary(hours=24),
+            "model_counts": get_model_reconciled_counts(),
+            "postmortems": get_latest_hourly_postmortems(limit=3),
+            "telemetry_breakdown": get_api_telemetry_breakdown(hours=24),
         }
     except Exception as exc:
         fallback["db_error"] = str(exc)
         return fallback
+
+
+@st.cache_data(ttl=60)
+def fetch_model_reconciliation_kpis(model_version: str) -> Dict[str, Any]:
+    # Fetches 168h and lifetime KPIs filtered to a single registered model version.
+    return get_reconciliation_kpis(lookback_hours=168, model_version=model_version)
+
+
+@st.cache_data(ttl=300)
+def fetch_cached_mcp_context(limit: int = 3) -> Dict[str, Any]:
+    # Caches live MCP derivatives and news context across Streamlit reruns for 5 minutes.
+    from src.agents import fetch_mcp_context
+    return fetch_mcp_context(limit=limit)
+
+
+@st.cache_data(ttl=300)
+def fetch_cached_rag_proof(query_text: str, n_results: int = 3) -> Dict[str, Any]:
+    # Caches ChromaDB collection stats and semantic error-memory matches for 5 minutes.
+    from src.agents import get_rag_collection, get_rag_embedding_mode, query_similar_error_memories
+    rag_col = get_rag_collection()
+    if not rag_col:
+        return {"available": False}
+    total_docs = rag_col.count()
+    all_ids = rag_col.get().get("ids", [])
+    neon_docs = len([i for i in all_ids if str(i).startswith("neon_pred_")])
+    retrieved = query_similar_error_memories(query_text, n_results=n_results)
+    return {
+        "available": True,
+        "total_docs": total_docs,
+        "neon_docs": neon_docs,
+        "rule_docs": max(0, total_docs - neon_docs),
+        "retrieved": retrieved,
+        "embedding_mode": get_rag_embedding_mode(),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1304,12 +1345,22 @@ elif not live_market_df.empty:
 else:
     st.sidebar.error("Market Feed: Offline")
 
-# 24h api telemetry health badge in sidebar
+# 24h api telemetry health badge and per-service breakdown in sidebar
 api_tel_summary = db_state.get("api_telemetry", {})
-if api_tel_summary.get("total_calls", 0) > 0:
-    st.sidebar.caption(f"24h API Health: {api_tel_summary['success_rate_pct']:.1f}% OK · Avg {api_tel_summary['avg_latency_ms']:.0f}ms")
-else:
+tel_rate = api_tel_summary.get("success_rate_pct")
+if api_tel_summary.get("total_calls", 0) > 0 and tel_rate is not None:
+    st.sidebar.caption(f"24h API Health: {tel_rate:.1f}% OK · Avg {api_tel_summary['avg_latency_ms']:.0f}ms")
+elif db_state.get("db_ok"):
     st.sidebar.caption("24h API Health: Collecting...")
+else:
+    st.sidebar.caption("24h API Health: Unavailable")
+
+with st.sidebar.expander("24h Service & Quota Telemetry", expanded=False):
+    tel_rows = db_state.get("telemetry_breakdown", [])
+    if tel_rows:
+        st.dataframe(pd.DataFrame(tel_rows), use_container_width=True, hide_index=True)
+    else:
+        st.caption("No 24h telemetry records available.")
 
 st.sidebar.markdown(
     """
@@ -1405,9 +1456,13 @@ with st.container(border=True):
             else:
                 role = "Registered Model"
 
-            m_eval_count = 0
-            if not rec_df_cache.empty and "model_version" in rec_df_cache.columns:
+            model_counts = db_state.get("model_counts", {})
+            if m_ver in model_counts:
+                m_eval_count = int(model_counts[m_ver])
+            elif not rec_df_cache.empty and "model_version" in rec_df_cache.columns:
                 m_eval_count = int((rec_df_cache["model_version"] == m_ver).sum())
+            else:
+                m_eval_count = 0
             if m_ver in ("xgb_onnx_v1.0.0", "xgb_v1") and m_eval_count == 0:
                 m_eval_count = len(rec_df_cache)
 
@@ -1451,7 +1506,7 @@ with st.container(border=True):
                 )
             else:
                 st.metric("Model 1 (Active XGBoost v1)", "Computing...", "Awaiting Candle", help="Model 1 forecast is calculating.")
-            st.caption("Benchmark: **53.26%** Accuracy · 0.6914 Log-Loss · 39 Features")
+            st.caption("Benchmark: **53.26%** Accuracy · 0.6914 Log-Loss · 39 Classifier / 26 Regressor Features")
 
 st.divider()
 
@@ -1507,7 +1562,7 @@ with tab_models:
             st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
             st.subheader("TreeSHAP Feature Importance & Interpretability")
             st.image(str(shap_path), use_column_width=True)
-            st.caption("Top TreeSHAP features driving model direction: taker_buy_ratio (aggressive market orders), volatility range, and short-term momentum.")
+            st.caption("Static Holdout TreeSHAP Summary (Offline Test Split) — live hourly per-row TreeSHAP drivers are displayed in Tab 2 under Hourly Post-Mortems.")
 
         # Stored Feature Snapshot Viewer from Neon market_ticks.features
         ticks_df = db_state.get("ticks_df", pd.DataFrame())
@@ -1582,12 +1637,38 @@ with tab_ground_truth:
         rec_kpis = db_state.get("rec_kpis", {})
 
         if not rec_df.empty:
-            total_lifetime = rec_kpis.get("total_lifetime_evaluated") or len(rec_df)
-            rolling_eval = rec_kpis.get("total_reconciled") or min(168, total_lifetime)
-            hit_rate = rec_kpis.get("directional_accuracy_pct") or rec_kpis.get("win_rate_pct")
-            mae = rec_kpis.get("mae_usd") if rec_kpis.get("mae_usd") is not None else (
-                float(rec_df["absolute_error_usd"].mean())
-                if ("absolute_error_usd" in rec_df.columns and not rec_df["absolute_error_usd"].isna().all())
+            table_df = rec_df.copy()
+            table_df["Time (UTC)"] = pd.to_datetime(table_df["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
+            table_df["Model"] = table_df["model_version"].fillna("xgb_onnx_v1.0.0").apply(format_model_display_name)
+            display_to_ver = {
+                format_model_display_name(v): str(v)
+                for v in rec_df["model_version"].dropna().unique()
+            }
+
+            mf1, mf2 = st.columns([3, 1])
+            with mf1:
+                st.caption("Delayed T+1h ground-truth verification (Latest Hours): Compares what each AI model predicted against the real Bitcoin closing price 1 hour later.")
+            with mf2:
+                model_options = ["All Models"] + sorted(table_df["Model"].dropna().unique().tolist())
+                selected_model = st.selectbox("Filter Table by Model:", model_options, index=0)
+
+            sel_raw_ver = display_to_ver.get(selected_model) if selected_model != "All Models" else None
+            active_rec_kpis = fetch_model_reconciliation_kpis(sel_raw_ver) if sel_raw_ver else rec_kpis
+            if active_rec_kpis.get("query_failed"):
+                active_rec_kpis = rec_kpis
+
+            if selected_model != "All Models":
+                table_df = table_df[table_df["Model"] == selected_model]
+                scatter_df = rec_df[rec_df["model_version"] == sel_raw_ver] if sel_raw_ver else rec_df
+            else:
+                scatter_df = rec_df
+
+            total_lifetime = active_rec_kpis.get("total_lifetime_evaluated") or len(table_df)
+            rolling_eval = active_rec_kpis.get("total_reconciled") or min(168, total_lifetime)
+            hit_rate = active_rec_kpis.get("directional_accuracy_pct") if active_rec_kpis.get("directional_accuracy_pct") is not None else active_rec_kpis.get("win_rate_pct")
+            mae = active_rec_kpis.get("mae_usd") if active_rec_kpis.get("mae_usd") is not None else (
+                float(table_df["absolute_error_usd"].mean())
+                if ("absolute_error_usd" in table_df.columns and not table_df["absolute_error_usd"].isna().all())
                 else None
             )
 
@@ -1618,21 +1699,6 @@ with tab_ground_truth:
 
             st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
 
-            # Format Display Table
-            table_df = rec_df.copy()
-            table_df["Time (UTC)"] = pd.to_datetime(table_df["timestamp"]).dt.strftime("%Y-%m-%d %H:%M UTC")
-            table_df["Model"] = table_df["model_version"].fillna("xgb_onnx_v1.0.0").apply(format_model_display_name)
-
-            mf1, mf2 = st.columns([3, 1])
-            with mf1:
-                st.caption("Delayed T+1h ground-truth verification (Latest 24 Hours): Compares what each AI model predicted against the real Bitcoin closing price 1 hour later.")
-            with mf2:
-                model_options = ["All Models"] + sorted(table_df["Model"].dropna().unique().tolist())
-                selected_model = st.selectbox("Filter Table by Model:", model_options, index=0)
-
-            if selected_model != "All Models":
-                table_df = table_df[table_df["Model"] == selected_model]
-
             table_df["Start Price"] = table_df.get("start_price", table_df.get("close", table_df["predicted_price"])).apply(lambda x: f"${float(x):,.2f}" if pd.notna(x) and float(x or 0) > 0 else "—")
             table_df["Pred Target"] = table_df["predicted_price"].apply(lambda x: f"${float(x or 0):,.2f}")
             table_df["Actual (T+1h)"] = table_df["actual_price_at_t_plus_1"].apply(lambda x: f"${float(x or 0):,.2f}")
@@ -1650,7 +1716,42 @@ with tab_ground_truth:
 
             st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
             with st.expander("View Forecast Target vs. Realized Market Scatter Plot", expanded=True):
-                st.plotly_chart(create_reconciliation_scatter(rec_df), use_container_width=True)
+                st.plotly_chart(create_reconciliation_scatter(scatter_df), use_container_width=True)
+
+            with st.expander("Latest Gemini Hourly Post-Mortems & TreeSHAP Root-Cause Drivers", expanded=False):
+                postmortems = db_state.get("postmortems", [])
+                if postmortems:
+                    for pm in postmortems:
+                        analysis = pm.get("gemini_full_analysis") or {}
+                        m_used = analysis.get("model_used") or "unavailable"
+                        st.markdown(
+                            f"**Tick #{pm.get('tick_id')}** (`{pm.get('tick_timestamp', '')[:19]}`) · "
+                            f"Status: `{pm.get('gemini_status', 'UNAVAILABLE')}` · LLM: `{m_used}`"
+                        )
+                        if analysis.get("market_summary"):
+                            st.caption(str(analysis["market_summary"]))
+                        if pm.get("news_headlines"):
+                            st.caption("Headlines: " + " | ".join(str(h) for h in pm["news_headlines"][:3]))
+                        per_model = analysis.get("per_model") or {}
+                        outcomes = analysis.get("model_outcomes") or []
+                        if outcomes:
+                            pm_rows = []
+                            for oc in outcomes:
+                                mv = str(oc.get("model_version", ""))
+                                diag_info = per_model.get(mv, {})
+                                drivers = oc.get("top_shap_drivers") or []
+                                drv_str = ", ".join(f"{d.get('feature')} ({float(d.get('shap_impact', 0.0)):+.3f})" for d in drivers[:3]) or "N/A"
+                                pm_rows.append({
+                                    "Model": mv,
+                                    "Root Cause": diag_info.get("root_cause_driver", "N/A"),
+                                    "Top TreeSHAP Drivers": drv_str,
+                                    "Gemini Diagnosis": diag_info.get("diagnosis_summary", "N/A"),
+                                })
+                            st.dataframe(pd.DataFrame(pm_rows), use_container_width=True, hide_index=True)
+                        elif pm.get("error_detail"):
+                            st.caption(f"Detail: {pm['error_detail']}")
+                else:
+                    st.info("No hourly post-mortem records found yet.")
         else:
             if not is_neon_connected:
                 st.warning("Streamlit Cloud is currently reading from local fallback storage (0 records). To load all continuous ground-truth predictions from Neon PostgreSQL, add DATABASE_URL to your Streamlit Cloud Secrets.")
@@ -1672,44 +1773,36 @@ with tab_portfolio:
 
         port_df = db_state.get("port_df", pd.DataFrame())
         port_kpis = db_state.get("port_kpis", {})
-
-        total_equity = float(port_kpis.get("total_equity_usd") or 10000.0)
-        realized_pnl = float(port_kpis.get("realized_pnl_usd") or 0.0)
-        cash_balance = float(port_kpis.get("cash_balance") or 10000.0)
-        btc_balance = float(port_kpis.get("btc_balance") or 0.0)
-        pnl_diff = total_equity - INITIAL_CAPITAL_USD
-        pnl_pct = (pnl_diff / INITIAL_CAPITAL_USD) * 100.0
+        has_port_kpis = bool(db_state.get("db_ok")) and isinstance(port_kpis, dict) and ("total_equity_usd" in port_kpis)
 
         p1, p2, p3, p4 = st.columns(4)
-        with p1:
-            st.metric(
-                "Total Account Equity",
-                f"${total_equity:,.2f}",
-                f"{format_signed_usd(pnl_diff)} ({pnl_pct:+.2f}%)",
-                help="Current total portfolio value (Liquid Cash + Mark-to-Market Bitcoin)."
-            )
-        with p2:
-            st.metric(
-                "Net Realized PnL",
-                f"{format_signed_usd(realized_pnl)}",
-                f"After {ROUND_TRIP_FRICTION_PCT:.2f}% Fee Friction",
-                help="Net profit or loss after subtracting exchange fees and execution slippage."
-            )
-        with p3:
-            st.metric(
-                "Available Cash",
-                f"${cash_balance:,.2f}",
-                "USDT Liquid Reserve",
-                help="Liquid virtual capital available to open new trading positions."
-            )
-        with p4:
-            btc_val = btc_balance * (current_price or 0.0)
-            st.metric(
-                "Bitcoin Held",
-                f"{btc_balance:.4f} BTC",
-                f"${btc_val:,.2f} Value",
-                help="Current spot Bitcoin position in the simulated portfolio."
-            )
+        if has_port_kpis:
+            total_equity = float(port_kpis["total_equity_usd"])
+            realized_pnl = float(port_kpis.get("realized_pnl_usd") or 0.0)
+            cash_balance = float(port_kpis.get("cash_balance") or 0.0)
+            btc_balance = float(port_kpis.get("btc_balance") or 0.0)
+            pnl_diff = total_equity - INITIAL_CAPITAL_USD
+            pnl_pct = (pnl_diff / INITIAL_CAPITAL_USD) * 100.0
+            with p1:
+                st.metric("Total Account Equity", f"${total_equity:,.2f}", f"{format_signed_usd(pnl_diff)} ({pnl_pct:+.2f}%)", help="Current total portfolio value (Liquid Cash + Mark-to-Market Bitcoin).")
+            with p2:
+                st.metric("Net Realized PnL", f"{format_signed_usd(realized_pnl)}", f"After {ROUND_TRIP_FRICTION_PCT:.2f}% Fee Friction", help="Net profit or loss after subtracting exchange fees and execution slippage.")
+            with p3:
+                st.metric("Available Cash", f"${cash_balance:,.2f}", "USDT Liquid Reserve", help="Liquid virtual capital available to open new trading positions.")
+            with p4:
+                btc_val = btc_balance * (current_price or 0.0)
+                st.metric("Bitcoin Held", f"{btc_balance:.4f} BTC", f"${btc_val:,.2f} Value", help="Current spot Bitcoin position in the simulated portfolio.")
+            if int(port_kpis.get("total_trades") or 0) == 0:
+                st.caption(f"0 executed trades recorded: live ML predicted returns have remained below the {MIN_HURDLE_PCT:.2f}% round-trip friction hurdle, keeping 100% of capital in cash.")
+        else:
+            for col, title, hlp in [
+                (p1, "Total Account Equity", "Current total portfolio value (Liquid Cash + Mark-to-Market Bitcoin)."),
+                (p2, "Net Realized PnL", "Net profit or loss after subtracting exchange fees and execution slippage."),
+                (p3, "Available Cash", "Liquid virtual capital available to open new trading positions."),
+                (p4, "Bitcoin Held", "Current spot Bitcoin position in the simulated portfolio."),
+            ]:
+                with col:
+                    st.metric(title, "Unavailable", "Awaiting DB data", help=hlp)
 
         if not port_df.empty:
             st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
@@ -1769,46 +1862,57 @@ with tab_agent:
             "Machine learning models predict price moves, while independent agents evaluate market risk, fee hurdles, and past error memory before executing."
         )
 
-        # Live MCP Derivatives Pulse and Model Consensus cards
+        # Live MCP Derivatives Pulse and Model Consensus cards (cached 5m; honest unavailable fallback)
         try:
-            from src.agents import fetch_mcp_context, get_multi_model_consensus
-            mcp_ctx = fetch_mcp_context(limit=3)
+            mcp_ctx = fetch_cached_mcp_context(limit=3)
         except Exception:
-            mcp_ctx = {"funding_rate_8h_pct": 0.01, "derivatives_regime": "Neutral Funding", "futures_basis_usd": 0.0, "recent_error_memories": []}
+            mcp_ctx = {"funding_rate_8h_pct": None, "derivatives_regime": "Unavailable", "futures_basis_usd": None, "derivatives_source": "none", "recent_error_memories": []}
 
+        from src.agents import get_multi_model_consensus
         mp1, mp2, mp3 = st.columns(3)
         fr_val = mcp_ctx.get("funding_rate_8h_pct")
-        fr_text = f"{fr_val:+.4f}%" if fr_val is not None else "N/A"
+        fr_text = f"{fr_val:+.4f}%" if fr_val is not None else "Unavailable"
         basis_val = mcp_ctx.get("futures_basis_usd")
-        basis_text = f"${basis_val:+,.2f}" if basis_val is not None else "N/A"
+        basis_text = f"${basis_val:+,.2f}" if basis_val is not None else "Unavailable"
+        d_src = str(mcp_ctx.get("derivatives_source") or "").lower()
+        basis_sub = "Deribit Perpetual vs. Spot" if d_src == "deribit" else ("Kraken Futures vs. Spot" if d_src == "kraken_futures" else "Deribit / Kraken Futures vs. Spot")
         with mp1:
-            st.metric("Derivatives Funding Rate (8h)", fr_text, mcp_ctx.get("derivatives_regime", "Unavailable"))
+            st.metric("Derivatives Funding Rate (8h)", fr_text, mcp_ctx.get("derivatives_regime") or "Unavailable")
         with mp2:
-            st.metric("Futures Basis Gap", basis_text, "Binance Futures vs. Spot")
+            st.metric("Futures Basis Gap", basis_text, basis_sub)
         with mp3:
             if forecast_result:
                 try:
                     mc_summary = get_multi_model_consensus(forecast_result.get("features", {}))
                     st.metric("Multi-Model Consensus", f"{mc_summary.get('up_count', 0)}/{mc_summary.get('total', 0)} Bullish", mc_summary.get("summary", "Consensus Active"))
                 except Exception:
-                    st.metric("Multi-Model Consensus", "Consensus Active", "Dual Models")
+                    st.metric("Multi-Model Consensus", "Unavailable", "Consensus Offline")
             else:
                 st.metric("Multi-Model Consensus", "Awaiting Data", "Standby")
 
         st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
 
-        # Live Episodic RAG Memory Proof Panel
+        # Live Episodic RAG Memory Proof Panel (cached 5m using local MiniLM embeddings)
         try:
-            from src.agents import get_rag_collection, query_similar_error_memories, get_rag_embedding_mode
-            rag_col = get_rag_collection()
-            if rag_col:
-                total_docs = rag_col.count()
-                all_ids = rag_col.get().get("ids", [])
-                neon_docs = len([i for i in all_ids if str(i).startswith("neon_pred_")])
-                rule_docs = total_docs - neon_docs
-                retrieved_memories = query_similar_error_memories("market volatility and false breakout", n_results=3)
-                embedding_mode = get_rag_embedding_mode()
-                mode_color = "#3FB950" if embedding_mode == "gemini-embedding-001" else "#D29922"
+            vol_sp = float((forecast_result or {}).get("spread_pct") or 1.0)
+            tkr = float((forecast_result or {}).get("taker") or 0.5)
+            if vol_sp > 3.8:
+                rag_query = "BTCUSDT extreme volatility liquidation cascade false breakout"
+            elif tkr >= 0.52:
+                rag_query = "BTCUSDT bullish taker buying momentum false breakout risk"
+            elif tkr < 0.48:
+                rag_query = "BTCUSDT bearish distribution selling pressure mean reversion"
+            else:
+                rag_query = "BTCUSDT sideways chop fee hurdle false breakout"
+
+            rag_proof = fetch_cached_rag_proof(rag_query, n_results=3)
+            if rag_proof.get("available"):
+                total_docs = int(rag_proof.get("total_docs", 0))
+                neon_docs = int(rag_proof.get("neon_docs", 0))
+                rule_docs = int(rag_proof.get("rule_docs", 0))
+                retrieved_memories = rag_proof.get("retrieved", [])
+                embedding_mode = str(rag_proof.get("embedding_mode", "local_minilm"))
+                mode_color = "#3FB950" if embedding_mode in ("local_minilm", "gemini-embedding-001") else "#D29922"
 
                 with st.container(border=True):
                     st.markdown(
@@ -1818,13 +1922,13 @@ with tab_agent:
                             <span style="font-size: 0.72rem; font-weight: 600; color: {mode_color}; background: rgba(56, 139, 253, 0.1); border: 1px solid {mode_color}; padding: 2px 8px; border-radius: 4px;">Provider: {embedding_mode}</span>
                         </div>
                         <div style="font-size: 0.8rem; color: #8B949E; margin-bottom: 8px;">
-                            Persistent cloud-backed episodic memory: <strong style="color: #F0F6FC;">{total_docs} total vectors indexed</strong> 
+                            ChromaDB episodic memory: <strong style="color: #F0F6FC;">{total_docs} total vectors indexed</strong> 
                             (<strong style="color: #3FB950;">{neon_docs} hydrated from Neon PostgreSQL</strong> · {rule_docs} quantitative core rules).
                         </div>
                         """,
                         unsafe_allow_html=True,
                     )
-                    st.caption("Top-3 Retrieved Historical Misprediction / Outcome Memories for Current Market Context:")
+                    st.caption(f"Top-3 Retrieved Historical Outcomes for Active Regime (`{rag_query}`):")
                     if retrieved_memories:
                         for m in retrieved_memories:
                             doc_text = html.escape(str(m.get("document", "")))
@@ -1837,25 +1941,40 @@ with tab_agent:
         st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
 
         if current_price is not None and forecast_result is not None:
+            live_council = st.session_state.get("council_state")
             audit_data = db_state.get("latest_audit") or {}
-            last_thesis = audit_data.get("thesis") or "Awaiting deliberation."
-            last_action = audit_data.get("final_decision") or "HOLD"
-            last_verdict = audit_data.get("risk_verdict") or "APPROVED"
-            conviction = audit_data.get("strategist_conviction") or 5
+            if isinstance(live_council, dict) and live_council:
+                source_badge = "LIVE ON-DEMAND GEMINI COUNCIL" if not live_council.get("circuit_breaker_active") else "LIVE ON-DEMAND RULE COUNCIL (GEMINI FALLBACK)"
+                last_thesis = str(live_council.get("thesis") or live_council.get("strategist_thesis") or "Deliberation complete.")
+                last_action = str(live_council.get("final_decision") or "HOLD")
+                last_verdict = str(live_council.get("risk_verdict") or "APPROVED")
+                conviction = int(live_council.get("strategist_conviction") or 5)
+                extra_detail = f"Risk Critic: {live_council.get('risk_critic_critique', '')} | Consensus: {live_council.get('model_consensus', 'N/A')}"
+            else:
+                source_badge = "AUTOMATED HOURLY RULE ENGINE (use_llm=False)"
+                last_thesis = str(audit_data.get("thesis") or "Awaiting deliberation.")
+                last_action = str(audit_data.get("final_decision") or "HOLD")
+                last_verdict = str(audit_data.get("risk_verdict") or "APPROVED")
+                conviction = int(audit_data.get("strategist_conviction") or 5)
+                extra_detail = ""
 
             r_col1, r_col2 = st.columns([2.5, 1])
             with r_col1:
                 st.markdown(
                     f"""
                     <div class="deliberation-card">
+                        <div style="font-size: 0.72rem; font-weight: 700; color: #58A6FF; letter-spacing: 0.05em; margin-bottom: 4px;">
+                            {html.escape(source_badge)}
+                        </div>
                         <div style="font-size: 0.95rem; font-weight: 700; color: #F0F6FC; margin-bottom: 6px;">
-                            Multi-Agent Decision: <span style="color: #58A6FF;">{last_action}</span> &nbsp;|&nbsp; 
-                            Risk Gate: <span style="color: {'#00C087' if last_verdict == 'APPROVED' else '#FF3B69'};">{last_verdict}</span> &nbsp;|&nbsp; 
+                            Multi-Agent Decision: <span style="color: #58A6FF;">{html.escape(last_action)}</span> &nbsp;|&nbsp; 
+                            Risk Gate: <span style="color: {'#00C087' if last_verdict == 'APPROVED' else '#FF3B69'};">{html.escape(last_verdict)}</span> &nbsp;|&nbsp; 
                             Model Conviction: <span style="color: #F7931A;">{conviction}/10</span>
                         </div>
                         <div style="font-size: 0.85rem; color: #C9D1D9; line-height: 1.45; margin-bottom: 8px;">
-                            <strong>Council Reasoning:</strong> {last_thesis}
+                            <strong>Council Reasoning:</strong> {html.escape(last_thesis)}
                         </div>
+                        {f'<div style="font-size: 0.78rem; color: #8B949E;">{html.escape(extra_detail)}</div>' if extra_detail else ''}
                     </div>
                     """,
                     unsafe_allow_html=True,
@@ -1869,6 +1988,10 @@ with tab_agent:
                         res = run_trading_graph("BTCUSDT", current_price, m_data, t_data, f_data, use_llm=True)
                         st.session_state["council_state"] = res
                         st.success("Council Deliberation Complete!")
+                        st.rerun()
+                if isinstance(live_council, dict) and live_council:
+                    if st.button("Reset to Latest Hourly Audit", use_container_width=True):
+                        st.session_state.pop("council_state", None)
                         st.rerun()
 
             st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
